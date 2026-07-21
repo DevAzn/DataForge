@@ -47,12 +47,20 @@ Then run `npm run dev` again.
 
 ## Releases (end users — no Node required)
 
-Installers are **not** stored in the git repo. They are published as [GitHub Releases](https://github.com/DevAzn/DataForge/releases) by CI when you push a version tag.
-
 | Artifact | Purpose |
 |----------|---------|
 | **DataForge Setup x.y.z.exe** | NSIS installer |
 | **DataForge x.y.z.exe** | Portable (no install) |
+
+### Temporary: installers in the repo
+
+If your org blocks or flags [GitHub Release](https://github.com/DevAzn/DataForge/releases) downloads, use the **`installers/`** folder in this repository (clone or download those files from the code browser). See [`installers/README.md`](installers/README.md).
+
+CI still also publishes to **GitHub Releases** on each `v*` tag. Prefer Releases long-term; keep `installers/` only while policy requires it.
+
+### GitHub Releases (preferred long-term)
+
+Installers are published as [GitHub Releases](https://github.com/DevAzn/DataForge/releases) by CI when you push a version tag.
 
 ### Publish a new version
 
