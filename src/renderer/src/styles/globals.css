@@ -1,0 +1,141 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Theme tokens — custom colors (Phase 7) bind here */
+:root,
+[data-theme='light'] {
+  --color-bg: #f4f6f8;
+  --color-surface: #ffffff;
+  --color-surface-2: #eef1f5;
+  --color-border: #d0d7de;
+  --color-text: #1f2328;
+  --color-muted: #656d76;
+  --color-accent: #2563eb;
+  --color-accent-fg: #ffffff;
+  --color-danger: #dc2626;
+  --color-success: #16a34a;
+  --color-primary-flag: #ca8a04;
+  --color-relationship: #7c3aed;
+}
+
+[data-theme='dark'] {
+  --color-bg: #0f1419;
+  --color-surface: #1a2332;
+  --color-surface-2: #243044;
+  --color-border: #2d3a4d;
+  --color-text: #e7ecf3;
+  --color-muted: #8b9bb4;
+  --color-accent: #3b82f6;
+  --color-accent-fg: #ffffff;
+  --color-danger: #f87171;
+  --color-success: #4ade80;
+  --color-primary-flag: #fbbf24;
+  --color-relationship: #a78bfa;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: theme('fontFamily.sans');
+  background: var(--color-bg);
+  color: var(--color-text);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbars */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-muted);
+}
+
+@layer components {
+  .panel {
+    @apply bg-surface border border-border rounded-lg;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium
+      transition-colors disabled:opacity-50 disabled:pointer-events-none;
+  }
+
+  .btn-primary {
+    @apply btn bg-accent text-accent-fg hover:opacity-90;
+  }
+
+  .btn-ghost {
+    @apply btn bg-transparent text-text hover:bg-surface-2;
+  }
+
+  .btn-danger {
+    @apply btn bg-danger/15 text-danger hover:bg-danger/25;
+  }
+
+  .input {
+    @apply w-full rounded-md border border-border bg-bg px-3 py-1.5 text-sm text-text
+      placeholder:text-muted outline-none focus:border-accent focus:ring-1 focus:ring-accent;
+  }
+
+  .label {
+    @apply text-xs font-medium text-muted uppercase tracking-wide;
+  }
+}
+
+/* While dragging a resize handle, avoid text selection / iframe captures */
+body.resizing-panels {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+body.resizing-panels-row {
+  cursor: row-resize !important;
+  user-select: none !important;
+}
+
+/* Schema builder: active row (shortcut target) */
+.schema-row-active {
+  border-color: var(--color-accent) !important;
+  background: color-mix(in srgb, var(--color-accent) 16%, var(--color-surface));
+  box-shadow:
+    inset 3px 0 0 0 var(--color-accent),
+    0 0 0 1px color-mix(in srgb, var(--color-accent) 55%, transparent),
+    0 0 12px color-mix(in srgb, var(--color-accent) 22%, transparent);
+}
+.schema-row-active-flash {
+  animation: schema-row-active-flash 0.55s ease-out 1;
+}
+@keyframes schema-row-active-flash {
+  0% {
+    box-shadow:
+      inset 3px 0 0 0 var(--color-accent),
+      0 0 0 2px color-mix(in srgb, var(--color-accent) 80%, transparent),
+      0 0 20px color-mix(in srgb, var(--color-accent) 40%, transparent);
+  }
+  100% {
+    box-shadow:
+      inset 3px 0 0 0 var(--color-accent),
+      0 0 0 1px color-mix(in srgb, var(--color-accent) 55%, transparent),
+      0 0 12px color-mix(in srgb, var(--color-accent) 22%, transparent);
+  }
+}
+

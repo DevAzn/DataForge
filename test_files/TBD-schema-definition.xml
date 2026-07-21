@@ -1,0 +1,43 @@
+<root>
+  <name>TBD</name>
+  <description/>
+  <fields_0>
+    <id>c04d1a0d-e2ef-42d6-8d8a-7824834f491a</id>
+    <key>TO</key>
+    <kind>value</kind>
+    <sampleValue>Light</sampleValue>
+    <isPrimary>false</isPrimary>
+    <isUnique>false</isUnique>
+
+    <sortOrder>0</sortOrder>
+  </fields_0>
+  <fields_1>
+    <id>b8110496-e8c4-48d9-a2dc-c8a74132be58</id>
+    <key>From</key>
+    <kind>value</kind>
+    <sampleValue>Ellllll</sampleValue>
+    <isPrimary>false</isPrimary>
+    <isUnique>false</isUnique>
+
+    <sortOrder>1</sortOrder>
+  </fields_1>
+  <fields_2>
+    <id>0e8e89cc-ba00-43cf-939e-5486a7e9516d</id>
+    <key>Date</key>
+    <kind>object</kind>
+    <sampleValue></sampleValue>
+    <isPrimary>false</isPrimary>
+    <isUnique>false</isUnique>
+    <children_0>
+      <id>b63ab7ae-f65b-4a13-8e22-bbf864526c11</id>
+      <key>Event</key>
+      <kind>value</kind>
+      <sampleValue>10101990</sampleValue>
+      <isPrimary>false</isPrimary>
+      <isUnique>false</isUnique>
+
+      <sortOrder>0</sortOrder>
+    </children_0>
+    <sortOrder>2</sortOrder>
+  </fields_2>
+</root>

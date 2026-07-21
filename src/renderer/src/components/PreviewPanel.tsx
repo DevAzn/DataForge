@@ -1,0 +1,972 @@
+import {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useState
+} from 'react'
+import type {
+  ArchiveExt,
+  ArchiveFileSpec,
+  ArchiveMode,
+  CsvLayoutMode,
+  ExportFormat,
+  SchemaDoc,
+  SchemaRow
+} from '@shared/types'
+import { MAX_GENERATE_RECORDS, MIN_GENERATE_RECORDS } from '@shared/types'
+import { serializeCsv } from '@shared/csv'
+import { useAppStore } from '../store/appStore'
+import { ArchiveDialog } from './ArchiveDialog'
+
+export interface PreviewPanelHandle {
+  generate: () => void
+  exportCurrent: () => void
+  openArchive: () => void
+}
+
+export interface PreviewPanelProps {
+  /** Fill parent width (used when outer shell controls width) */
+  fill?: boolean
+}
+
+/** Safe file base name (no path/extension). Keeps spaces; strips illegal chars. */
+function sanitizeFileBaseName(name: string): string {
+  const cleaned = name
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '')
+    .replace(/\.+$/g, '')
+    .replace(/\s+/g, ' ')
+  return cleaned || 'dataforge-export'
+}
+
+function stripExtension(name: string): string {
+  return name.replace(/\.[^.\\/]+$/, '')
+}
+
+function sampleFromRow(row: SchemaRow): unknown {
+  if (row.kind === 'array') {
+    return row.children.length
+      ? [Object.fromEntries(row.children.map((c) => [c.key, sampleFromRow(c)]))]
+      : []
+  }
+  if (row.kind === 'object' || row.children.length > 0) {
+    return Object.fromEntries(row.children.map((c) => [c.key, sampleFromRow(c)]))
+  }
+  if (row.sampleValue !== undefined && row.sampleValue !== '') {
+    const n = Number(row.sampleValue)
+    if (!Number.isNaN(n) && row.sampleValue.trim() !== '') return n
+    if (row.sampleValue === 'true') return true
+    if (row.sampleValue === 'false') return false
+    return row.sampleValue
+  }
+  return null
+}
+
+/** One sample object from the current schema field values. */
+export function buildSchemaSample(root: SchemaRow[]): Record<string, unknown> {
+  return Object.fromEntries(root.map((r) => [r.key || 'field', sampleFromRow(r)]))
+}
+
+/** Exportable schema definition (what you designed), not generated rows. */
+export function buildSchemaDefinition(doc: SchemaDoc): Record<string, unknown> {
+  return {
+    name: doc.name,
+    description: doc.description ?? null,
+    fields: doc.root
+  }
+}
+
+function toPreviewString(
+  data: unknown,
+  format: ExportFormat,
+  csvOpts?: {
+    csvLayoutMode?: CsvLayoutMode
+    csvMultiRow?: boolean
+    csvFlattenDelimiter?: string
+    csvNestedAsJson?: boolean
+  }
+): string {
+  switch (format) {
+    case 'json':
+      return JSON.stringify(data, null, 2)
+    case 'yaml':
+      return jsonToSimpleYaml(data)
+    case 'csv':
+      return serializeCsv(data, {
+        csvLayoutMode: csvOpts?.csvLayoutMode ?? 'single-header',
+        csvMultiRow: csvOpts?.csvMultiRow !== false,
+        csvFlattenDelimiter: csvOpts?.csvFlattenDelimiter ?? '.',
+        csvNestedAsJson: csvOpts?.csvNestedAsJson ?? false
+      })
+    case 'xml':
+      return objectToXmlPreview(data)
+    case 'txt':
+      return JSON.stringify(data, null, 2)
+    default:
+      return JSON.stringify(data, null, 2)
+  }
+}
+
+function jsonToSimpleYaml(data: unknown, indent = 0): string {
+  const pad = '  '.repeat(indent)
+  if (data === null || data === undefined) return 'null'
+  if (typeof data !== 'object') return String(data)
+  if (Array.isArray(data)) {
+    if (data.length === 0) return '[]'
+    return data
+      .map((item) => {
+        if (typeof item === 'object' && item !== null) {
+          const body = jsonToSimpleYaml(item, indent + 1)
+          return `${pad}-\n${body
+            .split('\n')
+            .map((l) => (l ? `  ${l}` : l))
+            .join('\n')}`
+        }
+        return `${pad}- ${jsonToSimpleYaml(item)}`
+      })
+      .join('\n')
+  }
+  return Object.entries(data as Record<string, unknown>)
+    .map(([k, v]) => {
+      if (typeof v === 'object' && v !== null) {
+        return `${pad}${k}:\n${jsonToSimpleYaml(v, indent + 1)}`
+      }
+      return `${pad}${k}: ${jsonToSimpleYaml(v)}`
+    })
+    .join('\n')
+}
+
+function objectToXmlPreview(data: unknown, tag = 'root'): string {
+  if (data === null || data === undefined) return `<${tag}/>`
+  if (typeof data !== 'object') return `<${tag}>${escapeXml(String(data))}</${tag}>`
+  if (Array.isArray(data)) {
+    return `<${tag}>\n${data
+      .map((item, i) => indentBlock(objectToXmlPreview(item, `item_${i}`)))
+      .join('\n')}\n</${tag}>`
+  }
+  const inner = Object.entries(data as Record<string, unknown>)
+    .map(([k, v]) => objectToXmlPreview(v, k))
+    .join('\n')
+  return `<${tag}>\n${indentBlock(inner)}\n</${tag}>`
+}
+
+function indentBlock(s: string): string {
+  return s
+    .split('\n')
+    .map((l) => '  ' + l)
+    .join('\n')
+}
+
+function escapeXml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+const FORMATS: ExportFormat[] = ['json', 'yaml', 'xml', 'csv', 'txt']
+
+type PreviewSource = 'schema' | 'generated'
+
+export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(function PreviewPanel(
+  { fill = false },
+  ref
+): JSX.Element {
+  const activeSchema = useAppStore((s) => s.activeSchema)
+  const settings = useAppStore((s) => s.settings)
+  const lastGenerated = useAppStore((s) => s.lastGenerated)
+  const generating = useAppStore((s) => s.generating)
+  const generateProgress = useAppStore((s) => s.generateProgress)
+  const generate = useAppStore((s) => s.generate)
+  const exportData = useAppStore((s) => s.exportData)
+  const exportArchive = useAppStore((s) => s.exportArchive)
+  const setRecordCount = useAppStore((s) => s.setRecordCount)
+  const patchSettings = useAppStore((s) => s.patchSettings)
+  const streamGenerate = useAppStore((s) => s.streamGenerate)
+  const setStreamGenerate = useAppStore((s) => s.setStreamGenerate)
+  const setPreviewFormat = useAppStore((s) => s.setPreviewFormat)
+  const lastStreamPath = useAppStore((s) => s.lastStreamPath)
+  const recordCount = useAppStore((s) => s.recordCount)
+  const generateSeed = useAppStore((s) => s.generateSeed)
+  const setGenerateSeed = useAppStore((s) => s.setGenerateSeed)
+  const lockSeed = useAppStore((s) => s.lockSeed)
+  const setLockSeed = useAppStore((s) => s.setLockSeed)
+  const ciMode = useAppStore((s) => s.ciMode)
+  const setCiMode = useAppStore((s) => s.setCiMode)
+  const ciRecordHistory = useAppStore((s) => s.ciRecordHistory)
+  const setCiRecordHistory = useAppStore((s) => s.setCiRecordHistory)
+  const writeManifest = useAppStore((s) => s.writeManifest)
+  const setWriteManifest = useAppStore((s) => s.setWriteManifest)
+  const loadManifestForReplay = useAppStore((s) => s.loadManifestForReplay)
+  const refreshStatus = useAppStore((s) => s.refreshStatus)
+  const [manifestNote, setManifestNote] = useState<string | null>(null)
+
+  const csvLayoutMode = settings.csvLayoutMode ?? 'single-header'
+  const csvMultiRow = settings.csvMultiRow !== false
+
+  const [format, setFormat] = useState<ExportFormat>(settings.defaultExportFormat || 'json')
+
+  useEffect(() => {
+    setPreviewFormat(format)
+  }, [format, setPreviewFormat])
+  const [source, setSource] = useState<PreviewSource>('schema')
+  const [statusMsg, setStatusMsg] = useState<string | null>(null)
+  const [exporting, setExporting] = useState(false)
+  const [archiveOpen, setArchiveOpen] = useState(false)
+  /** Editable export base name (no extension). Defaults to schema name. */
+  const [exportFileName, setExportFileName] = useState('dataforge-export')
+  const [fileNameTouched, setFileNameTouched] = useState(false)
+
+  // Keep file name in sync with schema name until the user edits it
+  useEffect(() => {
+    if (!activeSchema) return
+    if (!fileNameTouched) {
+      setExportFileName(sanitizeFileBaseName(activeSchema.name || 'dataforge-export'))
+    }
+  }, [activeSchema?.id, activeSchema?.name, fileNameTouched, activeSchema])
+
+  // When switching to a different schema, reset to that schema's name
+  useEffect(() => {
+    if (!activeSchema) return
+    setFileNameTouched(false)
+    setExportFileName(sanitizeFileBaseName(activeSchema.name || 'dataforge-export'))
+  }, [activeSchema?.id])
+
+  const schemaSample = useMemo(() => {
+    if (!activeSchema) return null
+    return buildSchemaSample(activeSchema.root)
+  }, [activeSchema])
+
+  const schemaDefinition = useMemo(() => {
+    if (!activeSchema) return null
+    return buildSchemaDefinition(activeSchema)
+  }, [activeSchema])
+
+  const generatedData = useMemo(() => {
+    if (!lastGenerated?.records?.length) return null
+    return lastGenerated.records.length === 1
+      ? lastGenerated.records[0]
+      : lastGenerated.records
+  }, [lastGenerated])
+
+  const activeSource: PreviewSource =
+    source === 'generated' && generatedData ? 'generated' : 'schema'
+
+  const csvOpts = useMemo(
+    () => ({
+      csvLayoutMode,
+      csvMultiRow,
+      csvFlattenDelimiter: settings.csvFlattenDelimiter,
+      csvNestedAsJson: settings.csvNestedAsJson
+    }),
+    [csvLayoutMode, csvMultiRow, settings.csvFlattenDelimiter, settings.csvNestedAsJson]
+  )
+
+  const text = useMemo(() => {
+    if (activeSource === 'generated' && generatedData) {
+      // For CSV multi-row, show real rows (cap for UI only)
+      let data: unknown = generatedData
+      if (
+        format === 'csv' &&
+        Array.isArray(generatedData) &&
+        generatedData.length > 50
+      ) {
+        data = generatedData.slice(0, 50)
+      } else if (
+        format !== 'csv' &&
+        Array.isArray(generatedData) &&
+        generatedData.length > 50
+      ) {
+        data = [
+          ...generatedData.slice(0, 50),
+          { _note: `… ${generatedData.length - 50} more records not shown` }
+        ]
+      }
+      return toPreviewString(data, format, csvOpts)
+    }
+    if (!schemaSample) return '// No schema — add fields in the builder'
+    return toPreviewString(schemaSample, format, csvOpts)
+  }, [activeSource, generatedData, schemaSample, format, csvOpts])
+
+  async function onGenerate(): Promise<void> {
+    setStatusMsg(null)
+    try {
+      const result = await generate()
+      if (result) {
+        setSource('generated')
+        const seedBit =
+          typeof result.seed === 'number'
+            ? ` · seed ${result.seed}${result.ciMode ? ' · CI' : ''}`
+            : ''
+        if (result.streamed && result.filePath) {
+          setStatusMsg(
+            `Streamed ${result.recordCount.toLocaleString()} record(s) in ${result.ms}ms${seedBit} → ${result.filePath}` +
+              (result.encryptedPath ? ` (encrypted)` : '') +
+              ` (preview shows first ${result.records.length} sample rows)`
+          )
+        } else {
+          setStatusMsg(
+            `Generated ${result.recordCount} record(s) in ${result.ms}ms${seedBit}`
+          )
+        }
+        await refreshStatus()
+      }
+    } catch (e) {
+      setStatusMsg(e instanceof Error ? e.message : 'Generate failed')
+    }
+  }
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      generate: () => {
+        void onGenerate()
+      },
+      exportCurrent: () => {
+        void onExport('preview')
+      },
+      openArchive: () => {
+        setArchiveOpen(true)
+      }
+    }),
+    // Keep handle fresh for keyboard shortcuts
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      activeSchema,
+      format,
+      exportFileName,
+      generatedData,
+      schemaSample,
+      lastGenerated,
+      settings,
+      generating,
+      exporting
+    ]
+  )
+
+  function resolvedExportBaseName(): string {
+    const fromField = sanitizeFileBaseName(stripExtension(exportFileName))
+    if (fromField) return fromField
+    return sanitizeFileBaseName(activeSchema?.name || 'dataforge-export')
+  }
+
+  function currentPayload(kind: 'preview' | 'definition' = 'preview'): unknown | null {
+    if (activeSource === 'generated' && generatedData) return generatedData
+    if (kind === 'definition' && schemaDefinition) return schemaDefinition
+    if (schemaSample) return schemaSample
+    return null
+  }
+
+  async function onExport(kind: 'preview' | 'definition' = 'preview'): Promise<void> {
+    setStatusMsg('Opening save dialog…')
+    setExporting(true)
+    try {
+      if (!activeSchema) {
+        setStatusMsg('No active schema to export')
+        return
+      }
+
+      const payload = currentPayload(kind)
+      if (payload === null) {
+        setStatusMsg('Nothing to export — add fields first')
+        return
+      }
+
+      const fileName = resolvedExportBaseName()
+      const path = await exportData(format, payload, fileName, {
+        source:
+          activeSource === 'generated'
+            ? 'generated'
+            : kind === 'definition'
+              ? 'definition'
+              : 'schema'
+      })
+      if (path) {
+        const encOn =
+          settings.encryption?.enabled && settings.encryption?.encryptOnExport
+        setStatusMsg(
+          encOn
+            ? `Saved: ${path} (encryption ran; script changes extension only, base name kept)`
+            : `Saved: ${path}`
+        )
+      } else {
+        setStatusMsg('Export canceled')
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Export failed'
+      setStatusMsg(msg)
+      console.error('[DataForge export]', e)
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  async function onArchiveConfirm(config: {
+    extension: ArchiveExt
+    topFolderName: string
+    mode: ArchiveMode
+    files: ArchiveFileSpec[]
+    archiveFileName: string
+  }): Promise<void> {
+    setStatusMsg('Creating archive…')
+    setExporting(true)
+    try {
+      if (lastGenerated?.streamed) {
+        setStatusMsg(
+          `Archive needs an in-memory full batch. This run was streamed to disk` +
+            (lastGenerated.filePath ? ` (${lastGenerated.filePath})` : '') +
+            `. Turn off stream and Generate again, or package the stream file outside DataForge.`
+        )
+        return
+      }
+      // Prefer full generated batch for archives; fall back to schema sample
+      const payload =
+        lastGenerated?.records?.length
+          ? lastGenerated.records
+          : schemaSample
+      if (payload === null || payload === undefined) {
+        setStatusMsg('Nothing to package — generate data or add schema fields first')
+        return
+      }
+
+      const path = await exportArchive({
+        data: payload,
+        archiveFileName: config.archiveFileName || resolvedExportBaseName(),
+        options: {
+          extension: config.extension,
+          topFolderName: config.topFolderName || undefined,
+          mode: config.mode,
+          files: config.files
+        },
+        csvFlattenDelimiter: settings.csvFlattenDelimiter,
+        csvNestedAsJson: settings.csvNestedAsJson,
+        csvLayoutMode: settings.csvLayoutMode,
+        csvMultiRow: settings.csvMultiRow
+      })
+
+      if (path) {
+        setArchiveOpen(false)
+        const encOn =
+          settings.encryption?.enabled && settings.encryption?.encryptOnExport
+        setStatusMsg(
+          encOn
+            ? `Archive saved: ${path} (encryption ran; script changes extension only, base name kept)`
+            : `Archive saved: ${path}`
+        )
+      } else {
+        setStatusMsg('Archive canceled')
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Archive failed'
+      setStatusMsg(msg)
+      console.error('[DataForge archive]', e)
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  const hasSchema = Boolean(activeSchema?.root)
+  const canExportGenerated = Boolean(generatedData)
+  const canExportSchema = hasSchema
+  const canArchive = Boolean(lastGenerated?.records?.length || schemaSample)
+  const archiveRecordCount = lastGenerated?.recordCount ?? (schemaSample ? 1 : 0)
+
+  return (
+    <section
+      className={`flex h-full flex-col border-l border-border bg-surface ${
+        fill ? 'w-full' : 'w-80 shrink-0'
+      }`}
+    >
+      <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2">
+        <span className="text-sm font-medium">Preview</span>
+        <select
+          className="input ml-auto w-auto py-1 text-xs"
+          value={format}
+          onChange={(e) => setFormat(e.target.value as ExportFormat)}
+        >
+          {FORMATS.map((f) => (
+            <option key={f} value={f}>
+              {f.toUpperCase()}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div className="flex shrink-0 gap-1 border-b border-border px-2 py-1">
+        <button
+          type="button"
+          className={`btn-ghost flex-1 text-xs ${activeSource === 'schema' ? 'bg-surface-2' : ''}`}
+          onClick={() => setSource('schema')}
+        >
+          Schema
+        </button>
+        <button
+          type="button"
+          className={`btn-ghost flex-1 text-xs ${activeSource === 'generated' ? 'bg-surface-2' : ''}`}
+          onClick={() => setSource('generated')}
+          disabled={!lastGenerated}
+          title={
+            lastGenerated
+              ? 'Show last generated batch'
+              : 'Generate data first to enable this tab'
+          }
+        >
+          Generated{lastGenerated ? ` (${lastGenerated.recordCount})` : ''}
+        </button>
+      </div>
+
+      <pre className="min-h-0 flex-1 overflow-auto p-3 font-mono text-xs leading-relaxed text-muted whitespace-pre-wrap">
+        {text}
+      </pre>
+
+      {/* sticky footer so export controls stay visible and clickable */}
+      <div className="relative z-20 shrink-0 border-t border-border bg-surface p-3 space-y-2">
+        <div className="label">Generate & export</div>
+        <label className="flex flex-col gap-1 text-xs text-muted">
+          <span className="flex items-center gap-2">
+            Records
+            <input
+              type="number"
+              min={MIN_GENERATE_RECORDS}
+              max={MAX_GENERATE_RECORDS}
+              step={1}
+              className="input w-28 py-1 font-mono"
+              value={recordCount}
+              onChange={(e) => setRecordCount(Number(e.target.value) || MIN_GENERATE_RECORDS)}
+              title={`1 – ${MAX_GENERATE_RECORDS.toLocaleString()}`}
+            />
+          </span>
+          <span className="text-[10px]">
+            Max {MAX_GENERATE_RECORDS.toLocaleString()}. CSV multi-row = that many data rows in
+            one file.
+          </span>
+        </label>
+
+        <div className="space-y-1.5 rounded-md border border-border bg-bg p-2">
+          <div className="label">Reproducibility</div>
+          <label className="flex flex-col gap-1 text-xs text-muted">
+            <span className="flex flex-wrap items-center gap-2">
+              Seed
+              <input
+                type="text"
+                inputMode="numeric"
+                className="input w-32 py-1 font-mono text-xs"
+                value={generateSeed}
+                onChange={(e) => setGenerateSeed(e.target.value.replace(/[^\d]/g, ''))}
+                placeholder="random"
+                title="Leave empty for a new random seed each run"
+              />
+              <button
+                type="button"
+                className="btn-ghost px-2 py-0.5 text-[10px]"
+                onClick={() =>
+                  setGenerateSeed(String((Math.random() * 0xffffffff) >>> 0))
+                }
+                title="Pick a new random seed"
+              >
+                Randomize
+              </button>
+            </span>
+            <label className="flex items-center gap-2 text-[10px] text-muted">
+              <input
+                type="checkbox"
+                checked={lockSeed}
+                onChange={(e) => setLockSeed(e.target.checked)}
+              />
+              <span>
+                <span className="font-medium text-text">Lock seed</span>
+                {' — '}
+                keep seed after generate (off = empty field → new random each run)
+              </span>
+            </label>
+            <span className="text-[10px]">
+              Same seed + CI mode + same schema → identical output. Last seed always shows in the
+              report below.
+            </span>
+          </label>
+          <label className="flex items-start gap-2 text-xs">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={ciMode}
+              onChange={(e) => setCiMode(e.target.checked)}
+            />
+            <span>
+              <span className="font-medium text-text">CI mode</span>
+              <span className="block text-muted">
+                Ignore live history — use samples, enums, and constraints only (portable / CI).
+              </span>
+            </span>
+          </label>
+          {ciMode && (
+            <label className="flex items-start gap-2 text-xs pl-5">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={ciRecordHistory}
+                onChange={(e) => setCiRecordHistory(e.target.checked)}
+              />
+              <span>
+                <span className="font-medium text-text">Still record history in CI</span>
+                <span className="block text-muted">
+                  Optional — keeps generation deterministic for reads, but writes new samples into
+                  SQLite.
+                </span>
+              </span>
+            </label>
+          )}
+          <label className="flex items-start gap-2 text-xs">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={writeManifest}
+              onChange={(e) => setWriteManifest(e.target.checked)}
+            />
+            <span>
+              <span className="font-medium text-text">Write run manifest</span>
+              <span className="block text-muted">
+                On export / stream, also write <span className="font-mono">*.manifest.json</span>{' '}
+                (seed, CI flag, schema hash, report).
+              </span>
+            </span>
+          </label>
+          <button
+            type="button"
+            className="btn-ghost w-full border border-border px-2 py-1 text-xs"
+            onClick={() => {
+              void (async () => {
+                setManifestNote(null)
+                const preview = await loadManifestForReplay()
+                if (!preview) return
+                const bits = [
+                  `Loaded seed ${preview.manifest.seed}`,
+                  `${preview.manifest.recordCount} records`,
+                  preview.manifest.ciMode ? 'CI on' : 'CI off'
+                ]
+                if (preview.schemaHashMatch) bits.push('schema hash match')
+                else bits.push('schema hash MISMATCH')
+                setManifestNote(bits.join(' · '))
+                if (preview.warnings.length) {
+                  setStatusMsg(preview.warnings.join(' '))
+                } else {
+                  setStatusMsg(
+                    'Manifest applied. Press Generate to replay (use CI mode for bit-identical output).'
+                  )
+                }
+              })()
+            }}
+            title="Load seed, CI mode, and record count from a previous *.manifest.json"
+          >
+            Load from manifest…
+          </button>
+          {manifestNote && (
+            <p className="text-[10px] text-muted break-words">{manifestNote}</p>
+          )}
+          {lastGenerated && typeof lastGenerated.seed === 'number' && (
+            <p className="text-[10px] text-muted">
+              Last run: seed <span className="font-mono text-text">{lastGenerated.seed}</span>
+              {' · '}
+              CI {lastGenerated.ciMode ? 'on' : 'off'}
+              {' · '}
+              {lastGenerated.ms}ms
+            </p>
+          )}
+          {lastGenerated?.report && (
+            <div className="rounded border border-border/80 bg-surface-2/50 p-2 text-[10px] text-muted space-y-0.5">
+              <div className="label text-[10px] text-text">Generation report</div>
+              <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 font-mono">
+                <span>Leaves</span>
+                <span className="text-right text-text">
+                  {lastGenerated.report.leafValues.toLocaleString()}
+                </span>
+                <span>Nulls</span>
+                <span className="text-right text-text">
+                  {lastGenerated.report.nullValues.toLocaleString()} (
+                  {lastGenerated.report.nullRatePct}%)
+                </span>
+                <span>History hits</span>
+                <span className="text-right text-text">
+                  {lastGenerated.report.historyHits.toLocaleString()} (
+                  {lastGenerated.report.historyHitRate}%)
+                </span>
+                <span>Enum hits</span>
+                <span className="text-right text-text">
+                  {lastGenerated.report.enumHits.toLocaleString()}
+                </span>
+                <span>Synthesized</span>
+                <span className="text-right text-text">
+                  {lastGenerated.report.synthesized.toLocaleString()}
+                </span>
+                <span>Mutated sample</span>
+                <span className="text-right text-text">
+                  {lastGenerated.report.mutatedFromSample.toLocaleString()}
+                </span>
+                <span>Pattern retries</span>
+                <span className="text-right text-text">
+                  {lastGenerated.report.patternRetries.toLocaleString()}
+                </span>
+                <span>Pattern fails</span>
+                <span className="text-right text-text">
+                  {lastGenerated.report.patternFailures.toLocaleString()}
+                </span>
+                <span>Length repairs</span>
+                <span className="text-right text-text">
+                  {lastGenerated.report.lengthRepairs.toLocaleString()}
+                </span>
+                <span>Numeric repairs</span>
+                <span className="text-right text-text">
+                  {lastGenerated.report.numericRepairs.toLocaleString()}
+                </span>
+                <span>Unique exhausted</span>
+                <span className="text-right text-text">
+                  {lastGenerated.report.uniqueExhausted.toLocaleString()}
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <label className="flex items-start gap-2 text-xs">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={streamGenerate}
+            onChange={(e) => setStreamGenerate(e.target.checked)}
+          />
+          <span>
+            <span className="font-medium text-text">Stream generate to file</span>
+            <span className="block text-muted">
+              Low memory: write each row as generated (CSV single-header, JSON as NDJSON/.jsonl, or
+              TXT). Opens a save dialog. Only a small preview stays in memory — Export/Archive of
+              “Generated” is blocked for streamed runs; use the stream file for the full output.
+              {streamGenerate &&
+                format === 'csv' &&
+                csvLayoutMode !== 'single-header' &&
+                ' Requires “Single header” CSV layout.'}
+              {streamGenerate &&
+                (format === 'yaml' || format === 'xml') &&
+                ' YAML/XML are not streamable — switch format or turn stream off.'}
+            </span>
+          </span>
+        </label>
+        {lastGenerated?.streamed && (
+          <p className="rounded border border-accent/40 bg-accent/10 px-2 py-1.5 text-[10px] text-text">
+            Streamed run: full data is on disk
+            {lastGenerated.filePath ? (
+              <>
+                {' '}
+                (<span className="font-mono break-all">{lastGenerated.filePath}</span>)
+              </>
+            ) : null}
+            . Preview shows {lastGenerated.records?.length ?? 0} of{' '}
+            {lastGenerated.recordCount.toLocaleString()} records.
+          </p>
+        )}
+        {lastStreamPath && !lastGenerated?.streamed && (
+          <p className="text-[10px] text-muted break-all">Last stream file: {lastStreamPath}</p>
+        )}
+
+        {format === 'csv' && (
+          <div className="space-y-2 rounded-md border border-border bg-bg p-2">
+            <div className="label">CSV options</div>
+            <label className="flex items-start gap-2 text-xs">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={csvMultiRow}
+                onChange={(e) => void patchSettings({ csvMultiRow: e.target.checked })}
+              />
+              <span>
+                <span className="font-medium text-text">Multiple data rows</span>
+                <span className="block text-muted">
+                  One header (or section), many data rows from generated records. Off = first
+                  record only.
+                </span>
+              </span>
+            </label>
+            <div className="space-y-1.5">
+              <span className="text-[10px] font-medium uppercase tracking-wide text-muted">
+                Header layout
+              </span>
+              {(
+                [
+                  {
+                    id: 'single-header' as const,
+                    title: 'Single header (union of keys)',
+                    desc: 'Classic CSV: one header row, then rows.'
+                  },
+                  {
+                    id: 'entity-sections' as const,
+                    title: 'Entity sections',
+                    desc: 'Nested arrays/objects → separate # entity blocks, each with its own header.'
+                  },
+                  {
+                    id: 'per-key-sections' as const,
+                    title: 'Per-key sections',
+                    desc: 'Each unique key is a header line, then its values as following lines.'
+                  }
+                ] as const
+              ).map((opt) => (
+                <label key={opt.id} className="flex items-start gap-2 text-xs">
+                  <input
+                    type="radio"
+                    name="csv-layout"
+                    className="mt-0.5"
+                    checked={csvLayoutMode === opt.id}
+                    onChange={() => void patchSettings({ csvLayoutMode: opt.id })}
+                  />
+                  <span>
+                    <span className="font-medium text-text">{opt.title}</span>
+                    <span className="block text-muted">{opt.desc}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+            <label className="flex items-center gap-2 text-xs text-muted">
+              <input
+                type="checkbox"
+                checked={settings.csvNestedAsJson}
+                onChange={(e) =>
+                  void patchSettings({ csvNestedAsJson: e.target.checked })
+                }
+              />
+              Nested objects as JSON strings in cells
+            </label>
+          </div>
+        )}
+
+        <div>
+          <label className="label mb-1 block" htmlFor="export-file-name">
+            File name
+          </label>
+          <div className="flex items-center gap-1">
+            <input
+              id="export-file-name"
+              className="input font-mono text-xs"
+              value={exportFileName}
+              onChange={(e) => {
+                setFileNameTouched(true)
+                setExportFileName(e.target.value)
+              }}
+              placeholder={activeSchema?.name || 'dataforge-export'}
+              spellCheck={false}
+              title="Defaults to the schema name; edit freely"
+            />
+            <span className="shrink-0 text-xs text-muted">.{format === 'yaml' ? 'yml' : format}</span>
+          </div>
+          <div className="mt-1 flex gap-1">
+            <button
+              type="button"
+              className="btn-ghost px-2 py-0.5 text-[10px]"
+              onClick={() => {
+                setFileNameTouched(false)
+                setExportFileName(
+                  sanitizeFileBaseName(activeSchema?.name || 'dataforge-export')
+                )
+              }}
+              title="Reset file name to current schema name"
+            >
+              Use schema name
+            </button>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          className="btn-primary w-full"
+          disabled={!activeSchema || generating}
+          onClick={() => void onGenerate()}
+          title="Ctrl+G"
+        >
+          {generating
+            ? generateProgress?.message ||
+              `Generating… ${generateProgress?.percent ?? 0}%`
+            : 'Generate'}
+        </button>
+        {generating && generateProgress && (
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-2">
+            <div
+              className="h-full rounded-full bg-accent transition-all duration-100"
+              style={{ width: `${generateProgress.percent}%` }}
+            />
+          </div>
+        )}
+
+        {activeSource === 'generated' ? (
+          <button
+            type="button"
+            className="btn-primary w-full !bg-surface-2 !text-text border border-border"
+            disabled={!canExportGenerated || exporting}
+            onClick={() => void onExport('preview')}
+          >
+            {exporting
+              ? 'Exporting…'
+              : `Export ${resolvedExportBaseName()}.${format === 'yaml' ? 'yml' : format}…`}
+          </button>
+        ) : (
+          <>
+            <button
+              type="button"
+              className="btn-primary w-full !bg-surface-2 !text-text border border-border"
+              disabled={!canExportSchema || exporting}
+              onClick={() => void onExport('preview')}
+            >
+              {exporting
+                ? 'Exporting…'
+                : `Export sample as ${resolvedExportBaseName()}.${format === 'yaml' ? 'yml' : format}…`}
+            </button>
+            <button
+              type="button"
+              className="btn-ghost w-full border border-border text-xs"
+              disabled={!canExportSchema || exporting}
+              onClick={() => void onExport('definition')}
+              title="Export the schema design (keys, kinds, nesting) for reuse"
+            >
+              {exporting ? 'Exporting…' : 'Export schema definition…'}
+            </button>
+          </>
+        )}
+
+        <button
+          type="button"
+          className="btn-ghost w-full border border-border"
+          disabled={!canArchive || exporting}
+          onClick={() => setArchiveOpen(true)}
+          title="Package into .zip / .tar with top folder and multiple nested files"
+        >
+          Package ZIP / TAR…
+        </button>
+
+        <ArchiveDialog
+          open={archiveOpen}
+          onOpenChange={setArchiveOpen}
+          defaultBaseName={resolvedExportBaseName()}
+          defaultFormat={format}
+          recordCount={archiveRecordCount}
+          busy={exporting}
+          onConfirm={(cfg) => void onArchiveConfirm(cfg)}
+        />
+
+        {statusMsg && (
+          <p
+            className={`text-[11px] break-all ${
+              statusMsg.toLowerCase().includes('fail') ||
+              statusMsg.toLowerCase().includes('unavailable') ||
+              statusMsg.toLowerCase().includes('nothing')
+                ? 'text-danger'
+                : 'text-muted'
+            }`}
+          >
+            {statusMsg}
+          </p>
+        )}
+        <p className="text-[10px] text-muted">
+          Generate fills random values from your schema. File name defaults to the schema name.
+          Shortcuts: Ctrl+G generate · Ctrl+E export · Ctrl+Shift+A archive.
+        </p>
+      </div>
+    </section>
+  )
+})

@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+out/
+release/
+
+# TypeScript incremental
+*.tsbuildinfo
+
+# Logs & OS
+*.log
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Env / secrets
+.env
+.env.*
+*.local
+
+# Editors
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# App runtime data (local SQLite / cache — never commit user data)
+data/
+*.sqlite
+*.db
+DataForge_user_cache
+
+# Electron / native build cruft
+*.node
+.electron/
