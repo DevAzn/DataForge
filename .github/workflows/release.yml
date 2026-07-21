@@ -1,0 +1,111 @@
+# Build Windows installers and publish them to a GitHub Release when a version tag is pushed.
+# Example: git tag v1.0.1 && git push origin v1.0.1
+#
+# Artifacts (under the Release):
+#   - DataForge Setup x.y.z.exe  (NSIS installer)
+#   - DataForge x.y.z.exe        (portable, no install)
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build (e.g. v1.0.1). Leave empty when triggered by a tag push.'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: Windows build
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # For workflow_dispatch with a tag name, check out that ref
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag != '' && inputs.tag || github.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Resolve version from tag
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          # Strip leading v: v1.2.3 -> 1.2.3
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag=$TAG version=$VERSION"
+
+      - name: Sync package.json version with tag
+        shell: bash
+        run: |
+          npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
+
+      - name: Install dependencies
+        # postinstall rebuilds better-sqlite3 for Electron
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build Windows installers
+        env:
+          # Skip code signing in CI unless you add certificates later
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          # Avoid interactive prompts
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run dist:win
+
+      - name: List release artifacts
+        shell: bash
+        run: ls -lh release/*.exe release/*.blockmap 2>/dev/null || ls -lh release/
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: DataForge ${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.tag, '-') || contains(steps.version.outputs.tag, 'alpha') || contains(steps.version.outputs.tag, 'beta') || contains(steps.version.outputs.tag, 'rc') }}
+          generate_release_notes: true
+          body: |
+            ## DataForge ${{ steps.version.outputs.version }}
+
+            ### Windows downloads
+            | File | Use |
+            |------|-----|
+            | **DataForge Setup ${{ steps.version.outputs.version }}.exe** | Normal installer (Start menu) |
+            | **DataForge ${{ steps.version.outputs.version }}.exe** | Portable — no install, double‑click to run |
+
+            End users do **not** need Node.js or npm.
+
+            Windows SmartScreen may warn about an unknown publisher until the app is code-signed.
+          # electron-builder names: "DataForge Setup x.y.z.exe" and "DataForge x.y.z.exe"
+          files: |
+            release/*.exe
+            release/*.blockmap
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

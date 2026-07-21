@@ -45,6 +45,40 @@ Then run `npm run dev` again.
 | `npm run dist:win` | Windows installer / portable |
 | `npm run dist:linux` | Linux AppImage / deb |
 
+## Releases (end users — no Node required)
+
+Installers are **not** stored in the git repo. They are published as [GitHub Releases](https://github.com/DevAzn/DataForge/releases) by CI when you push a version tag.
+
+| Artifact | Purpose |
+|----------|---------|
+| **DataForge Setup x.y.z.exe** | NSIS installer |
+| **DataForge x.y.z.exe** | Portable (no install) |
+
+### Publish a new version
+
+```bash
+# 1. Commit your changes on main and push
+git add .
+git commit -m "Describe the change"
+git push origin main
+
+# 2. Create and push a version tag (must start with v)
+git tag v1.0.1
+git push origin v1.0.1
+```
+
+That starts **Actions → Release**, which:
+
+1. Installs dependencies and rebuilds `better-sqlite3` for Electron  
+2. Runs typecheck + `npm run dist:win`  
+3. Creates/updates the GitHub Release for that tag  
+4. Uploads Setup + portable `.exe` files  
+
+Watch progress: **GitHub repo → Actions**.  
+Download: **GitHub repo → Releases**.
+
+You can also re-run a tag from **Actions → Release → Run workflow** (workflow_dispatch).
+
 ## Local data
 
 Everything lives under Electron **userData** (no cloud):
