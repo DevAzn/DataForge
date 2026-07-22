@@ -398,10 +398,8 @@ function RowContent({
             PK
           </span>
         )}
-        {row.relationship && (
-          <span className="rounded bg-relationship/20 px-1.5 py-0.5 text-[10px] text-relationship">
-            {row.relationship}
-          </span>
+        {row.isUnique && !row.isPrimary && (
+          <span className="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] text-accent">UQ</span>
         )}
       </div>
       {dropIndicator === 'after' && (
@@ -444,6 +442,28 @@ function SortableRow({
   )
 }
 
+/** Kinds allowed in Properties for the active schema / preview format. */
+function kindOptionsForFormat(
+  format: string | undefined
+): Array<{ value: SchemaRow['kind']; label: string }> {
+  const f = (format || 'json').toLowerCase()
+  if (f === 'csv' || f === 'txt') {
+    return [{ value: 'value', label: 'Value' }]
+  }
+  if (f === 'xml') {
+    // XML has elements / text / repeated elements — not JSON-style free objects
+    return [
+      { value: 'value', label: 'Value / element' },
+      { value: 'array', label: 'Repeated' }
+    ]
+  }
+  return [
+    { value: 'value', label: 'Value' },
+    { value: 'object', label: 'Object' },
+    { value: 'array', label: 'Array' }
+  ]
+}
+
 export function SchemaBuilder(): JSX.Element {
   const activeSchema = useAppStore((s) => s.activeSchema)
   const updateActiveSchema = useAppStore((s) => s.updateActiveSchema)
@@ -456,6 +476,7 @@ export function SchemaBuilder(): JSX.Element {
   const updateRow = useAppStore((s) => s.updateRow)
   const moveRow = useAppStore((s) => s.moveRow)
   const csvTieKeysEnabled = useAppStore((s) => s.csvTieKeysEnabled)
+  const previewFormat = useAppStore((s) => s.previewFormat)
 
   const [activeDragId, setActiveDragId] = useState<string | null>(null)
   const [overState, setOverState] = useState<{
@@ -537,6 +558,21 @@ export function SchemaBuilder(): JSX.Element {
     }
   }, [selectedRowId])
 
+  // Prefer schema source format (from import); fall back to preview format
+  const schemaFormat = activeSchema?.sourceFormat || previewFormat
+  const selectedPre = activeSchema
+    ? findRow(activeSchema.root, selectedRowId)
+    : null
+  const selectedKind = selectedPre?.kind
+  const kindOptions = useMemo(() => {
+    const opts = kindOptionsForFormat(schemaFormat)
+    if (selectedKind && !opts.some((o) => o.value === selectedKind)) {
+      return [...opts, { value: selectedKind, label: `${selectedKind} (legacy)` }]
+    }
+    return opts
+  }, [schemaFormat, selectedKind])
+  const allowNestedChild = schemaFormat !== 'csv' && schemaFormat !== 'txt'
+
   if (!activeSchema) {
     return (
       <div className="flex h-full items-center justify-center text-muted">
@@ -545,7 +581,7 @@ export function SchemaBuilder(): JSX.Element {
     )
   }
 
-  const selected = findRow(activeSchema.root, selectedRowId)
+  const selected = selectedPre
   const selectedFlat = selectedRowId
     ? flatRows.find((r) => r.id === selectedRowId) ?? null
     : null
@@ -791,60 +827,69 @@ export function SchemaBuilder(): JSX.Element {
                   >
                     + Sibling row
                   </button>
-                  <button
-                    type="button"
-                    className="btn-ghost text-xs"
-                    onClick={() => addChildRow(selected.id)}
-                  >
-                    + Nested child
-                  </button>
+                  {allowNestedChild && (
+                    <button
+                      type="button"
+                      className="btn-ghost text-xs"
+                      onClick={() => addChildRow(selected.id)}
+                      title={
+                        schemaFormat === 'xml'
+                          ? 'Add a nested element under this node'
+                          : 'Add a nested child field'
+                      }
+                    >
+                      + Nested child
+                    </button>
+                  )}
                 </div>
-                <div className="w-36">
+                <div className="w-40">
                   <label className="label mb-1 block">Kind</label>
                   <select
                     className="input"
                     value={selected.kind}
-                    onChange={(e) =>
+                    onChange={(e) => {
+                      const kind = e.target.value as SchemaRow['kind']
+                      // Clear relationship when leaving array (deprecated UI concept)
                       updateRow(selected.id, {
-                        kind: e.target.value as SchemaRow['kind']
+                        kind,
+                        relationship: kind === 'array' ? selected.relationship : undefined
                       })
-                    }
+                    }}
                   >
-                    <option value="value">Value</option>
-                    <option value="object">Object</option>
-                    <option value="array">Array</option>
+                    {kindOptions.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
                   </select>
-                </div>
-                <div className="w-40">
-                  <label className="label mb-1 block">Relationship</label>
-                  <select
-                    className="input"
-                    value={selected.relationship ?? ''}
-                    onChange={(e) =>
-                      updateRow(selected.id, {
-                        relationship: (e.target.value || undefined) as SchemaRow['relationship']
-                      })
-                    }
-                  >
-                    <option value="">None</option>
-                    <option value="one-to-one">One-to-One</option>
-                    <option value="one-to-many">One-to-Many</option>
-                    <option value="many-to-one">Many-to-One</option>
-                    <option value="many-to-many">Many-to-Many</option>
-                  </select>
+                  {(schemaFormat === 'csv' || schemaFormat === 'txt') && (
+                    <p className="mt-0.5 text-[10px] text-muted">Flat formats use value fields only.</p>
+                  )}
+                  {schemaFormat === 'xml' && (
+                    <p className="mt-0.5 text-[10px] text-muted">
+                      XML: value/element or repeated — not JSON objects.
+                    </p>
+                  )}
                 </div>
                 <label className="flex items-center gap-2 text-sm">
                   <input
                     type="checkbox"
                     checked={selected.isPrimary}
-                    onChange={(e) => updateRow(selected.id, { isPrimary: e.target.checked })}
+                    onChange={(e) =>
+                      updateRow(selected.id, {
+                        isPrimary: e.target.checked,
+                        // Primary implies unique for generation
+                        isUnique: e.target.checked ? true : selected.isUnique
+                      })
+                    }
                   />
-                  Primary / unique
+                  Primary key
                 </label>
                 <label className="flex items-center gap-2 text-sm">
                   <input
                     type="checkbox"
-                    checked={selected.isUnique}
+                    checked={selected.isUnique || selected.isPrimary}
+                    disabled={selected.isPrimary}
                     onChange={(e) => updateRow(selected.id, { isUnique: e.target.checked })}
                   />
                   Unique in run

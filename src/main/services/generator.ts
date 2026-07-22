@@ -604,22 +604,14 @@ function generateFieldValue(row: SchemaRow, path: string[], scratch: GenScratch)
   return coerceOutput(raw, pattern)
 }
 
-function nestedCount(rand: () => number, relationship?: SchemaRow['relationship']): number {
-  switch (relationship) {
-    case 'one-to-one':
-    case 'many-to-one':
-      return 1
-    case 'one-to-many':
-    case 'many-to-many':
-      return randInt(rand, 1, 4)
-    default:
-      return randInt(rand, 1, 3)
-  }
+/** Array length for nested generation (relationship UI removed — simple range). */
+function nestedCount(rand: () => number): number {
+  return randInt(rand, 1, 3)
 }
 
 function generateFromRow(row: SchemaRow, path: string[], scratch: GenScratch): unknown {
   if (row.kind === 'array') {
-    const n = nestedCount(scratch.rand, row.relationship)
+    const n = nestedCount(scratch.rand)
     const childPath = [...path, (row.key || 'field').trim() || 'field']
     const items: unknown[] = []
     for (let i = 0; i < n; i++) {

@@ -13,6 +13,9 @@ installers/*
 !installers/*.exe
 !installers/README.md
 
+# Local release packaging (combined zips can exceed GitHub 100MB)
+rel_compressed/
+
 # TypeScript incremental
 *.tsbuildinfo
 
