@@ -100,50 +100,26 @@ function DragHandle({
   )
 }
 
-function RowActions({
-  rowId
-}: {
-  rowId: string
-}): JSX.Element {
-  const addSiblingRow = useAppStore((s) => s.addSiblingRow)
-  const addChildRow = useAppStore((s) => s.addChildRow)
-  const deleteRow = useAppStore((s) => s.deleteRow)
+/** Stable empty array — never return a fresh `[]` from a Zustand selector (React #185). */
+const EMPTY_PATHS: string[] = []
 
+function CsvTiePickBanner(): JSX.Element | null {
+  const enabled = useAppStore((s) => s.csvTieKeysEnabled)
+  // Must return a stable reference when missing — `?? []` allocates every snapshot read
+  // and trips React's useSyncExternalStore max-update-depth (error #185).
+  const paths = useAppStore((s) => s.activeSchema?.csvTiedFieldPaths ?? EMPTY_PATHS)
+  if (!enabled) return null
   return (
-    <div className="ml-auto flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
-      <button
-        type="button"
-        className="btn-ghost px-1.5 py-0.5 text-xs"
-        title="Add sibling row (same level)"
-        onClick={(e) => {
-          e.stopPropagation()
-          addSiblingRow(rowId)
-        }}
-      >
-        + Row
-      </button>
-      <button
-        type="button"
-        className="btn-ghost px-1.5 py-0.5 text-xs"
-        title="Add nested child under this row"
-        onClick={(e) => {
-          e.stopPropagation()
-          addChildRow(rowId)
-        }}
-      >
-        + Nest
-      </button>
-      <button
-        type="button"
-        className="btn-ghost px-1.5 py-0.5 text-xs text-danger"
-        title="Delete row (Del)"
-        onClick={(e) => {
-          e.stopPropagation()
-          deleteRow(rowId)
-        }}
-      >
-        ×
-      </button>
+    <div className="mb-3 rounded-md border border-[#d4a017] bg-[rgba(255,215,0,0.14)] px-3 py-2 text-[11px] text-text">
+      <span className="font-semibold text-[#b8860b]">CSV row ties · gold</span>
+      <span className="text-muted">
+        {' '}
+        — check the box left of each value field to keep that value the same on every generated CSV
+        row. Selected:{' '}
+      </span>
+      <span className="font-mono text-[#b8860b]">
+        {paths.length ? paths.join(', ') : 'none yet'}
+      </span>
     </div>
   )
 }
@@ -296,6 +272,16 @@ function RowContent({
   const path = fieldPath ?? []
   const readKeys = fieldHistoryReadKeys(path, row)
   const pathLabel = fieldPathKey(path, row)
+  const csvTieKeysEnabled = useAppStore((s) => s.csvTieKeysEnabled)
+  const activeSchema = useAppStore((s) => s.activeSchema)
+  const toggleCsvTiedPath = useAppStore((s) => s.toggleCsvTiedPath)
+  const isTied =
+    row.kind === 'value' &&
+    Boolean(
+      activeSchema?.csvTiedFieldPaths?.some(
+        (p) => p.toLowerCase() === pathLabel.toLowerCase()
+      )
+    )
 
   function activateRow(): void {
     if (!isOverlay) selectRow(row.id)
@@ -306,6 +292,7 @@ function RowContent({
       className="relative"
       style={{ marginLeft: depth * 16 }}
       data-schema-row-id={isOverlay ? undefined : row.id}
+      data-field-path={pathLabel}
     >
       {dropIndicator === 'before' && (
         <div className="absolute left-0 right-0 top-0 z-10 h-0.5 -translate-y-0.5 rounded bg-accent" />
@@ -317,11 +304,15 @@ function RowContent({
         className={`group flex items-center gap-1 rounded-md border px-1.5 py-1.5 transition-colors ${
           isOverlay
             ? 'border-accent bg-surface shadow-lg'
-            : selected
-              ? `schema-row-active ${flashSelected ? 'schema-row-active-flash' : ''}`
-              : 'border-transparent hover:border-border hover:bg-surface-2'
+            : [
+                selected ? `schema-row-active ${flashSelected ? 'schema-row-active-flash' : ''}` : '',
+                isTied ? 'schema-row-tied' : '',
+                !selected && !isTied ? 'border-transparent hover:border-border hover:bg-surface-2' : ''
+              ]
+                .filter(Boolean)
+                .join(' ')
         }`}
-        onClick={activateRow}
+        onClick={() => activateRow()}
         onFocusCapture={activateRow}
         role="option"
         aria-selected={selected}
@@ -338,6 +329,30 @@ function RowContent({
         >
           {row.kind === 'object' ? '{}' : row.kind === 'array' ? '[]' : '·'}
         </span>
+        {/* CSV tie-key checkbox — left of the key field when multi-row ties are on */}
+        {csvTieKeysEnabled && row.kind === 'value' && !isOverlay && (
+          <label
+            className="flex shrink-0 cursor-pointer items-center"
+            title={
+              isTied
+                ? `Tied across CSV rows — uncheck to vary: ${pathLabel}`
+                : `Tie this key across every CSV row: ${pathLabel}`
+            }
+            onClick={(e) => e.stopPropagation()}
+          >
+            <input
+              type="checkbox"
+              className="csv-tie-checkbox h-3.5 w-3.5 shrink-0 cursor-pointer rounded border-border accent-[#d4a017]"
+              checked={isTied}
+              onChange={() => toggleCsvTiedPath(pathLabel)}
+              aria-label={`Tie ${pathLabel} across CSV rows`}
+            />
+          </label>
+        )}
+        {/* Spacer so key column still lines up when checkbox column is shown for value rows only */}
+        {csvTieKeysEnabled && row.kind !== 'value' && !isOverlay && (
+          <span className="inline-block w-3.5 shrink-0" aria-hidden />
+        )}
         <div className="shrink-0" style={{ width: keyWidth, minWidth: 80 }}>
           <AutocompleteInput
             className={`input w-full font-mono text-xs ${selected ? 'border-accent/50' : ''}`}
@@ -377,14 +392,6 @@ function RowContent({
             />
           </div>
         )}
-        {selected && (
-          <span
-            className="shrink-0 rounded bg-accent px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-accent-fg"
-            title="Keyboard shortcuts apply to this row"
-          >
-            Active
-          </span>
-        )}
         {row.isPrimary && (
           <span className="rounded bg-primary/20 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
             PK
@@ -395,7 +402,6 @@ function RowContent({
             {row.relationship}
           </span>
         )}
-        {!isOverlay && <RowActions rowId={row.id} />}
       </div>
       {dropIndicator === 'after' && (
         <div className="absolute bottom-0 left-0 right-0 z-10 h-0.5 translate-y-0.5 rounded bg-accent" />
@@ -448,6 +454,7 @@ export function SchemaBuilder(): JSX.Element {
   const selectedRowId = useAppStore((s) => s.selectedRowId)
   const updateRow = useAppStore((s) => s.updateRow)
   const moveRow = useAppStore((s) => s.moveRow)
+  const csvTieKeysEnabled = useAppStore((s) => s.csvTieKeysEnabled)
 
   const [activeDragId, setActiveDragId] = useState<string | null>(null)
   const [overState, setOverState] = useState<{
@@ -458,14 +465,6 @@ export function SchemaBuilder(): JSX.Element {
   const listScrollRef = useRef<HTMLDivElement>(null)
   const prevSelectedRef = useRef<string | null>(null)
 
-  const propsPanel = useResizable({
-    storageKey: 'dataforge.layout.propsPanelWidth',
-    initial: 288,
-    min: 200,
-    max: 480,
-    reverse: true
-  })
-
   const keyCol = useResizable({
     storageKey: 'dataforge.layout.keyColWidth',
     initial: 160,
@@ -474,13 +473,13 @@ export function SchemaBuilder(): JSX.Element {
   })
 
   useEffect(() => {
-    if (propsPanel.isDragging || keyCol.isDragging) {
+    if (keyCol.isDragging) {
       document.body.classList.add('resizing-panels')
     } else {
       document.body.classList.remove('resizing-panels')
     }
     return () => document.body.classList.remove('resizing-panels')
-  }, [propsPanel.isDragging, keyCol.isDragging])
+  }, [keyCol.isDragging])
 
   const fieldLayout = useMemo(() => ({ keyWidth: keyCol.size }), [keyCol.size])
 
@@ -509,6 +508,34 @@ export function SchemaBuilder(): JSX.Element {
     return Array.from(keys).sort()
   }, [flatRows])
 
+  // Must run every render (before any early return) — hooks order
+  useEffect(() => {
+    if (!selectedRowId) {
+      prevSelectedRef.current = null
+      return
+    }
+    if (prevSelectedRef.current === selectedRowId) return
+    prevSelectedRef.current = selectedRowId
+    setFlashRowId((prev) => (prev === selectedRowId ? prev : selectedRowId))
+    const t = window.setTimeout(() => setFlashRowId(null), 600)
+    // Defer scroll so we don't fight layout/ResizeObserver in the same tick
+    const t2 = window.setTimeout(() => {
+      const root = listScrollRef.current
+      if (!root) return
+      const nodes = root.querySelectorAll('[data-schema-row-id]')
+      for (const node of Array.from(nodes)) {
+        if (node.getAttribute('data-schema-row-id') === selectedRowId) {
+          node.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+          break
+        }
+      }
+    }, 0)
+    return () => {
+      window.clearTimeout(t)
+      window.clearTimeout(t2)
+    }
+  }, [selectedRowId])
+
   if (!activeSchema) {
     return (
       <div className="flex h-full items-center justify-center text-muted">
@@ -525,29 +552,6 @@ export function SchemaBuilder(): JSX.Element {
   const selectedPathLabel = selected
     ? fieldPathKey(selectedPath, selected)
     : null
-
-  // Flash + scroll into view when the shortcut target changes
-  useEffect(() => {
-    if (!selectedRowId) {
-      prevSelectedRef.current = null
-      return
-    }
-    if (prevSelectedRef.current === selectedRowId) return
-    prevSelectedRef.current = selectedRowId
-    setFlashRowId(selectedRowId)
-    const t = window.setTimeout(() => setFlashRowId(null), 600)
-    const root = listScrollRef.current
-    if (root) {
-      const nodes = root.querySelectorAll('[data-schema-row-id]')
-      for (const node of Array.from(nodes)) {
-        if (node.getAttribute('data-schema-row-id') === selectedRowId) {
-          node.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
-          break
-        }
-      }
-    }
-    return () => window.clearTimeout(t)
-  }, [selectedRowId])
 
   function resolvePosition(
     event: DragMoveEvent | DragEndEvent,
@@ -606,8 +610,8 @@ export function SchemaBuilder(): JSX.Element {
 
   return (
     <FieldLayoutContext.Provider value={fieldLayout}>
-    <div className="flex h-full min-w-0 flex-1 flex-col">
-      <header className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-3">
+    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
+      <header className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border bg-surface px-4 py-3">
         <input
           className="input max-w-xs text-base font-semibold"
           value={activeSchema.name}
@@ -668,7 +672,7 @@ export function SchemaBuilder(): JSX.Element {
           Save
         </button>
         <div
-          className={`ml-auto max-w-full truncate rounded-md border px-2 py-1 text-[11px] ${
+          className={`ml-auto max-w-full truncate rounded-md border px-2 py-1 font-mono text-[11px] ${
             selectedPathLabel
               ? 'border-accent/50 bg-accent/10 text-text'
               : 'border-border bg-surface-2 text-muted'
@@ -681,24 +685,28 @@ export function SchemaBuilder(): JSX.Element {
         >
           {selectedPathLabel ? (
             <>
-              <span className="mr-1.5 rounded bg-accent px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-accent-fg">
-                Active
-              </span>
-              <span className="font-mono">{selectedPathLabel}</span>
-              <span className="ml-1.5 text-muted">· A N Del</span>
+              {selectedPathLabel}
+              <span className="ml-1.5 font-sans text-muted">· A N Del</span>
             </>
           ) : (
-            <>No row selected · R = root · click a row for A / N / Del</>
+            <span className="font-sans">No row selected · R = root</span>
           )}
         </div>
       </header>
 
-      <div className="flex min-h-0 flex-1">
-        <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           {/* Column header: resize key vs value */}
           <div className="flex shrink-0 items-center gap-1 border-b border-border bg-surface/80 px-4 py-1.5 text-[10px] text-muted">
             <span className="w-4 shrink-0" />
             <span className="w-6 shrink-0" />
+            {/* Matches drag handle + kind glyph spacers in each row */}
+            {csvTieKeysEnabled && (
+              <span
+                className="inline-block w-3.5 shrink-0"
+                title="Check boxes left of keys to keep those values constant on every CSV row"
+                aria-hidden
+              />
+            )}
             <div
               className="flex shrink-0 items-center gap-1"
               style={{ width: keyCol.size }}
@@ -713,13 +721,16 @@ export function SchemaBuilder(): JSX.Element {
               />
             </div>
             <span className="min-w-0 flex-1 font-medium uppercase tracking-wide">Value</span>
-            <span className="w-24 shrink-0 text-right">Actions</span>
           </div>
           <div ref={listScrollRef} className="min-h-0 flex-1 overflow-y-auto p-4 pt-2">
+            <CsvTiePickBanner />
             <p className="mb-3 text-[11px] text-muted">
-              Drag the grip to reorder rows. Highlighted <span className="text-accent font-medium">Active</span>{' '}
-              row is the shortcut target (A sibling · N child · Del). Click or focus a field to
-              target it. Drop on top/bottom to place before/after, or middle to nest.
+              Drag the grip to reorder. Highlighted row is the shortcut target —{' '}
+              <span className="font-medium text-text">A</span> sibling ·{' '}
+              <span className="font-medium text-text">N</span> child ·{' '}
+              <span className="font-medium text-text">Del</span> delete ·{' '}
+              <span className="font-medium text-text">R</span> root. Toolbar + Sibling / + Child
+              also work. Properties for the selected row appear below.
             </p>
             <DndContext
               sensors={sensors}
@@ -757,300 +768,280 @@ export function SchemaBuilder(): JSX.Element {
               </DragOverlay>
             </DndContext>
           </div>
-        </div>
 
-        <ResizeHandle
-          onPointerDown={propsPanel.onPointerDown}
-          isDragging={propsPanel.isDragging}
-          title="Drag to resize properties panel"
-        />
-        <aside
-          className="shrink-0 overflow-y-auto border-l border-border bg-surface p-4"
-          style={{ width: propsPanel.size }}
-        >
-          <div className="label mb-3">Properties</div>
+        {/* Properties under the row list — full width, more horizontal room for the tree */}
+        <div className="max-h-[42%] min-h-[8rem] shrink-0 overflow-y-auto border-t border-border bg-surface p-4">
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <span className="label mb-0">Properties</span>
+            {selectedPathLabel && (
+              <span className="font-mono text-[11px] text-muted">{selectedPathLabel}</span>
+            )}
+          </div>
           {!selected ? (
-            <p className="text-xs text-muted">Select a row to edit properties.</p>
+            <p className="text-xs text-muted">Select a row above to edit properties.</p>
           ) : (
             <div className="space-y-3">
-              <div className="flex flex-wrap gap-1">
-                <button
-                  type="button"
-                  className="btn-ghost text-xs"
-                  onClick={() => addSiblingRow(selected.id)}
-                >
-                  + Sibling row
-                </button>
-                <button
-                  type="button"
-                  className="btn-ghost text-xs"
-                  onClick={() => addChildRow(selected.id)}
-                >
-                  + Nested child
-                </button>
-              </div>
-              <div>
-                <label className="label mb-1 block">Kind</label>
-                <select
-                  className="input"
-                  value={selected.kind}
-                  onChange={(e) =>
-                    updateRow(selected.id, {
-                      kind: e.target.value as SchemaRow['kind']
-                    })
-                  }
-                >
-                  <option value="value">Value</option>
-                  <option value="object">Object</option>
-                  <option value="array">Array</option>
-                </select>
-              </div>
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={selected.isPrimary}
-                  onChange={(e) => updateRow(selected.id, { isPrimary: e.target.checked })}
-                />
-                Primary / unique identifier
-              </label>
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={selected.isUnique}
-                  onChange={(e) => updateRow(selected.id, { isUnique: e.target.checked })}
-                />
-                Unique within generation
-              </label>
-
-              {selected.kind === 'value' && (
-                <div className="space-y-2 border-t border-border pt-3">
-                  <div className="label">Constraints</div>
-                  <p className="text-[10px] leading-relaxed text-muted">
-                    Applied during generate. CI mode ignores history and relies on samples + these
-                    rules for reproducibility.
-                  </p>
-                  <div>
-                    <label className="label mb-1 block">Null rate %</label>
-                    <input
-                      type="number"
-                      min={0}
-                      max={100}
-                      className="input text-xs"
-                      value={selected.nullRate ?? 0}
-                      onChange={(e) => {
-                        const n = Number(e.target.value)
-                        updateRow(selected.id, {
-                          nullRate: Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : 0
-                        })
-                      }}
-                    />
-                  </div>
-                  <div>
-                    <label className="label mb-1 block">Enum values (one per line)</label>
-                    <textarea
-                      className="input min-h-[64px] font-mono text-xs"
-                      value={(selected.enumValues ?? []).join('\n')}
-                      onChange={(e) => {
-                        const lines = e.target.value
-                          .split(/\r?\n/)
-                          .map((s) => s.trim())
-                          .filter(Boolean)
-                        updateRow(selected.id, {
-                          enumValues: lines.length ? lines : undefined
-                        })
-                      }}
-                      placeholder="active&#10;pending&#10;closed"
-                      spellCheck={false}
-                    />
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="label mb-1 block">Min length</label>
-                      <input
-                        type="number"
-                        min={0}
-                        className="input text-xs"
-                        value={selected.minLength ?? ''}
-                        onChange={(e) => {
-                          const v = e.target.value
-                          updateRow(selected.id, {
-                            minLength: v === '' ? undefined : Math.max(0, Number(v) || 0)
-                          })
-                        }}
-                      />
-                    </div>
-                    <div>
-                      <label className="label mb-1 block">Max length</label>
-                      <input
-                        type="number"
-                        min={0}
-                        className="input text-xs"
-                        value={selected.maxLength ?? ''}
-                        onChange={(e) => {
-                          const v = e.target.value
-                          updateRow(selected.id, {
-                            maxLength: v === '' ? undefined : Math.max(0, Number(v) || 0)
-                          })
-                        }}
-                      />
-                    </div>
-                    <div>
-                      <label className="label mb-1 block">Min (number)</label>
-                      <input
-                        type="number"
-                        className="input text-xs"
-                        value={selected.min ?? ''}
-                        onChange={(e) => {
-                          const v = e.target.value
-                          updateRow(selected.id, {
-                            min: v === '' ? undefined : Number(v)
-                          })
-                        }}
-                      />
-                    </div>
-                    <div>
-                      <label className="label mb-1 block">Max (number)</label>
-                      <input
-                        type="number"
-                        className="input text-xs"
-                        value={selected.max ?? ''}
-                        onChange={(e) => {
-                          const v = e.target.value
-                          updateRow(selected.id, {
-                            max: v === '' ? undefined : Number(v)
-                          })
-                        }}
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <label className="label mb-1 block">Pattern (regex)</label>
-                    <input
-                      className="input font-mono text-xs"
-                      value={selected.pattern ?? ''}
-                      onChange={(e) =>
-                        updateRow(selected.id, {
-                          pattern: e.target.value.trim() || undefined
-                        })
-                      }
-                      placeholder="^[A-Z]{2}-\\d{4}$"
-                      spellCheck={false}
-                    />
-                  </div>
+              <div className="flex flex-wrap items-end gap-3">
+                <div className="flex flex-wrap gap-1">
+                  <button
+                    type="button"
+                    className="btn-ghost text-xs"
+                    onClick={() => addSiblingRow(selected.id)}
+                  >
+                    + Sibling row
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-ghost text-xs"
+                    onClick={() => addChildRow(selected.id)}
+                  >
+                    + Nested child
+                  </button>
                 </div>
-              )}
-
-              <div>
-                <label className="label mb-1 block">Relationship</label>
-                <select
-                  className="input"
-                  value={selected.relationship ?? ''}
-                  onChange={(e) =>
-                    updateRow(selected.id, {
-                      relationship: (e.target.value || undefined) as SchemaRow['relationship']
-                    })
-                  }
-                >
-                  <option value="">None</option>
-                  <option value="one-to-one">One-to-One</option>
-                  <option value="one-to-many">One-to-Many</option>
-                  <option value="many-to-one">Many-to-One</option>
-                  <option value="many-to-many">Many-to-Many</option>
-                </select>
-              </div>
-
-              {selected.kind === 'value' && (
-                <div className="space-y-3 border-t border-border pt-3">
-                  <div className="label">Value history &amp; context</div>
-                  <p className="text-[11px] leading-relaxed text-muted">
-                    By default each field only uses its own path (
-                    <span className="font-mono text-text/80">building.name</span> ≠{' '}
-                    <span className="font-mono text-text/80">role.name</span>
-                    ). Map sources or a shared pool when values should cross fields.
-                  </p>
-
-                  <div>
-                    <label className="label mb-1 block">This field&apos;s path</label>
-                    <div
-                      className="rounded-md border border-border bg-surface-2 px-2 py-1.5 font-mono text-xs text-text"
-                      title="Natural history key from parent → child tags"
-                    >
-                      {fieldPathKey(selectedPath, selected)}
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="label mb-1 block">Writes history as</label>
-                    <div
-                      className="rounded-md border border-border bg-surface-2 px-2 py-1.5 font-mono text-xs text-muted"
-                      title="Where new generated/sample values are stored"
-                    >
-                      {fieldHistoryWriteKey(selectedPath, selected)}
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="label mb-1 block">Shared value pool</label>
-                    <input
-                      className="input font-mono text-xs"
-                      value={selected.historyPool ?? ''}
-                      onChange={(e) =>
-                        updateRow(selected.id, {
-                          historyPool: e.target.value.trim() || undefined
-                        })
-                      }
-                      placeholder="e.g. person_name (optional)"
-                      title="Fields with the same pool name share one value bank"
-                    />
-                    <p className="mt-1 text-[10px] text-muted">
-                      Same pool on multiple fields → they share generation history.
-                    </p>
-                  </div>
-
-                  <HistorySourceMapper
-                    selected={selected}
-                    selectedPath={selectedPath}
-                    schemaPathKeys={schemaPathKeys}
-                    onChange={(keys) =>
+                <div className="w-36">
+                  <label className="label mb-1 block">Kind</label>
+                  <select
+                    className="input"
+                    value={selected.kind}
+                    onChange={(e) =>
                       updateRow(selected.id, {
-                        historySourceKeys: keys.length ? keys : undefined
+                        kind: e.target.value as SchemaRow['kind']
                       })
                     }
+                  >
+                    <option value="value">Value</option>
+                    <option value="object">Object</option>
+                    <option value="array">Array</option>
+                  </select>
+                </div>
+                <div className="w-40">
+                  <label className="label mb-1 block">Relationship</label>
+                  <select
+                    className="input"
+                    value={selected.relationship ?? ''}
+                    onChange={(e) =>
+                      updateRow(selected.id, {
+                        relationship: (e.target.value || undefined) as SchemaRow['relationship']
+                      })
+                    }
+                  >
+                    <option value="">None</option>
+                    <option value="one-to-one">One-to-One</option>
+                    <option value="one-to-many">One-to-Many</option>
+                    <option value="many-to-one">Many-to-One</option>
+                    <option value="many-to-many">Many-to-Many</option>
+                  </select>
+                </div>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={selected.isPrimary}
+                    onChange={(e) => updateRow(selected.id, { isPrimary: e.target.checked })}
                   />
+                  Primary / unique
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={selected.isUnique}
+                    onChange={(e) => updateRow(selected.id, { isUnique: e.target.checked })}
+                  />
+                  Unique in run
+                </label>
+              </div>
 
-                  <div>
-                    <label className="label mb-1 block">History namespace</label>
-                    <input
-                      className="input text-xs"
-                      value={selected.categoryOverride ?? ''}
-                      onChange={(e) =>
-                        updateRow(selected.id, {
-                          categoryOverride: e.target.value.trim() || undefined
-                        })
-                      }
-                      placeholder="optional extra prefix"
-                      title="Namespaces this field further (does not share with other paths)"
-                    />
-                    <p className="mt-1 text-[10px] text-muted">
-                      Extra prefix only — use pool/sources to share values.
+              {selected.kind === 'value' && (
+                <div className="grid gap-4 border-t border-border pt-3 lg:grid-cols-2">
+                  <div className="space-y-2">
+                    <div className="label">Constraints</div>
+                    <p className="text-[10px] leading-relaxed text-muted">
+                      Applied during generate. CI mode ignores history and relies on samples +
+                      these rules.
                     </p>
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                      <div>
+                        <label className="label mb-1 block">Null rate %</label>
+                        <input
+                          type="number"
+                          min={0}
+                          max={100}
+                          className="input text-xs"
+                          value={selected.nullRate ?? 0}
+                          onChange={(e) => {
+                            const n = Number(e.target.value)
+                            updateRow(selected.id, {
+                              nullRate: Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : 0
+                            })
+                          }}
+                        />
+                      </div>
+                      <div>
+                        <label className="label mb-1 block">Min length</label>
+                        <input
+                          type="number"
+                          min={0}
+                          className="input text-xs"
+                          value={selected.minLength ?? ''}
+                          onChange={(e) => {
+                            const v = e.target.value
+                            updateRow(selected.id, {
+                              minLength: v === '' ? undefined : Math.max(0, Number(v) || 0)
+                            })
+                          }}
+                        />
+                      </div>
+                      <div>
+                        <label className="label mb-1 block">Max length</label>
+                        <input
+                          type="number"
+                          min={0}
+                          className="input text-xs"
+                          value={selected.maxLength ?? ''}
+                          onChange={(e) => {
+                            const v = e.target.value
+                            updateRow(selected.id, {
+                              maxLength: v === '' ? undefined : Math.max(0, Number(v) || 0)
+                            })
+                          }}
+                        />
+                      </div>
+                      <div>
+                        <label className="label mb-1 block">Min (number)</label>
+                        <input
+                          type="number"
+                          className="input text-xs"
+                          value={selected.min ?? ''}
+                          onChange={(e) => {
+                            const v = e.target.value
+                            updateRow(selected.id, {
+                              min: v === '' ? undefined : Number(v)
+                            })
+                          }}
+                        />
+                      </div>
+                      <div>
+                        <label className="label mb-1 block">Max (number)</label>
+                        <input
+                          type="number"
+                          className="input text-xs"
+                          value={selected.max ?? ''}
+                          onChange={(e) => {
+                            const v = e.target.value
+                            updateRow(selected.id, {
+                              max: v === '' ? undefined : Number(v)
+                            })
+                          }}
+                        />
+                      </div>
+                      <div className="sm:col-span-1 col-span-2">
+                        <label className="label mb-1 block">Pattern (regex)</label>
+                        <input
+                          className="input font-mono text-xs"
+                          value={selected.pattern ?? ''}
+                          onChange={(e) =>
+                            updateRow(selected.id, {
+                              pattern: e.target.value.trim() || undefined
+                            })
+                          }
+                          placeholder="^[A-Z]{2}-\\d{4}$"
+                          spellCheck={false}
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="label mb-1 block">Enum values (one per line)</label>
+                      <textarea
+                        className="input min-h-[56px] font-mono text-xs"
+                        value={(selected.enumValues ?? []).join('\n')}
+                        onChange={(e) => {
+                          const lines = e.target.value
+                            .split(/\r?\n/)
+                            .map((s) => s.trim())
+                            .filter(Boolean)
+                          updateRow(selected.id, {
+                            enumValues: lines.length ? lines : undefined
+                          })
+                        }}
+                        placeholder={'active\npending\nclosed'}
+                        spellCheck={false}
+                      />
+                    </div>
                   </div>
 
-                  <div>
-                    <label className="label mb-1 block">Active read keys</label>
-                    <ul className="max-h-28 space-y-0.5 overflow-y-auto rounded-md border border-border bg-surface-2 p-1.5 font-mono text-[10px] text-muted">
-                      {fieldHistoryReadKeys(selectedPath, selected).map((k) => (
-                        <li key={k} className="truncate" title={k}>
-                          {k}
-                        </li>
-                      ))}
-                    </ul>
+                  <div className="space-y-2">
+                    <div className="label">Value history &amp; context</div>
+                    <p className="text-[11px] leading-relaxed text-muted">
+                      Path-scoped by default (
+                      <span className="font-mono text-text/80">building.name</span> ≠{' '}
+                      <span className="font-mono text-text/80">role.name</span>
+                      ). Map pools/sources to share intentionally.
+                    </p>
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      <div>
+                        <label className="label mb-1 block">This field&apos;s path</label>
+                        <div className="rounded-md border border-border bg-surface-2 px-2 py-1.5 font-mono text-xs text-text">
+                          {fieldPathKey(selectedPath, selected)}
+                        </div>
+                      </div>
+                      <div>
+                        <label className="label mb-1 block">Writes history as</label>
+                        <div className="rounded-md border border-border bg-surface-2 px-2 py-1.5 font-mono text-xs text-muted">
+                          {fieldHistoryWriteKey(selectedPath, selected)}
+                        </div>
+                      </div>
+                      <div>
+                        <label className="label mb-1 block">Shared value pool</label>
+                        <input
+                          className="input font-mono text-xs"
+                          value={selected.historyPool ?? ''}
+                          onChange={(e) =>
+                            updateRow(selected.id, {
+                              historyPool: e.target.value.trim() || undefined
+                            })
+                          }
+                          placeholder="e.g. person_name"
+                        />
+                      </div>
+                      <div>
+                        <label className="label mb-1 block">History namespace</label>
+                        <input
+                          className="input text-xs"
+                          value={selected.categoryOverride ?? ''}
+                          onChange={(e) =>
+                            updateRow(selected.id, {
+                              categoryOverride: e.target.value.trim() || undefined
+                            })
+                          }
+                          placeholder="optional extra prefix"
+                        />
+                      </div>
+                    </div>
+                    <HistorySourceMapper
+                      selected={selected}
+                      selectedPath={selectedPath}
+                      schemaPathKeys={schemaPathKeys}
+                      onChange={(keys) =>
+                        updateRow(selected.id, {
+                          historySourceKeys: keys.length ? keys : undefined
+                        })
+                      }
+                    />
+                    <div>
+                      <label className="label mb-1 block">Read keys</label>
+                      <ul className="max-h-20 space-y-0.5 overflow-y-auto rounded-md border border-border bg-surface-2 p-1.5 font-mono text-[10px] text-muted">
+                        {fieldHistoryReadKeys(selectedPath, selected).map((k) => (
+                          <li key={k} className="truncate" title={k}>
+                            {k}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
                   </div>
                 </div>
               )}
             </div>
           )}
-        </aside>
+        </div>
       </div>
     </div>
     </FieldLayoutContext.Provider>

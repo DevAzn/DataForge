@@ -38,13 +38,27 @@ function createWindow(): void {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      // Renderer has no Node; SQLite/native modules run in main only
-      sandbox: true
+      // better-sqlite3 / native tooling runs in main; keep sandbox off so
+      // electron-vite preload + IPC stay reliable on Windows packages.
+      sandbox: false
     }
   })
 
   mainWindow.on('ready-to-show', () => {
     mainWindow.show()
+  })
+  // Failsafe: never leave a hidden window if ready-to-show is delayed
+  setTimeout(() => {
+    if (!mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+      mainWindow.show()
+    }
+  }, 2500)
+
+  mainWindow.webContents.on('did-fail-load', (_e, code, desc) => {
+    console.error('[DataForge] renderer failed to load', code, desc)
+  })
+  mainWindow.webContents.on('render-process-gone', (_e, details) => {
+    console.error('[DataForge] renderer crashed', details)
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {

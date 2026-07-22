@@ -23,6 +23,9 @@ export interface UseResizableResult {
 }
 
 function clamp(n: number, min: number, max: number): number {
+  if (!Number.isFinite(n)) return min
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return n
+  if (max < min) return min
   return Math.min(max, Math.max(min, n))
 }
 
@@ -39,32 +42,48 @@ function readStored(key: string, fallback: number): number {
 
 /**
  * Pointer-based resize with min/max clamp and localStorage persistence.
+ * Never schedules a state update when the clamped size is unchanged
+ * (critical for avoiding ResizeObserver / max-bound feedback loops).
  */
 export function useResizable(options: UseResizableOptions): UseResizableResult {
   const { storageKey, initial, min, max, axis = 'horizontal', reverse = false } = options
+  // Keep latest bounds in a ref so drag handlers stay stable without rebinding every max change
+  const boundsRef = useRef({ min, max, storageKey })
+  boundsRef.current = { min, max, storageKey }
+
   const [size, setSizeState] = useState(() =>
     clamp(readStored(storageKey, initial), min, max)
   )
   const [isDragging, setIsDragging] = useState(false)
   const dragRef = useRef<{ startPos: number; startSize: number } | null>(null)
 
-  const setSize = useCallback(
-    (n: number) => {
-      const next = clamp(n, min, max)
-      setSizeState(next)
+  const setSize = useCallback((n: number) => {
+    const { min: lo, max: hi, storageKey: key } = boundsRef.current
+    const next = clamp(n, lo, hi)
+    setSizeState((prev) => {
+      if (prev === next) return prev
       try {
-        localStorage.setItem(storageKey, String(next))
+        localStorage.setItem(key, String(next))
       } catch {
         /* ignore quota */
       }
-    },
-    [min, max, storageKey]
-  )
+      return next
+    })
+  }, [])
 
-  // Re-clamp if min/max change (e.g. window resize updates max)
+  // Re-clamp only when bounds change AND the current size is out of range
   useEffect(() => {
-    setSizeState((s) => clamp(s, min, max))
-  }, [min, max])
+    setSizeState((s) => {
+      const next = clamp(s, min, max)
+      if (next === s) return s
+      try {
+        localStorage.setItem(storageKey, String(next))
+      } catch {
+        /* ignore */
+      }
+      return next
+    })
+  }, [min, max, storageKey])
 
   const onPointerDown = useCallback(
     (e: ReactPointerEvent) => {

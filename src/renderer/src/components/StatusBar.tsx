@@ -47,11 +47,11 @@ export function StatusBar(): JSX.Element {
 
       <button
         type="button"
-        className="btn-ghost px-2 py-0.5 text-[11px]"
+        className="btn-ghost px-2 py-0.5 text-[11px] text-text"
         onClick={() => setShowHelp((v) => !v)}
-        title="Keyboard shortcuts"
+        title="Keyboard shortcuts and help"
       >
-        Shortcuts
+        Help
       </button>
 
       {showHelp && (

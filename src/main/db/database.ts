@@ -14,7 +14,10 @@ import { DEFAULT_ENCRYPTION, DEFAULT_SETTINGS } from '../../shared/types'
 
 function parseTreeJson(
   raw: string
-): Pick<SchemaDoc, 'root' | 'sourceFileName' | 'sourceFilePath' | 'sourceFormat'> {
+): Pick<
+  SchemaDoc,
+  'root' | 'sourceFileName' | 'sourceFilePath' | 'sourceFormat' | 'csvTiedFieldPaths'
+> {
   try {
     const parsed = JSON.parse(raw) as SchemaRow[] | SchemaTreePayload
     if (Array.isArray(parsed)) {
@@ -25,7 +28,8 @@ function parseTreeJson(
         root: parsed.root,
         sourceFileName: parsed.sourceFileName,
         sourceFilePath: parsed.sourceFilePath,
-        sourceFormat: parsed.sourceFormat
+        sourceFormat: parsed.sourceFormat,
+        csvTiedFieldPaths: parsed.csvTiedFieldPaths
       }
     }
   } catch {
@@ -39,7 +43,8 @@ function encodeTreeJson(doc: SchemaDoc): string {
     root: doc.root,
     sourceFileName: doc.sourceFileName,
     sourceFilePath: doc.sourceFilePath,
-    sourceFormat: doc.sourceFormat
+    sourceFormat: doc.sourceFormat,
+    csvTiedFieldPaths: doc.csvTiedFieldPaths
   }
   return JSON.stringify(payload)
 }
@@ -284,6 +289,7 @@ export function listSchemas(): SchemaDoc[] {
       sourceFileName: tree.sourceFileName,
       sourceFilePath: tree.sourceFilePath,
       sourceFormat: tree.sourceFormat,
+      csvTiedFieldPaths: tree.csvTiedFieldPaths,
       createdAt: r.created_at,
       updatedAt: r.updated_at,
       lastOpenedAt: r.last_opened_at ?? undefined
@@ -319,6 +325,7 @@ export function getSchema(id: string): SchemaDoc | null {
     sourceFileName: tree.sourceFileName,
     sourceFilePath: tree.sourceFilePath,
     sourceFormat: tree.sourceFormat,
+    csvTiedFieldPaths: tree.csvTiedFieldPaths,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     lastOpenedAt: r.last_opened_at ?? undefined

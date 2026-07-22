@@ -58,3 +58,67 @@ export function fieldHistoryReadKeys(path: string[], row: SchemaRow): string[] {
 export function fieldHistoryKey(path: string[], row: SchemaRow): string {
   return fieldHistoryWriteKey(path, row)
 }
+
+/** All value-leaf paths in a schema tree (dot notation). */
+export function listLeafFieldPaths(rows: SchemaRow[], parentPath: string[] = []): string[] {
+  const out: string[] = []
+  for (const row of rows) {
+    const leaf = (row.key || 'field').trim() || 'field'
+    if (row.kind === 'value') {
+      out.push([...parentPath, leaf].join('.'))
+    } else if (row.children.length) {
+      out.push(...listLeafFieldPaths(row.children, [...parentPath, leaf]))
+    }
+  }
+  return out
+}
+
+export function getValueAtPath(obj: unknown, path: string): unknown {
+  if (!path || obj === null || obj === undefined) return undefined
+  const parts = path.split('.').filter(Boolean)
+  let cur: unknown = obj
+  for (const p of parts) {
+    if (cur === null || cur === undefined || typeof cur !== 'object' || Array.isArray(cur)) {
+      return undefined
+    }
+    cur = (cur as Record<string, unknown>)[p]
+  }
+  return cur
+}
+
+/** Deep-set path on a plain object tree (creates intermediate objects). */
+export function setValueAtPath(
+  obj: Record<string, unknown>,
+  path: string,
+  value: unknown
+): void {
+  const parts = path.split('.').filter(Boolean)
+  if (parts.length === 0) return
+  let cur: Record<string, unknown> = obj
+  for (let i = 0; i < parts.length - 1; i++) {
+    const p = parts[i]
+    const next = cur[p]
+    if (next === null || next === undefined || typeof next !== 'object' || Array.isArray(next)) {
+      cur[p] = {}
+    }
+    cur = cur[p] as Record<string, unknown>
+  }
+  cur[parts[parts.length - 1]] = value
+}
+
+/**
+ * Copy selected leaf paths from `source` onto `target` (mutates and returns target).
+ * Used so multi-row CSV can keep parent keys constant while other fields vary.
+ */
+export function applyTiedFieldPaths(
+  source: Record<string, unknown>,
+  target: Record<string, unknown>,
+  paths: string[]
+): Record<string, unknown> {
+  for (const path of paths) {
+    const p = path.trim()
+    if (!p) continue
+    setValueAtPath(target, p, getValueAtPath(source, p))
+  }
+  return target
+}

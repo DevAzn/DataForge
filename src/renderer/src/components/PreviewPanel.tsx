@@ -168,7 +168,12 @@ function escapeXml(s: string): string {
 
 const FORMATS: ExportFormat[] = ['json', 'yaml', 'xml', 'csv', 'txt']
 
+/** Stable empty array for optional schema path lists (avoid fresh `[]` each render). */
+const EMPTY_TIED_PATHS: string[] = []
+
 type PreviewSource = 'schema' | 'generated'
+/** Main panel tab: preview content or full Generate & export controls */
+type PanelTab = 'schema' | 'generated' | 'generate'
 
 export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(function PreviewPanel(
   { fill = false },
@@ -199,19 +204,22 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
   const setCiRecordHistory = useAppStore((s) => s.setCiRecordHistory)
   const writeManifest = useAppStore((s) => s.writeManifest)
   const setWriteManifest = useAppStore((s) => s.setWriteManifest)
+  const csvTieKeysEnabled = useAppStore((s) => s.csvTieKeysEnabled)
+  const setCsvTieKeysEnabled = useAppStore((s) => s.setCsvTieKeysEnabled)
   const loadManifestForReplay = useAppStore((s) => s.loadManifestForReplay)
   const refreshStatus = useAppStore((s) => s.refreshStatus)
   const [manifestNote, setManifestNote] = useState<string | null>(null)
 
   const csvLayoutMode = settings.csvLayoutMode ?? 'single-header'
   const csvMultiRow = settings.csvMultiRow !== false
+  const tiedPaths = activeSchema?.csvTiedFieldPaths ?? EMPTY_TIED_PATHS
 
   const [format, setFormat] = useState<ExportFormat>(settings.defaultExportFormat || 'json')
 
   useEffect(() => {
     setPreviewFormat(format)
   }, [format, setPreviewFormat])
-  const [source, setSource] = useState<PreviewSource>('schema')
+  const [tab, setTab] = useState<PanelTab>('schema')
   const [statusMsg, setStatusMsg] = useState<string | null>(null)
   const [exporting, setExporting] = useState(false)
   const [archiveOpen, setArchiveOpen] = useState(false)
@@ -251,8 +259,15 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
       : lastGenerated.records
   }, [lastGenerated])
 
-  const activeSource: PreviewSource =
-    source === 'generated' && generatedData ? 'generated' : 'schema'
+  /** Which data the preview text and export-from-preview use */
+  const previewSource: PreviewSource =
+    tab === 'generated' && generatedData
+      ? 'generated'
+      : tab === 'schema'
+        ? 'schema'
+        : generatedData
+          ? 'generated'
+          : 'schema'
 
   const csvOpts = useMemo(
     () => ({
@@ -265,7 +280,7 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
   )
 
   const text = useMemo(() => {
-    if (activeSource === 'generated' && generatedData) {
+    if (previewSource === 'generated' && generatedData) {
       // For CSV multi-row, show real rows (cap for UI only)
       let data: unknown = generatedData
       if (
@@ -288,14 +303,14 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
     }
     if (!schemaSample) return '// No schema — add fields in the builder'
     return toPreviewString(schemaSample, format, csvOpts)
-  }, [activeSource, generatedData, schemaSample, format, csvOpts])
+  }, [previewSource, generatedData, schemaSample, format, csvOpts])
 
   async function onGenerate(): Promise<void> {
     setStatusMsg(null)
     try {
       const result = await generate()
       if (result) {
-        setSource('generated')
+        setTab('generated')
         const seedBit =
           typeof result.seed === 'number'
             ? ` · seed ${result.seed}${result.ciMode ? ' · CI' : ''}`
@@ -352,14 +367,21 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
     return sanitizeFileBaseName(activeSchema?.name || 'dataforge-export')
   }
 
-  function currentPayload(kind: 'preview' | 'definition' = 'preview'): unknown | null {
-    if (activeSource === 'generated' && generatedData) return generatedData
+  function currentPayload(
+    kind: 'preview' | 'definition' = 'preview',
+    as?: PreviewSource
+  ): unknown | null {
     if (kind === 'definition' && schemaDefinition) return schemaDefinition
+    const wantGenerated = (as ?? (tab === 'generated' ? 'generated' : 'schema')) === 'generated'
+    if (wantGenerated && generatedData) return generatedData
     if (schemaSample) return schemaSample
     return null
   }
 
-  async function onExport(kind: 'preview' | 'definition' = 'preview'): Promise<void> {
+  async function onExport(
+    kind: 'preview' | 'definition' = 'preview',
+    as?: PreviewSource
+  ): Promise<void> {
     setStatusMsg('Opening save dialog…')
     setExporting(true)
     try {
@@ -368,20 +390,22 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
         return
       }
 
-      const payload = currentPayload(kind)
+      const payload = currentPayload(kind, as)
       if (payload === null) {
         setStatusMsg('Nothing to export — add fields first')
         return
       }
 
+      const exportAs: 'generated' | 'schema' | 'definition' =
+        kind === 'definition'
+          ? 'definition'
+          : as === 'generated' || (as !== 'schema' && tab === 'generated')
+            ? 'generated'
+            : 'schema'
+
       const fileName = resolvedExportBaseName()
       const path = await exportData(format, payload, fileName, {
-        source:
-          activeSource === 'generated'
-            ? 'generated'
-            : kind === 'definition'
-              ? 'definition'
-              : 'schema'
+        source: exportAs
       })
       if (path) {
         const encOn =
@@ -497,52 +521,76 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
       <div className="flex shrink-0 gap-1 border-b border-border px-2 py-1">
         <button
           type="button"
-          className={`btn-ghost flex-1 text-xs ${activeSource === 'schema' ? 'bg-surface-2' : ''}`}
-          onClick={() => setSource('schema')}
+          className={`btn-ghost flex-1 text-xs ${tab === 'schema' ? 'bg-surface-2' : ''}`}
+          onClick={() => setTab('schema')}
+          title="Preview schema sample data"
         >
           Schema
         </button>
         <button
           type="button"
-          className={`btn-ghost flex-1 text-xs ${activeSource === 'generated' ? 'bg-surface-2' : ''}`}
-          onClick={() => setSource('generated')}
+          className={`btn-ghost flex-1 text-xs ${tab === 'generated' ? 'bg-surface-2' : ''}`}
+          onClick={() => setTab('generated')}
           disabled={!lastGenerated}
           title={
             lastGenerated
-              ? 'Show last generated batch'
+              ? 'Preview auto-generated data from the last run'
               : 'Generate data first to enable this tab'
           }
         >
-          Generated{lastGenerated ? ` (${lastGenerated.recordCount})` : ''}
+          Auto-Gen Schema{lastGenerated ? ` (${lastGenerated.recordCount})` : ''}
+        </button>
+        <button
+          type="button"
+          className={`btn-ghost flex-1 text-xs ${tab === 'generate' ? 'bg-surface-2' : ''}`}
+          onClick={() => setTab('generate')}
+          title="Generate, seed/CI options, export and package"
+        >
+          Generate
         </button>
       </div>
 
-      <pre className="min-h-0 flex-1 overflow-auto p-3 font-mono text-xs leading-relaxed text-muted whitespace-pre-wrap">
-        {text}
-      </pre>
+      {tab !== 'generate' && statusMsg && (
+        <p
+          className={`shrink-0 border-b border-border px-3 py-1.5 text-[11px] break-all ${
+            statusMsg.toLowerCase().includes('fail') ||
+            statusMsg.toLowerCase().includes('unavailable') ||
+            statusMsg.toLowerCase().includes('nothing')
+              ? 'text-danger'
+              : 'text-muted'
+          }`}
+        >
+          {statusMsg}
+        </p>
+      )}
 
-      {/* sticky footer so export controls stay visible and clickable */}
-      <div className="relative z-20 shrink-0 border-t border-border bg-surface p-3 space-y-2">
-        <div className="label">Generate & export</div>
-        <label className="flex flex-col gap-1 text-xs text-muted">
-          <span className="flex items-center gap-2">
+      {tab !== 'generate' ? (
+      <pre className="min-h-0 flex-1 overflow-auto p-3 font-mono text-xs leading-relaxed text-muted whitespace-pre-wrap">
+        {text || '// No preview content'}
+      </pre>
+      ) : (
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="label mb-0">Generate & export</span>
+          <label className="ml-auto flex items-center gap-1.5 text-xs text-muted">
             Records
             <input
               type="number"
               min={MIN_GENERATE_RECORDS}
               max={MAX_GENERATE_RECORDS}
               step={1}
-              className="input w-28 py-1 font-mono"
+              className="input w-20 py-0.5 font-mono text-xs"
               value={recordCount}
               onChange={(e) => setRecordCount(Number(e.target.value) || MIN_GENERATE_RECORDS)}
               title={`1 – ${MAX_GENERATE_RECORDS.toLocaleString()}`}
             />
-          </span>
-          <span className="text-[10px]">
-            Max {MAX_GENERATE_RECORDS.toLocaleString()}. CSV multi-row = that many data rows in
-            one file.
-          </span>
-        </label>
+          </label>
+        </div>
+        <p className="text-[10px] text-muted -mt-1">
+          Max {MAX_GENERATE_RECORDS.toLocaleString()} records. Switch to Schema / Auto-Gen Schema to
+          preview file contents.
+        </p>
 
         <div className="space-y-1.5 rounded-md border border-border bg-bg p-2">
           <div className="label">Reproducibility</div>
@@ -728,6 +776,8 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
           )}
         </div>
 
+        <div className="space-y-1.5 rounded-md border border-border bg-bg p-2">
+          <div className="label">Stream generate</div>
         <label className="flex items-start gap-2 text-xs">
           <input
             type="checkbox"
@@ -767,6 +817,7 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
         {lastStreamPath && !lastGenerated?.streamed && (
           <p className="text-[10px] text-muted break-all">Last stream file: {lastStreamPath}</p>
         )}
+        </div>
 
         {format === 'csv' && (
           <div className="space-y-2 rounded-md border border-border bg-bg p-2">
@@ -786,6 +837,35 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
                 </span>
               </span>
             </label>
+
+            {csvMultiRow && (
+              <div className="space-y-1.5 rounded-md border border-[#d4a017] bg-[rgba(255,215,0,0.1)] p-2">
+                <label className="flex items-start gap-2 text-xs">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={csvTieKeysEnabled}
+                    onChange={(e) => setCsvTieKeysEnabled(e.target.checked)}
+                  />
+                  <span>
+                    <span className="font-medium text-text">Tie keys across rows</span>
+                    <span className="block text-muted">
+                      When on, checkboxes appear left of each key in the middle schema rows. Checked
+                      fields stay the same on every generated CSV row (shown in{' '}
+                      <span className="font-medium text-[#b8860b]">gold</span>); other fields still
+                      vary.
+                    </span>
+                  </span>
+                </label>
+                {csvTieKeysEnabled && (
+                  <p className="pl-6 text-[10px] text-[#b8860b]">
+                    {tiedPaths.length > 0
+                      ? `Constant on every row: ${tiedPaths.join(', ')}`
+                      : 'No fields tied yet — check boxes next to keys in the schema builder.'}
+                  </p>
+                )}
+              </div>
+            )}
             <div className="space-y-1.5">
               <span className="text-[10px] font-medium uppercase tracking-wide text-muted">
                 Header layout
@@ -844,7 +924,7 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
           <div className="flex items-center gap-1">
             <input
               id="export-file-name"
-              className="input font-mono text-xs"
+              className="input min-w-0 flex-1 font-mono text-xs"
               value={exportFileName}
               onChange={(e) => {
                 setFileNameTouched(true)
@@ -852,25 +932,25 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
               }}
               placeholder={activeSchema?.name || 'dataforge-export'}
               spellCheck={false}
-              title="Defaults to the schema name; edit freely"
+              title="Export file name (defaults to schema name)"
             />
-            <span className="shrink-0 text-xs text-muted">.{format === 'yaml' ? 'yml' : format}</span>
+            <span className="shrink-0 text-xs text-muted">
+              .{format === 'yaml' ? 'yml' : format}
+            </span>
           </div>
-          <div className="mt-1 flex gap-1">
-            <button
-              type="button"
-              className="btn-ghost px-2 py-0.5 text-[10px]"
-              onClick={() => {
-                setFileNameTouched(false)
-                setExportFileName(
-                  sanitizeFileBaseName(activeSchema?.name || 'dataforge-export')
-                )
-              }}
-              title="Reset file name to current schema name"
-            >
-              Use schema name
-            </button>
-          </div>
+          <button
+            type="button"
+            className="btn-ghost mt-1 px-2 py-0.5 text-[10px]"
+            onClick={() => {
+              setFileNameTouched(false)
+              setExportFileName(
+                sanitizeFileBaseName(activeSchema?.name || 'dataforge-export')
+              )
+            }}
+            title="Reset file name to current schema name"
+          >
+            Use schema name
+          </button>
         </div>
 
         <button
@@ -894,41 +974,36 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
           </div>
         )}
 
-        {activeSource === 'generated' ? (
+        {canExportGenerated && (
           <button
             type="button"
             className="btn-primary w-full !bg-surface-2 !text-text border border-border"
-            disabled={!canExportGenerated || exporting}
-            onClick={() => void onExport('preview')}
+            disabled={exporting}
+            onClick={() => void onExport('preview', 'generated')}
+            title="Export the last generated batch"
           >
             {exporting
               ? 'Exporting…'
-              : `Export ${resolvedExportBaseName()}.${format === 'yaml' ? 'yml' : format}…`}
+              : `Export generated .${format === 'yaml' ? 'yml' : format}…`}
           </button>
-        ) : (
-          <>
-            <button
-              type="button"
-              className="btn-primary w-full !bg-surface-2 !text-text border border-border"
-              disabled={!canExportSchema || exporting}
-              onClick={() => void onExport('preview')}
-            >
-              {exporting
-                ? 'Exporting…'
-                : `Export sample as ${resolvedExportBaseName()}.${format === 'yaml' ? 'yml' : format}…`}
-            </button>
-            <button
-              type="button"
-              className="btn-ghost w-full border border-border text-xs"
-              disabled={!canExportSchema || exporting}
-              onClick={() => void onExport('definition')}
-              title="Export the schema design (keys, kinds, nesting) for reuse"
-            >
-              {exporting ? 'Exporting…' : 'Export schema definition…'}
-            </button>
-          </>
         )}
-
+        <button
+          type="button"
+          className="btn-primary w-full !bg-surface-2 !text-text border border-border"
+          disabled={!canExportSchema || exporting}
+          onClick={() => void onExport('preview', 'schema')}
+        >
+          {exporting ? 'Exporting…' : `Export sample .${format === 'yaml' ? 'yml' : format}…`}
+        </button>
+        <button
+          type="button"
+          className="btn-ghost w-full border border-border text-xs"
+          disabled={!canExportSchema || exporting}
+          onClick={() => void onExport('definition')}
+          title="Export the schema design (keys, kinds, nesting) for reuse"
+        >
+          {exporting ? 'Exporting…' : 'Export schema definition…'}
+        </button>
         <button
           type="button"
           className="btn-ghost w-full border border-border"
@@ -938,16 +1013,6 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
         >
           Package ZIP / TAR…
         </button>
-
-        <ArchiveDialog
-          open={archiveOpen}
-          onOpenChange={setArchiveOpen}
-          defaultBaseName={resolvedExportBaseName()}
-          defaultFormat={format}
-          recordCount={archiveRecordCount}
-          busy={exporting}
-          onConfirm={(cfg) => void onArchiveConfirm(cfg)}
-        />
 
         {statusMsg && (
           <p
@@ -963,10 +1028,22 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
           </p>
         )}
         <p className="text-[10px] text-muted">
-          Generate fills random values from your schema. File name defaults to the schema name.
-          Shortcuts: Ctrl+G generate · Ctrl+E export · Ctrl+Shift+A archive.
+          Shortcuts: Ctrl+G generate · Ctrl+E export · Ctrl+Shift+A archive. Use Schema / Auto-Gen
+          Schema tabs to preview content.
         </p>
+        </div>
       </div>
+      )}
+
+      <ArchiveDialog
+        open={archiveOpen}
+        onOpenChange={setArchiveOpen}
+        defaultBaseName={resolvedExportBaseName()}
+        defaultFormat={format}
+        recordCount={archiveRecordCount}
+        busy={exporting}
+        onConfirm={(cfg) => void onArchiveConfirm(cfg)}
+      />
     </section>
   )
 })

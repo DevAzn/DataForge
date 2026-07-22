@@ -121,6 +121,22 @@ body.resizing-panels-row {
     0 0 0 1px color-mix(in srgb, var(--color-accent) 55%, transparent),
     0 0 12px color-mix(in srgb, var(--color-accent) 22%, transparent);
 }
+
+/* CSV multi-row: fields kept constant across rows (gold) */
+.schema-row-tied {
+  border-color: #d4a017 !important;
+  background: rgba(255, 215, 0, 0.18) !important;
+  box-shadow:
+    inset 3px 0 0 0 #d4a017,
+    0 0 0 1px rgba(212, 160, 23, 0.7),
+    0 0 10px rgba(255, 215, 0, 0.28);
+}
+.schema-row-tied.schema-row-active {
+  box-shadow:
+    inset 3px 0 0 0 #d4a017,
+    0 0 0 2px rgba(255, 215, 0, 0.85),
+    0 0 14px rgba(255, 215, 0, 0.35);
+}
 .schema-row-active-flash {
   animation: schema-row-active-flash 0.55s ease-out 1;
 }

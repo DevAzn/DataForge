@@ -81,6 +81,11 @@ interface AppState {
   ciRecordHistory: boolean
   /** Write .manifest.json next to export / stream output */
   writeManifest: boolean
+  /**
+   * CSV: keep selected field paths constant across multi-row generate.
+   * When true, schema rows for those paths highlight gold and are pickable.
+   */
+  csvTieKeysEnabled: boolean
   generating: boolean
   streamGenerate: boolean
   /** Format selected in preview panel (used by stream generate) */
@@ -96,6 +101,10 @@ interface AppState {
   setCiMode: (on: boolean) => void
   setCiRecordHistory: (on: boolean) => void
   setWriteManifest: (on: boolean) => void
+  setCsvTieKeysEnabled: (on: boolean) => void
+  /** Toggle a leaf path on/off for CSV multi-row constant keys */
+  toggleCsvTiedPath: (path: string) => void
+  setCsvTiedPaths: (paths: string[]) => void
   /**
    * Pick a *.manifest.json, apply seed/CI/count to generate settings.
    * Returns preview (hash match + warnings) or null if canceled.
@@ -335,6 +344,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   ciMode: false,
   ciRecordHistory: false,
   writeManifest: false,
+  csvTieKeysEnabled: false,
   generating: false,
   streamGenerate: false,
   previewFormat: DEFAULT_SETTINGS.defaultExportFormat,
@@ -343,12 +353,42 @@ export const useAppStore = create<AppState>((set, get) => ({
   lastStreamPath: null,
   clearError: () => set({ error: null }),
   setStreamGenerate: (on) => set({ streamGenerate: on }),
-  setPreviewFormat: (f) => set({ previewFormat: f }),
+  setPreviewFormat: (f) =>
+    set((s) => (s.previewFormat === f ? s : { previewFormat: f })),
   setGenerateSeed: (seed) => set({ generateSeed: seed }),
   setLockSeed: (on) => set({ lockSeed: on }),
   setCiMode: (on) => set({ ciMode: on }),
   setCiRecordHistory: (on) => set({ ciRecordHistory: on }),
   setWriteManifest: (on) => set({ writeManifest: on }),
+  setCsvTieKeysEnabled: (on) => set({ csvTieKeysEnabled: on }),
+  toggleCsvTiedPath: (path) => {
+    const active = get().activeSchema
+    if (!active) return
+    const p = path.trim()
+    if (!p) return
+    const cur = active.csvTiedFieldPaths ?? []
+    const has = cur.some((x) => x.toLowerCase() === p.toLowerCase())
+    const next = has
+      ? cur.filter((x) => x.toLowerCase() !== p.toLowerCase())
+      : [...cur, p]
+    set({
+      activeSchema: {
+        ...active,
+        csvTiedFieldPaths: next.length ? next : undefined
+      }
+    })
+  },
+  setCsvTiedPaths: (paths) => {
+    const active = get().activeSchema
+    if (!active) return
+    const next = paths.map((p) => p.trim()).filter(Boolean)
+    set({
+      activeSchema: {
+        ...active,
+        csvTiedFieldPaths: next.length ? next : undefined
+      }
+    })
+  },
 
   loadManifestForReplay: async () => {
     if (typeof window.dataforge?.pickManifest !== 'function') {
@@ -400,6 +440,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         window.dataforge.listHistory(80)
       ])
       applyTheme(settings.themeMode, settings.customColors)
+      const active = schemas[0] ?? createEmptySchema('My first schema')
       set({
         ready: true,
         status,
@@ -408,14 +449,20 @@ export const useAppStore = create<AppState>((set, get) => ({
         templates,
         history,
         recordCount: settings.defaultRecordCount || 10,
-        activeSchema: schemas[0] ?? createEmptySchema('My first schema'),
+        activeSchema: active,
+        selectedRowId: active.root[0]?.id ?? null,
         error: null
       })
     } catch (e) {
+      const fallback = createEmptySchema()
       set({
         ready: true,
-        error: e instanceof Error ? e.message : 'Failed to initialize',
-        activeSchema: createEmptySchema()
+        error:
+          e instanceof Error
+            ? e.message
+            : 'Failed to initialize — fully restart the app (npm run dev or reinstall)',
+        activeSchema: fallback,
+        selectedRowId: fallback.root[0]?.id ?? null
       })
       applyTheme('dark')
     }

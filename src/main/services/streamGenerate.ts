@@ -22,6 +22,7 @@ export type { StreamGenerateRequest }
 import { getSettings } from '../db/database'
 import { logInteraction } from '../db/history'
 import { extensionForFormat, sanitizeExportFileName } from './formats'
+import { applyTiedFieldPaths } from '../../shared/fieldHistory'
 import {
   createGenerationContext,
   finalizeGenerationReport,
@@ -175,6 +176,10 @@ export async function streamGenerateToFile(
       const step = Math.max(1, Math.min(500, Math.floor(count / 100) || 1))
       let i = 0
       let headerWritten = format !== 'csv'
+      const tiedPaths = (request.schema.csvTiedFieldPaths ?? [])
+        .map((p) => p.trim())
+        .filter(Boolean)
+      let templateRecord: Record<string, unknown> | null = null
 
       const writeNext = (): void => {
         if (settled) return
@@ -191,7 +196,14 @@ export async function streamGenerateToFile(
           let canWrite = true
           const chunkEnd = Math.min(i + step, count)
           while (i < chunkEnd && canWrite) {
-            const rec = generateOneRecord(request.schema.root, scratch)
+            let rec = generateOneRecord(request.schema.root, scratch)
+            if (tiedPaths.length > 0) {
+              if (i === 0) {
+                templateRecord = rec
+              } else if (templateRecord) {
+                rec = applyTiedFieldPaths(templateRecord, rec, tiedPaths)
+              }
+            }
             if (preview.length < sampleSize) preview.push(rec)
             const line =
               format === 'csv'

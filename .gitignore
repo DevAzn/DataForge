@@ -4,14 +4,13 @@ node_modules/
 # Build outputs
 dist/
 out/
-!release/
+release/
 
 # Temporary: end-user EXEs kept in-repo for orgs that block GitHub Release CDN.
 # Prefer GitHub Releases long-term; remove installers/ when policy allows.
 # Do NOT commit release/win-unpacked or other build junk.
 installers/*
 !installers/*.exe
-!installers/*.zip
 !installers/README.md
 
 # TypeScript incremental

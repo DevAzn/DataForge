@@ -88,10 +88,12 @@ export function VirtualHistoryList({
     const el = scrollerRef.current
     if (!el) return
     const ro = new ResizeObserver(() => {
-      setViewportH(el.clientHeight || 320)
+      const h = el.clientHeight || 320
+      setViewportH((prev) => (prev === h ? prev : h))
     })
     ro.observe(el)
-    setViewportH(el.clientHeight || 320)
+    const h0 = el.clientHeight || 320
+    setViewportH((prev) => (prev === h0 ? prev : h0))
     return () => ro.disconnect()
   }, [])
 

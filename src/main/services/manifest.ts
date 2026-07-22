@@ -15,6 +15,7 @@ import type {
 export function hashSchema(schema: SchemaDoc): string {
   const canonical = {
     name: schema.name,
+    csvTiedFieldPaths: schema.csvTiedFieldPaths ?? [],
     root: stripIds(schema.root)
   }
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex').slice(0, 16)
@@ -41,6 +42,9 @@ function stripIds(rows: SchemaDoc['root']): unknown[] {
     children: stripIds(r.children ?? [])
   }))
 }
+
+// Note: schema-level csvTiedFieldPaths is hashed separately via name/root only;
+// include in hashSchema canonical if determinism for CSV ties is required.
 
 export function buildRunManifest(opts: {
   seed: number

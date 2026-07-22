@@ -7,6 +7,7 @@ import type {
   SchemaRow
 } from '../../shared/types'
 import { MAX_GENERATE_RECORDS, MIN_GENERATE_RECORDS } from '../../shared/types'
+import { applyTiedFieldPaths } from '../../shared/fieldHistory'
 import {
   fieldHistoryKey,
   fieldHistoryReadKeys,
@@ -708,12 +709,24 @@ export async function generateData(
       : `Starting generation (seed ${scratch.seed})…`
   })
 
+  const tiedPaths = (request.schema.csvTiedFieldPaths ?? [])
+    .map((p) => p.trim())
+    .filter(Boolean)
   const records: unknown[] = []
+  let templateRecord: Record<string, unknown> | null = null
   const step = Math.max(1, Math.min(50, Math.floor(count / 40) || 1))
   for (let i = 0; i < count; ) {
     const chunkEnd = Math.min(i + step, count)
     for (; i < chunkEnd; i++) {
-      records.push(generateOneRecord(request.schema.root, scratch))
+      let rec = generateOneRecord(request.schema.root, scratch)
+      if (tiedPaths.length > 0) {
+        if (i === 0) {
+          templateRecord = rec
+        } else if (templateRecord) {
+          rec = applyTiedFieldPaths(templateRecord, rec, tiedPaths)
+        }
+      }
+      records.push(rec)
     }
     report({
       phase: 'generating',

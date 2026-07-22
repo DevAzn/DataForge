@@ -83,6 +83,11 @@ export interface SchemaDoc {
   sourceFilePath?: string
   /** Detected format of the uploaded file */
   sourceFormat?: ExportFormat
+  /**
+   * Leaf field paths (e.g. customer.id) kept constant across multi-row CSV generation.
+   * Other fields vary per row. Used when CSV “tie keys” option is on.
+   */
+  csvTiedFieldPaths?: string[]
   createdAt: string
   updatedAt: string
   lastOpenedAt?: string
@@ -94,6 +99,7 @@ export interface SchemaTreePayload {
   sourceFileName?: string
   sourceFilePath?: string
   sourceFormat?: ExportFormat
+  csvTiedFieldPaths?: string[]
 }
 
 export interface Category {
