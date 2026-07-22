@@ -31,7 +31,7 @@ export const MAX_IMPORT_BYTES = 25 * 1024 * 1024
  */
 export type CsvLayoutMode = 'single-header' | 'entity-sections' | 'per-key-sections'
 
-export type ArchiveExt = '.zip' | '.ZIP' | '.tar' | '.TAR'
+export type ArchiveExt = '.zip' | '.ZIP' | '.tar' | '.TAR' | '.tar.gz' | '.tgz'
 
 export type ArchiveMode = 'multi-format' | 'split-records'
 
@@ -239,6 +239,27 @@ export interface EncryptionSettings {
   encryptOnExport: boolean
 }
 
+export type FileNameCollisionPolicy = 'overwrite' | 'skip' | 'suffix'
+export type FileNameSanitizeMode = 'windows' | 'ascii'
+
+/** Per-record / batch file naming template settings. */
+export interface FileNamingSettings {
+  /** e.g. {schema}_{index:04}.{ext} or {schema}/{date:yyyy-MM-dd}/{field:id}.{ext} */
+  pattern: string
+  prefix: string
+  suffix: string
+  defaultIndexPad: number
+  collision: FileNameCollisionPolicy
+  sanitizeMode: FileNameSanitizeMode
+  /** Derive uuid/rand/date from seed+index for CI-stable names */
+  deterministicRandom: boolean
+  /**
+   * Never emit two identical relative paths in one per-file run
+   * (in-memory + disk check). Default true.
+   */
+  ensureUniqueNames: boolean
+}
+
 export interface AppSettings {
   themeMode: ThemeMode
   customColors?: ThemeColors
@@ -254,6 +275,8 @@ export interface AppSettings {
   defaultExportFormat: ExportFormat
   defaultRecordCount: number
   encryption: EncryptionSettings
+  /** Naming pattern for one-file-per-record (and optional batch paths) */
+  fileNaming: FileNamingSettings
 }
 
 export interface EncryptionAssetInfo {
@@ -290,7 +313,7 @@ export interface ArchiveFileSpec {
 }
 
 export interface ArchiveOptions {
-  /** Exact archive extension including casing: .zip | .ZIP | .tar | .TAR */
+  /** Exact archive extension: .zip | .ZIP | .tar | .TAR | .tar.gz | .tgz */
   extension: ArchiveExt
   /** Optional wrapper folder inside the archive */
   topFolderName?: string
@@ -305,15 +328,27 @@ export const DEFAULT_ENCRYPTION: EncryptionSettings = {
   encryptOnExport: false
 }
 
+export const DEFAULT_FILE_NAMING: FileNamingSettings = {
+  pattern: '{schema}_{index:04}.{ext}',
+  prefix: '',
+  suffix: '',
+  defaultIndexPad: 4,
+  collision: 'suffix',
+  sanitizeMode: 'windows',
+  deterministicRandom: false,
+  ensureUniqueNames: true
+}
+
 export const DEFAULT_SETTINGS: AppSettings = {
   themeMode: 'dark',
   csvFlattenDelimiter: '.',
   csvNestedAsJson: false,
   csvLayoutMode: 'single-header',
   csvMultiRow: true,
-  defaultExportFormat: 'json',
+  defaultExportFormat: 'xml',
   defaultRecordCount: 10,
-  encryption: { ...DEFAULT_ENCRYPTION }
+  encryption: { ...DEFAULT_ENCRYPTION },
+  fileNaming: { ...DEFAULT_FILE_NAMING }
 }
 
 export interface AppPaths {
@@ -396,7 +431,14 @@ export interface GenerateResult {
   report?: GenerationReport
   /** True when rows were written to disk without keeping all records in RAM */
   streamed?: boolean
+  /**
+   * When true, each record was written as its own file under `filePath` (a directory).
+   */
+  perFile?: boolean
+  /** Output file path, or directory when perFile is true */
   filePath?: string
+  /** Number of files written when perFile is true */
+  filesWritten?: number
   encryptedPath?: string
   encryptionError?: string
   format?: ExportFormat
@@ -464,6 +506,27 @@ export interface StreamGenerateRequest {
   writeManifest?: boolean
 }
 
+/**
+ * Generate N records and write each as its own file into a user-chosen directory.
+ * Supports all export formats (json, xml, csv, yaml, txt).
+ */
+export interface GeneratePerFileRequest {
+  schema: SchemaDoc
+  recordCount: number
+  recordHistory?: boolean
+  seed?: number
+  ciMode?: boolean
+  format: ExportFormat
+  /** Base file name without extension (e.g. orders → orders_0001.json) */
+  fileName?: string
+  csvFlattenDelimiter?: string
+  csvNestedAsJson?: boolean
+  csvLayoutMode?: CsvLayoutMode
+  previewSampleSize?: number
+  /** Write a single .manifest.json in the output directory */
+  writeManifest?: boolean
+}
+
 export interface ExportRequest {
   data: unknown
   format: ExportFormat
@@ -515,4 +578,41 @@ export interface ArchiveExportResult {
   entryCount?: number
   encryptedPath?: string
   encryptionError?: string
+}
+
+/** Flat entry from listing a ZIP/TAR (main → renderer). */
+export interface ArchiveListEntry {
+  /** Posix path inside archive */
+  path: string
+  /** Uncompressed size when known */
+  size: number
+  /** Directory marker */
+  isDirectory: boolean
+}
+
+export interface ArchiveOpenResult {
+  canceled: boolean
+  filePath?: string
+  /** .zip / .ZIP / .tar / .TAR / .tar.gz / .tgz */
+  extension?: ArchiveExt
+  archiveFileName?: string
+  entries?: ArchiveListEntry[]
+  error?: string
+}
+
+export interface ArchiveReadEntryResult {
+  path: string
+  content?: string
+  binary?: boolean
+  size: number
+  truncated?: boolean
+  error?: string
+}
+
+/** Export a workspace tree (paths + text contents) to ZIP/TAR. */
+export interface ArchiveTreeExportRequest {
+  archiveFileName: string
+  extension: ArchiveExt
+  entries: Array<{ path: string; content: string }>
+  encrypt?: boolean
 }

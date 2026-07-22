@@ -11,7 +11,12 @@ import {
   MAX_IN_MEMORY_GENERATE_RECORDS,
   MIN_GENERATE_RECORDS
 } from '../../shared/types'
-import { applyTiedFieldPaths, fieldPathKey } from '../../shared/fieldHistory'
+import {
+  applyTiedFieldPaths,
+  buildTiedTemplateFromSchema,
+  fieldPathKey,
+  mergeMissingTiedPaths
+} from '../../shared/fieldHistory'
 import {
   fieldHistoryKey,
   fieldHistoryReadKeys,
@@ -749,25 +754,29 @@ export async function generateData(
   const tiedPaths = (request.schema.csvTiedFieldPaths ?? [])
     .map((p) => p.trim())
     .filter(Boolean)
+  // Lock tied keys to schema sample values (e.g. firstName=Joe) on every row
+  const tieTemplate: Record<string, unknown> | null =
+    tiedPaths.length > 0
+      ? buildTiedTemplateFromSchema(request.schema.root, tiedPaths)
+      : null
   const records: unknown[] = []
-  let templateRecord: Record<string, unknown> | null = null
   const step = Math.max(1, Math.min(50, Math.floor(count / 40) || 1))
   for (let i = 0; i < count; ) {
     const chunkEnd = Math.min(i + step, count)
     for (; i < chunkEnd; i++) {
-      // After the first row, do not write discarded pre-tie values into history
-      if (tiedPaths.length > 0 && i > 0) {
+      // Never push random pre-tie values for locked paths into history
+      if (tiedPaths.length > 0) {
         setSuppressHistoryPaths(scratch, tiedPaths)
       } else {
         setSuppressHistoryPaths(scratch, null)
       }
       let rec = generateOneRecord(request.schema.root, scratch)
-      if (tiedPaths.length > 0) {
+      if (tiedPaths.length > 0 && tieTemplate) {
+        // First row: fill any tied paths that had empty samples from this generation
         if (i === 0) {
-          templateRecord = rec
-        } else if (templateRecord) {
-          rec = applyTiedFieldPaths(templateRecord, rec, tiedPaths)
+          mergeMissingTiedPaths(tieTemplate, rec, tiedPaths)
         }
+        rec = applyTiedFieldPaths(tieTemplate, rec, tiedPaths)
       }
       records.push(rec)
     }

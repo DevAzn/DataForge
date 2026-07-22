@@ -95,9 +95,37 @@ You can also re-run a tag from **Actions → Release → Run workflow** (workflo
 
 - Hierarchical fields: values, objects, and arrays
 - Drag-and-drop reorder; siblings and nested children
-- Import sample files (JSON/XML/CSV/YAML/TXT) to infer a schema
+- Import sample files (JSON/XML/CSV/YAML/TXT) to infer a schema (see **Upload / import** below)
 - Per-field constraints: null rate, enum list, min/max length, numeric range, optional regex
 - Properties panel under the row list for the selected field
+
+### Upload / import (production samples)
+
+Upload is the main way to teach DataForge from real data. It does **not** keep a full copy of the production dump as the app’s source of truth. It **learns**:
+
+1. A **schema tree** (field hierarchy) from the file shape  
+2. **Value history** samples (path-scoped) for realistic generation later  
+3. An auto-saved **schema** named after the file  
+
+**Where:** Sidebar → **Schemas** → drop zone, **Browse…**, or **Upload**.  
+Also: Archive Workspace → open ZIP/TAR → file → **Schema**.
+
+| Formats | JSON, JSONL/NDJSON, XML, CSV, YAML, TXT (sniffed) |
+|---------|---------------------------------------------------|
+| Size cap | **~25 MB** UTF-8 |
+| Scan cap | Up to **500** records for structure + history |
+| History cap | Up to **200** unique values per field path |
+
+**Recommended workflow**
+
+1. Prefer a **representative sample** (tens to a few hundred rows covering optional nests). Production samples are assumed already cleaned/inspected before transfer into DataForge.  
+2. Use **Browse…** for larger files (main process reads disk).  
+3. After import: review fields in the middle builder, set constraints/pools if needed.  
+4. Preview format is set from the **uploaded file’s format** (and saved as your last choice).  
+5. **Generate** and export or pack as usual.  
+
+**Expect:** usable nested fields, sample values, history filled for autocomplete/generation.  
+**Do not expect:** Excel/binary import, or full multi‑GB dump ingestion via this path.
 
 ### Value history (path-scoped)
 
@@ -118,10 +146,11 @@ By default, history is **isolated by field path** (e.g. `building.name` does not
 | **Lock seed** | Keep the last seed in the input after generate |
 | **CI mode** | Do **not** sample live history — only samples, enums, constraints, synthesizers (reproducible across machines) |
 | **Record history in CI** | Optional: still write generated values into history when CI is on |
-| **Stream generate** | Write CSV / JSON (NDJSON) / TXT to disk with low memory (preview sample only in UI) |
-| **Write run manifest** | Sidecar `.manifest.json` next to export/stream output |
+| **Stream generate** | Write CSV / JSON (NDJSON) / TXT to **one file** with low memory (preview sample only in UI) |
+| **One file per record** | Write each record as its own file into a **folder you choose** (all formats). Names use **Settings → Per-file naming** templates (`{schema}`, `{index:04}`, `{date}`/`{time}`/`{ts}` with per-file variation, `{uuid}`, `{field:path\|unique}`, subfolders). **Never duplicate names** is on by default. |
+| **Write run manifest** | Sidecar `.manifest.json` next to export/stream output or in the per-file folder |
 
-**Stream generate** is recommended for large counts. In-memory generate keeps the full result set in the main process and renderer — fine for modest N, risky at very large N.
+**Stream generate** (single file) or **one file per record** is recommended for large counts. In-memory generate keeps the full result set in RAM — fine for modest N only.
 
 Progress is shown in the status bar during generate.
 
@@ -130,17 +159,23 @@ Progress is shown in the status bar during generate.
 1. Set format to **CSV**
 2. Enable **Multiple data rows**
 3. Enable **Tie keys across rows**
-4. In the **middle schema rows**, check the box to the **left of each key** that should stay constant on every generated row (those rows highlight gold)
-5. Other fields still vary per row
+4. Enter the **exact sample values** you want locked (e.g. first name `Joe`, last name `Toe`)
+5. In the middle schema rows, check the box to the **left of each key** to lock (rows highlight gold)
+6. Generate — every Auto-Gen row uses those schema samples for tied keys; other fields still vary
 
-Tied paths are saved with the schema (`csvTiedFieldPaths`). Generation applies any stored paths even if the session “tie keys” UI toggle is off after a reload — clear the checkboxes (or paths) when you no longer want constants.
+Tied paths are saved with the schema (`csvTiedFieldPaths`). Locked values always come from the field’s **sample value** in the schema (not a random first row).
 
 CSV header layouts: single header (union of keys), entity sections, or per-key sections. Stream CSV requires **single header**.
 
 ### Export and archives
 
 - Single-file: JSON, XML, CSV, TXT, YAML
-- Package **ZIP** / **TAR**: optional top-level folder, multi-format bundle, or split records across named files
+- **Archive Workspace** (Ctrl+Shift+A or **Archive Workspace…**):
+  - **Explorer** tab: open/build **ZIP**, **TAR**, or **TAR.GZ** (`.tar.gz` / `.tgz`); rename / move / delete
+  - **Edit** text file content in the preview pane (Save content)
+  - **Schema** tab: full schema builder inside the workspace; **Generate** bar (rows, seed) always available
+  - **+ File** from generated data, schema sample, or empty; import archive entry as schema
+  - **Export** writes ZIP / TAR / gzip tarball from the workspace tree
 
 ### Run manifests
 
@@ -223,6 +258,7 @@ src/
 | 3 Generation engine | Done |
 | 4 Single-file export (JSON/XML/CSV/TXT/YAML) | Done |
 | 4b ZIP/TAR (top folder, multi-file modes) | Done |
+| 4c Archive Workspace (open + build + folder tabs) | Done |
 | 5a Custom Python encryption (settings) | Done |
 | 5 Templates + autocomplete | Done |
 | 6 Sample templates | Done |

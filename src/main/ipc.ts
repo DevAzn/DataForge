@@ -6,6 +6,7 @@ import type {
   AppSettings,
   AppStatus,
   ArchiveExportRequest,
+  ArchiveTreeExportRequest,
   ExportRequest,
   ExportResult,
   GenerateRequest,
@@ -14,6 +15,7 @@ import type {
   HistorySuggestQuery,
   SchemaDoc,
   StreamGenerateRequest,
+  GeneratePerFileRequest,
   Template,
   UpdateHistoryEntryRequest,
   RunManifest
@@ -52,7 +54,8 @@ import {
 } from './db/history'
 import type { HistoryPageQuery } from './db/history'
 import { exportBackup, importBackup } from './services/backup'
-import { exportArchive } from './services/archive'
+import { exportArchive, exportArchiveFromTree } from './services/archive'
+import { pickAndOpenArchive, readArchiveEntry } from './services/archiveRead'
 import {
   buildRunManifest,
   pickAndLoadManifest,
@@ -73,6 +76,7 @@ import {
 import { extensionForFormat, sanitizeExportFileName, serializeData } from './services/formats'
 import { generateData } from './services/generator'
 import { streamGenerateToFile } from './services/streamGenerate'
+import { generatePerFileToDirectory } from './services/generatePerFile'
 import { inferSchemaFromFile } from './services/schemaInfer'
 
 export function registerIpcHandlers(): void {
@@ -258,6 +262,19 @@ export function registerIpcHandlers(): void {
     }
   })
 
+  ipcMain.handle(IPC.GENERATE_PER_FILE, async (event, request: GeneratePerFileRequest) => {
+    try {
+      return await generatePerFileToDirectory(event.sender, request, (progress) => {
+        if (!event.sender.isDestroyed()) {
+          event.sender.send(IPC.GENERATE_PROGRESS, progress)
+        }
+      })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      throw new Error(`Per-file generate failed: ${message}`)
+    }
+  })
+
   ipcMain.handle(IPC.MANIFEST_PICK, async (event) => pickAndLoadManifest(event.sender))
   ipcMain.handle(
     IPC.MANIFEST_PREVIEW,
@@ -340,6 +357,35 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.EXPORT_ARCHIVE, async (event, request: ArchiveExportRequest) => {
     try {
       const result = await exportArchive(event.sender, request)
+      if (result.canceled || !result.filePath) return result
+      if (shouldEncryptExport(request.encrypt)) {
+        const enc = await runEncryptionOnFile(result.filePath)
+        if (enc.ok) {
+          return { ...result, encryptedPath: enc.outputPath }
+        }
+        return {
+          ...result,
+          encryptionError: enc.error || enc.stderr || 'Encryption failed'
+        }
+      }
+      return result
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      throw new Error(`Archive export failed: ${message}`)
+    }
+  })
+
+  ipcMain.handle(IPC.ARCHIVE_OPEN, async (event) => pickAndOpenArchive(event.sender))
+
+  ipcMain.handle(
+    IPC.ARCHIVE_READ_ENTRY,
+    async (_e, payload: { archiveFilePath: string; entryPath: string }) =>
+      readArchiveEntry(payload.archiveFilePath, payload.entryPath)
+  )
+
+  ipcMain.handle(IPC.ARCHIVE_EXPORT_TREE, async (event, request: ArchiveTreeExportRequest) => {
+    try {
+      const result = await exportArchiveFromTree(event.sender, request)
       if (result.canceled || !result.filePath) return result
       if (shouldEncryptExport(request.encrypt)) {
         const enc = await runEncryptionOnFile(result.filePath)

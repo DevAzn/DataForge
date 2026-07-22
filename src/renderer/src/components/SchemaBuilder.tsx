@@ -114,7 +114,8 @@ function CsvTiePickBanner(): JSX.Element | null {
       <span className="font-semibold text-[#b8860b]">CSV row ties · gold</span>
       <span className="text-muted">
         {' '}
-        — check the box left of each value field to keep that value the same on every generated CSV
+        — check the box left of each value field to lock that field’s{' '}
+        <span className="text-text">schema sample value</span> (e.g. Joe) on every generated CSV
         row. Selected:{' '}
       </span>
       <span className="font-mono text-[#b8860b]">
@@ -335,8 +336,8 @@ function RowContent({
             className="flex shrink-0 cursor-pointer items-center"
             title={
               isTied
-                ? `Tied across CSV rows — uncheck to vary: ${pathLabel}`
-                : `Tie this key across every CSV row: ${pathLabel}`
+                ? `Locked to schema sample on every CSV row — uncheck to vary: ${pathLabel}`
+                : `Lock schema sample value across every CSV row: ${pathLabel}`
             }
             onClick={(e) => e.stopPropagation()}
           >
@@ -703,7 +704,7 @@ export function SchemaBuilder(): JSX.Element {
             {csvTieKeysEnabled && (
               <span
                 className="inline-block w-3.5 shrink-0"
-                title="Check boxes left of keys to keep those values constant on every CSV row"
+                title="Check boxes lock that field’s schema sample value on every CSV row"
                 aria-hidden
               />
             )}

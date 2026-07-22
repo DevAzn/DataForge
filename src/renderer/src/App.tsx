@@ -21,6 +21,8 @@ export default function App(): JSX.Element {
   const ready = useAppStore((s) => s.ready)
   const error = useAppStore((s) => s.error)
   const clearError = useAppStore((s) => s.clearError)
+  const importMessage = useAppStore((s) => s.importMessage)
+  const clearImportMessage = useAppStore((s) => s.clearImportMessage)
   const previewRef = useRef<PreviewPanelHandle>(null)
 
   useEffect(() => {
@@ -86,6 +88,18 @@ export default function App(): JSX.Element {
           <div className="flex items-center gap-2 bg-danger/15 px-4 py-2 text-sm text-danger border-b border-danger/30">
             <span className="flex-1">{error}</span>
             <button type="button" className="btn-ghost px-2 py-0.5 text-xs" onClick={clearError}>
+              Dismiss
+            </button>
+          </div>
+        )}
+        {!error && importMessage && (
+          <div className="flex items-center gap-2 border-b border-emerald-500/30 bg-emerald-500/15 px-4 py-2 text-sm text-emerald-200">
+            <span className="flex-1">{importMessage}</span>
+            <button
+              type="button"
+              className="btn-ghost px-2 py-0.5 text-xs"
+              onClick={clearImportMessage}
+            >
               Dismiss
             </button>
           </div>

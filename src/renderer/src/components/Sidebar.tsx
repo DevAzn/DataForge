@@ -2,6 +2,7 @@ import { useState } from 'react'
 import logoUrl from '../assets/logo.png'
 import { useAppStore } from '../store/appStore'
 import { EncryptionSettingsPanel } from './EncryptionSettings'
+import { FileNamingSettingsPanel } from './FileNamingSettings'
 import { ThemeSettingsPanel } from './ThemeSettings'
 import { VirtualHistoryList } from './VirtualHistoryList'
 
@@ -304,6 +305,8 @@ export function Sidebar({ fill = false }: { fill?: boolean }): JSX.Element {
         {sidebarTab === 'settings' && (
           <div className="space-y-4">
             <ThemeSettingsPanel />
+
+            <FileNamingSettingsPanel />
 
             <EncryptionSettingsPanel />
 

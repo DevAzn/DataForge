@@ -10,7 +10,11 @@ import type {
   SchemaTreePayload,
   Template
 } from '../../shared/types'
-import { DEFAULT_ENCRYPTION, DEFAULT_SETTINGS } from '../../shared/types'
+import {
+  DEFAULT_ENCRYPTION,
+  DEFAULT_FILE_NAMING,
+  DEFAULT_SETTINGS
+} from '../../shared/types'
 
 function parseTreeJson(
   raw: string
@@ -223,6 +227,10 @@ export function getSettings(): AppSettings {
       encryption: {
         ...DEFAULT_ENCRYPTION,
         ...(parsed.encryption ?? {})
+      },
+      fileNaming: {
+        ...DEFAULT_FILE_NAMING,
+        ...(parsed.fileNaming ?? {})
       }
     }
   } catch {
@@ -243,6 +251,11 @@ export function setSettings(settings: AppSettings): AppSettings {
       ...DEFAULT_ENCRYPTION,
       ...current.encryption,
       ...(settings.encryption ?? {})
+    },
+    fileNaming: {
+      ...DEFAULT_FILE_NAMING,
+      ...current.fileNaming,
+      ...(settings.fileNaming ?? {})
     }
   }
   // Only clear custom colors when explicitly removed (undefined on the patch object)

@@ -6,9 +6,6 @@ import {
   useState
 } from 'react'
 import type {
-  ArchiveExt,
-  ArchiveFileSpec,
-  ArchiveMode,
   CsvLayoutMode,
   ExportFormat,
   SchemaDoc,
@@ -17,7 +14,7 @@ import type {
 import { MAX_GENERATE_RECORDS, MIN_GENERATE_RECORDS } from '@shared/types'
 import { serializeCsv } from '@shared/csv'
 import { useAppStore } from '../store/appStore'
-import { ArchiveDialog } from './ArchiveDialog'
+import { ArchiveWorkspace } from './ArchiveWorkspace'
 
 export interface PreviewPanelHandle {
   generate: () => void
@@ -186,11 +183,13 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
   const generateProgress = useAppStore((s) => s.generateProgress)
   const generate = useAppStore((s) => s.generate)
   const exportData = useAppStore((s) => s.exportData)
-  const exportArchive = useAppStore((s) => s.exportArchive)
   const setRecordCount = useAppStore((s) => s.setRecordCount)
+  const importSchemaFromFile = useAppStore((s) => s.importSchemaFromFile)
   const patchSettings = useAppStore((s) => s.patchSettings)
   const streamGenerate = useAppStore((s) => s.streamGenerate)
   const setStreamGenerate = useAppStore((s) => s.setStreamGenerate)
+  const perFileOutput = useAppStore((s) => s.perFileOutput)
+  const setPerFileOutput = useAppStore((s) => s.setPerFileOutput)
   const setPreviewFormat = useAppStore((s) => s.setPreviewFormat)
   const lastStreamPath = useAppStore((s) => s.lastStreamPath)
   const recordCount = useAppStore((s) => s.recordCount)
@@ -214,11 +213,30 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
   const csvMultiRow = settings.csvMultiRow !== false
   const tiedPaths = activeSchema?.csvTiedFieldPaths ?? EMPTY_TIED_PATHS
 
-  const [format, setFormat] = useState<ExportFormat>(settings.defaultExportFormat || 'json')
+  const [format, setFormat] = useState<ExportFormat>(
+    () => settings.defaultExportFormat || 'xml'
+  )
+
+  // Restore last chosen format from settings (e.g. after init / reload)
+  useEffect(() => {
+    const saved = settings.defaultExportFormat
+    if (saved && saved !== format) {
+      setFormat(saved)
+    }
+    // Only react to settings persistence, not local format loops
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.defaultExportFormat])
 
   useEffect(() => {
     setPreviewFormat(format)
   }, [format, setPreviewFormat])
+
+  function selectFormat(next: ExportFormat): void {
+    setFormat(next)
+    setPreviewFormat(next)
+    // Persist so the same format is used next launch
+    void patchSettings({ defaultExportFormat: next })
+  }
   const [tab, setTab] = useState<PanelTab>('schema')
   const [statusMsg, setStatusMsg] = useState<string | null>(null)
   const [exporting, setExporting] = useState(false)
@@ -427,75 +445,16 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
     }
   }
 
-  async function onArchiveConfirm(config: {
-    extension: ArchiveExt
-    topFolderName: string
-    mode: ArchiveMode
-    files: ArchiveFileSpec[]
-    archiveFileName: string
-  }): Promise<void> {
-    setStatusMsg('Creating archive…')
-    setExporting(true)
-    try {
-      if (lastGenerated?.streamed) {
-        setStatusMsg(
-          `Archive needs an in-memory full batch. This run was streamed to disk` +
-            (lastGenerated.filePath ? ` (${lastGenerated.filePath})` : '') +
-            `. Turn off stream and Generate again, or package the stream file outside DataForge.`
-        )
-        return
-      }
-      // Prefer full generated batch for archives; fall back to schema sample
-      const payload =
-        lastGenerated?.records?.length
-          ? lastGenerated.records
-          : schemaSample
-      if (payload === null || payload === undefined) {
-        setStatusMsg('Nothing to package — generate data or add schema fields first')
-        return
-      }
-
-      const path = await exportArchive({
-        data: payload,
-        archiveFileName: config.archiveFileName || resolvedExportBaseName(),
-        options: {
-          extension: config.extension,
-          topFolderName: config.topFolderName || undefined,
-          mode: config.mode,
-          files: config.files
-        },
-        csvFlattenDelimiter: settings.csvFlattenDelimiter,
-        csvNestedAsJson: settings.csvNestedAsJson,
-        csvLayoutMode: settings.csvLayoutMode,
-        csvMultiRow: settings.csvMultiRow
-      })
-
-      if (path) {
-        setArchiveOpen(false)
-        const encOn =
-          settings.encryption?.enabled && settings.encryption?.encryptOnExport
-        setStatusMsg(
-          encOn
-            ? `Archive saved: ${path} (encryption ran; script changes extension only, base name kept)`
-            : `Archive saved: ${path}`
-        )
-      } else {
-        setStatusMsg('Archive canceled')
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Archive failed'
-      setStatusMsg(msg)
-      console.error('[DataForge archive]', e)
-    } finally {
-      setExporting(false)
-    }
-  }
-
   const hasSchema = Boolean(activeSchema?.root)
   const canExportGenerated = Boolean(generatedData)
   const canExportSchema = hasSchema
-  const canArchive = Boolean(lastGenerated?.records?.length || schemaSample)
-  const archiveRecordCount = lastGenerated?.recordCount ?? (schemaSample ? 1 : 0)
+  const canArchive = true
+  const archiveGeneratedPayload =
+    lastGenerated?.streamed
+      ? null
+      : lastGenerated?.records?.length
+        ? lastGenerated.records
+        : null
 
   return (
     <section
@@ -508,7 +467,7 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
         <select
           className="input ml-auto w-auto py-1 text-xs"
           value={format}
-          onChange={(e) => setFormat(e.target.value as ExportFormat)}
+          onChange={(e) => selectFormat(e.target.value as ExportFormat)}
         >
           {FORMATS.map((f) => (
             <option key={f} value={f}>
@@ -777,7 +736,7 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
         </div>
 
         <div className="space-y-1.5 rounded-md border border-border bg-bg p-2">
-          <div className="label">Stream generate</div>
+          <div className="label">Output mode</div>
         <label className="flex items-start gap-2 text-xs">
           <input
             type="checkbox"
@@ -786,23 +745,61 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
             onChange={(e) => setStreamGenerate(e.target.checked)}
           />
           <span>
-            <span className="font-medium text-text">Stream generate to file</span>
+            <span className="font-medium text-text">Stream generate to one file</span>
             <span className="block text-muted">
-              Low memory: write each row as generated (CSV single-header, JSON as NDJSON/.jsonl, or
-              TXT). Opens a save dialog. Only a small preview stays in memory — Export/Archive of
-              “Generated” is blocked for streamed runs; use the stream file for the full output.
-              Counts above 10,000 auto-enable stream for CSV/JSON/TXT.
+              Low memory: one output file (CSV single-header, JSON as NDJSON/.jsonl, or TXT). Opens
+              a save dialog. Counts above 10,000 auto-enable this for CSV/JSON/TXT.
               {streamGenerate &&
                 format === 'csv' &&
                 csvLayoutMode !== 'single-header' &&
                 ' Requires “Single header” CSV layout.'}
               {streamGenerate &&
                 (format === 'yaml' || format === 'xml') &&
-                ' YAML/XML are not streamable — switch format or turn stream off.'}
+                ' YAML/XML are not streamable — use per-file output instead.'}
             </span>
           </span>
         </label>
-        {lastGenerated?.streamed && (
+        <label className="flex items-start gap-2 text-xs">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={perFileOutput}
+            onChange={(e) => setPerFileOutput(e.target.checked)}
+          />
+          <span>
+            <span className="font-medium text-text">One file per record</span>
+            <span className="block text-muted">
+              Writes each record as its own file into a folder you choose. Names follow{' '}
+              <span className="text-text font-medium">Settings → Per-file naming</span> (tokens like{' '}
+              <span className="font-mono">{'{schema}_{index:04}.{ext}'}</span> or{' '}
+              <span className="font-mono">{'{field:id}'}</span>). Works for all formats. Only a small
+              preview stays in memory.
+            </span>
+          </span>
+        </label>
+        {perFileOutput && (
+          <p className="rounded border border-border bg-bg px-2 py-1 font-mono text-[10px] text-muted">
+            Pattern:{' '}
+            <span className="text-text">
+              {settings.fileNaming?.pattern || '{schema}_{index:04}.{ext}'}
+            </span>
+          </p>
+        )}
+        {lastGenerated?.perFile && (
+          <p className="rounded border border-emerald-500/40 bg-emerald-500/10 px-2 py-1.5 text-[10px] text-text">
+            Per-file run: wrote {lastGenerated.filesWritten?.toLocaleString() ?? lastGenerated.recordCount}{' '}
+            files
+            {lastGenerated.filePath ? (
+              <>
+                {' '}
+                under <span className="font-mono break-all">{lastGenerated.filePath}</span>
+              </>
+            ) : null}
+            . Preview shows {lastGenerated.records?.length ?? 0} of{' '}
+            {lastGenerated.recordCount.toLocaleString()} records.
+          </p>
+        )}
+        {lastGenerated?.streamed && !lastGenerated?.perFile && (
           <p className="rounded border border-accent/40 bg-accent/10 px-2 py-1.5 text-[10px] text-text">
             Streamed run: full data is on disk
             {lastGenerated.filePath ? (
@@ -816,7 +813,7 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
           </p>
         )}
         {lastStreamPath && !lastGenerated?.streamed && (
-          <p className="text-[10px] text-muted break-all">Last stream file: {lastStreamPath}</p>
+          <p className="text-[10px] text-muted break-all">Last output path: {lastStreamPath}</p>
         )}
         </div>
 
@@ -851,9 +848,10 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
                   <span>
                     <span className="font-medium text-text">Tie keys across rows</span>
                     <span className="block text-muted">
-                      When on, checkboxes appear left of each key in the middle schema rows. Checked
-                      fields stay the same on every generated CSV row (shown in{' '}
-                      <span className="font-medium text-[#b8860b]">gold</span>); other fields still
+                      When on, checkboxes appear left of each key in the schema builder. Checked
+                      fields use the <span className="text-text font-medium">exact sample value</span>{' '}
+                      you entered (e.g. Joe / Toe) on every generated CSV row — shown in{' '}
+                      <span className="font-medium text-[#b8860b]">gold</span>. Other fields still
                       vary.
                     </span>
                   </span>
@@ -861,8 +859,8 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
                 {csvTieKeysEnabled && (
                   <p className="pl-6 text-[10px] text-[#b8860b]">
                     {tiedPaths.length > 0
-                      ? `Constant on every row: ${tiedPaths.join(', ')}`
-                      : 'No fields tied yet — check boxes next to keys in the schema builder.'}
+                      ? `Locked to schema samples: ${tiedPaths.join(', ')}`
+                      : 'No fields tied yet — set sample values, then check boxes next to keys.'}
                   </p>
                 )}
               </div>
@@ -1010,9 +1008,9 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
           className="btn-ghost w-full border border-border"
           disabled={!canArchive || exporting}
           onClick={() => setArchiveOpen(true)}
-          title="Package into .zip / .tar with top folder and multiple nested files"
+          title="Open or build ZIP/TAR — folder tabs, preview, import as schema"
         >
-          Package ZIP / TAR…
+          Archive Workspace…
         </button>
 
         {statusMsg && (
@@ -1036,14 +1034,24 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
       </div>
       )}
 
-      <ArchiveDialog
+      <ArchiveWorkspace
         open={archiveOpen}
         onOpenChange={setArchiveOpen}
         defaultBaseName={resolvedExportBaseName()}
         defaultFormat={format}
-        recordCount={archiveRecordCount}
+        generatedPayload={archiveGeneratedPayload}
+        schemaSample={schemaSample}
         busy={exporting}
-        onConfirm={(cfg) => void onArchiveConfirm(cfg)}
+        onImportSchema={async (fileName, content) => {
+          await importSchemaFromFile(fileName, content)
+          setArchiveOpen(false)
+          setStatusMsg(`Schema imported from archive entry: ${fileName}`)
+        }}
+        onExported={(path) => {
+          setArchiveOpen(false)
+          setStatusMsg(`Archive saved: ${path}`)
+        }}
+        onError={(msg) => setStatusMsg(msg)}
       />
     </section>
   )

@@ -126,6 +126,81 @@ export function applyTiedFieldPaths(
   return target
 }
 
+/** Coerce schema sample text the same way the builder/preview treats samples. */
+export function coerceSampleValue(sampleValue: string): unknown {
+  const s = sampleValue.trim()
+  if (s === '') return ''
+  if (s === 'true') return true
+  if (s === 'false') return false
+  if (s === 'null') return null
+  // Prefer plain numbers when the whole sample is numeric
+  if (/^-?\d+$/.test(s)) {
+    const n = Number(s)
+    if (Number.isSafeInteger(n)) return n
+  }
+  if (/^-?\d+\.\d+$/.test(s)) {
+    const n = Number(s)
+    if (Number.isFinite(n)) return n
+  }
+  return sampleValue
+}
+
+/**
+ * Build a partial record of constant values for CSV “tie keys” from schema
+ * sampleValue fields. Paths not present (empty sample) are omitted so the
+ * generator can fill them once from the first generated row.
+ */
+export function buildTiedTemplateFromSchema(
+  root: SchemaRow[],
+  tiedPaths: string[]
+): Record<string, unknown> {
+  const want = new Set(
+    tiedPaths.map((p) => p.trim().toLowerCase()).filter(Boolean)
+  )
+  if (want.size === 0) return {}
+
+  const template: Record<string, unknown> = {}
+
+  function walk(rows: SchemaRow[], parentPath: string[]): void {
+    for (const row of rows) {
+      const leaf = (row.key || 'field').trim() || 'field'
+      const fullPath = [...parentPath, leaf]
+      const pathKey = fullPath.join('.')
+      if (row.kind === 'value') {
+        if (want.has(pathKey.toLowerCase())) {
+          const raw = row.sampleValue
+          if (raw !== undefined && String(raw).length > 0) {
+            setValueAtPath(template, pathKey, coerceSampleValue(String(raw)))
+          }
+        }
+      } else if (row.children.length) {
+        walk(row.children, fullPath)
+      }
+    }
+  }
+
+  walk(root, [])
+  return template
+}
+
+/**
+ * For tied paths missing on the template, copy values from `record` into template.
+ * Used so the first generated row can fill blanks when schema samples are empty.
+ */
+export function mergeMissingTiedPaths(
+  template: Record<string, unknown>,
+  record: Record<string, unknown>,
+  paths: string[]
+): void {
+  for (const path of paths) {
+    const p = path.trim()
+    if (!p) continue
+    if (pathExistsOnObject(template, p)) continue
+    if (!pathExistsOnObject(record, p)) continue
+    setValueAtPath(template, p, getValueAtPath(record, p))
+  }
+}
+
 /** True if every segment of `path` exists on `obj` (value may be null). */
 export function pathExistsOnObject(obj: unknown, path: string): boolean {
   if (!path || obj === null || obj === undefined) return false

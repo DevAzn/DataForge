@@ -7,15 +7,64 @@ import type {
   ArchiveExportResult,
   ArchiveExt,
   ArchiveFileSpec,
+  ArchiveTreeExportRequest,
   ExportFormat
 } from '../../shared/types'
+import { pathToSegments } from '../../shared/archiveTree'
 import { getSettings } from '../db/database'
 import { logInteraction } from '../db/history'
 import { extensionForFormat, sanitizeExportFileName, serializeData } from './formats'
 
-function archiveFormat(ext: ArchiveExt): 'zip' | 'tar' {
+type ArchiveKind = 'zip' | 'tar' | 'tar.gz'
+
+function archiveKind(ext: ArchiveExt): ArchiveKind {
   const lower = ext.toLowerCase()
-  return lower === '.tar' ? 'tar' : 'zip'
+  if (lower === '.tar.gz' || lower === '.tgz') return 'tar.gz'
+  if (lower === '.tar') return 'tar'
+  return 'zip'
+}
+
+const SUPPORTED_ARCHIVE_EXTS: ArchiveExt[] = [
+  '.zip',
+  '.ZIP',
+  '.tar',
+  '.TAR',
+  '.tar.gz',
+  '.tgz'
+]
+
+function ensureArchiveExtension(filePath: string, ext: ArchiveExt): string {
+  const lower = filePath.toLowerCase()
+  if (lower.endsWith('.tar.gz') || lower.endsWith('.tgz')) {
+    if (ext === '.tar.gz' || ext === '.tgz') {
+      // Replace compound or short gzip-tar suffix with chosen form
+      return filePath.replace(/(\.tar\.gz|\.tgz)$/i, ext)
+    }
+  }
+  if (lower.endsWith('.zip') || lower.endsWith('.tar')) {
+    return filePath.replace(/\.(zip|tar)$/i, ext)
+  }
+  return `${filePath}${ext}`
+}
+
+function saveDialogFilters(ext: ArchiveExt): Electron.FileFilter[] {
+  const kind = archiveKind(ext)
+  if (kind === 'tar.gz') {
+    return [
+      { name: 'Gzip tarball', extensions: ['tar.gz', 'tgz'] },
+      { name: 'All files', extensions: ['*'] }
+    ]
+  }
+  if (kind === 'tar') {
+    return [
+      { name: 'TAR archive', extensions: ['tar', 'TAR'] },
+      { name: 'All files', extensions: ['*'] }
+    ]
+  }
+  return [
+    { name: 'ZIP archive', extensions: ['zip', 'ZIP'] },
+    { name: 'All files', extensions: ['*'] }
+  ]
 }
 
 function sanitizeEntrySegment(name: string): string {
@@ -121,9 +170,14 @@ function writeArchive(
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const output = createWriteStream(filePath)
-    const archive = archiver(archiveFormat(ext), {
-      zlib: { level: 9 }
-    })
+    const kind = archiveKind(ext)
+    // archiver: zip | tar; gzip compression for .tar.gz / .tgz
+    const archive =
+      kind === 'tar.gz'
+        ? archiver('tar', { gzip: true, gzipOptions: { level: 9 } })
+        : kind === 'tar'
+          ? archiver('tar')
+          : archiver('zip', { zlib: { level: 9 } })
 
     output.on('close', () => resolve())
     output.on('error', reject)
@@ -147,7 +201,7 @@ export async function exportArchive(
   request: ArchiveExportRequest
 ): Promise<ArchiveExportResult> {
   const ext = request.options.extension
-  if (!['.zip', '.ZIP', '.tar', '.TAR'].includes(ext)) {
+  if (!SUPPORTED_ARCHIVE_EXTS.includes(ext)) {
     throw new Error(`Unsupported archive extension: ${ext}`)
   }
 
@@ -157,16 +211,7 @@ export async function exportArchive(
   const defaultPath = `${base}${ext}`
 
   const win = BrowserWindow.fromWebContents(eventSender) ?? BrowserWindow.getFocusedWindow()
-  const filters =
-    archiveFormat(ext) === 'tar'
-      ? [
-          { name: 'TAR archive', extensions: ['tar', 'TAR'] },
-          { name: 'All files', extensions: ['*'] }
-        ]
-      : [
-          { name: 'ZIP archive', extensions: ['zip', 'ZIP'] },
-          { name: 'All files', extensions: ['*'] }
-        ]
+  const filters = saveDialogFilters(ext)
 
   const result = win
     ? await dialog.showSaveDialog(win, {
@@ -184,15 +229,7 @@ export async function exportArchive(
     return { canceled: true }
   }
 
-  // Force the user-chosen extension casing on the saved path when possible
-  let filePath = result.filePath
-  const lower = filePath.toLowerCase()
-  if (!lower.endsWith('.zip') && !lower.endsWith('.tar')) {
-    filePath = `${filePath}${ext}`
-  } else {
-    // Replace extension with exact casing from options
-    filePath = filePath.replace(/\.(zip|tar)$/i, ext)
-  }
+  const filePath = ensureArchiveExtension(result.filePath, ext)
 
   await writeArchive(filePath, ext, entries)
 
@@ -224,5 +261,70 @@ export function defaultArchiveFiles(
 }
 
 export function archiveBaseNameFromPath(filePath: string): string {
-  return basename(filePath).replace(/\.(zip|tar)$/i, '')
+  return basename(filePath)
+    .replace(/\.tar\.gz$/i, '')
+    .replace(/\.tgz$/i, '')
+    .replace(/\.(zip|tar)$/i, '')
+}
+
+/**
+ * Export an arbitrary workspace tree (path → text content) as ZIP/TAR/TAR.GZ.
+ * Used by Archive Workspace build / hybrid modes.
+ */
+export async function exportArchiveFromTree(
+  eventSender: Electron.WebContents,
+  request: ArchiveTreeExportRequest
+): Promise<ArchiveExportResult> {
+  const ext = request.extension
+  if (!SUPPORTED_ARCHIVE_EXTS.includes(ext)) {
+    throw new Error(`Unsupported archive extension: ${ext}`)
+  }
+
+  const entries: BuiltEntry[] = []
+  for (const e of request.entries) {
+    const path = pathToSegments(e.path.replace(/\\/g, '/')).join('/')
+    if (!path) continue
+    entries.push({ path, content: e.content ?? '' })
+  }
+  if (entries.length === 0) {
+    throw new Error('Archive has no files to export — add files or open an archive with content')
+  }
+
+  const base = sanitizeExportFileName(request.archiveFileName || 'dataforge-pack')
+  const defaultPath = `${base}${ext}`
+
+  const win = BrowserWindow.fromWebContents(eventSender) ?? BrowserWindow.getFocusedWindow()
+  const filters = saveDialogFilters(ext)
+
+  const result = win
+    ? await dialog.showSaveDialog(win, {
+        title: 'Export archive',
+        defaultPath,
+        filters
+      })
+    : await dialog.showSaveDialog({
+        title: 'Export archive',
+        defaultPath,
+        filters
+      })
+
+  if (result.canceled || !result.filePath) {
+    return { canceled: true }
+  }
+
+  const filePath = ensureArchiveExtension(result.filePath, ext)
+
+  await writeArchive(filePath, ext, entries)
+
+  logInteraction('export_archive_tree', {
+    path: filePath,
+    extension: ext,
+    entryCount: entries.length
+  })
+
+  return {
+    canceled: false,
+    filePath,
+    entryCount: entries.length
+  }
 }

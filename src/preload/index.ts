@@ -5,6 +5,9 @@ import type {
   AppStatus,
   ArchiveExportRequest,
   ArchiveExportResult,
+  ArchiveOpenResult,
+  ArchiveReadEntryResult,
+  ArchiveTreeExportRequest,
   EncryptionAssetInfo,
   EncryptionRunResult,
   EncryptionUploadResult,
@@ -14,6 +17,7 @@ import type {
   GenerateRequest,
   GenerateResult,
   StreamGenerateRequest,
+  GeneratePerFileRequest,
   ClearHistoryRequest,
   ClearHistoryResult,
   DeleteHistoryResult,
@@ -49,11 +53,23 @@ const api = {
   importSchemaFromContent: (
     fileName: string,
     content: string
-  ): Promise<{ schema: SchemaDoc; format: ExportFormat; recordHint: number }> =>
-    ipcRenderer.invoke(IPC.SCHEMAS_IMPORT, { fileName, content }),
+  ): Promise<{
+    schema: SchemaDoc
+    format: ExportFormat
+    recordHint: number
+    scannedRecords?: number
+    historySamples?: unknown[]
+  }> => ipcRenderer.invoke(IPC.SCHEMAS_IMPORT, { fileName, content }),
   importSchemaPick: (): Promise<
     | { canceled: true }
-    | { canceled: false; schema: SchemaDoc; format: ExportFormat; recordHint: number }
+    | {
+        canceled: false
+        schema: SchemaDoc
+        format: ExportFormat
+        recordHint: number
+        scannedRecords?: number
+        historySamples?: unknown[]
+      }
   > => ipcRenderer.invoke(IPC.SCHEMAS_IMPORT_PICK),
 
   listTemplates: (): Promise<Template[]> => ipcRenderer.invoke(IPC.TEMPLATES_LIST),
@@ -94,6 +110,8 @@ const api = {
     ipcRenderer.invoke(IPC.GENERATE, request),
   generateStream: (request: StreamGenerateRequest): Promise<GenerateResult> =>
     ipcRenderer.invoke(IPC.GENERATE_STREAM, request),
+  generatePerFile: (request: GeneratePerFileRequest): Promise<GenerateResult> =>
+    ipcRenderer.invoke(IPC.GENERATE_PER_FILE, request),
   pickManifest: (): Promise<LoadManifestResult> => ipcRenderer.invoke(IPC.MANIFEST_PICK),
   previewManifest: (payload: {
     manifest: RunManifest
@@ -113,6 +131,14 @@ const api = {
     ipcRenderer.invoke(IPC.EXPORT_FILE, request),
   exportArchive: (request: ArchiveExportRequest): Promise<ArchiveExportResult> =>
     ipcRenderer.invoke(IPC.EXPORT_ARCHIVE, request),
+  openArchive: (): Promise<ArchiveOpenResult> => ipcRenderer.invoke(IPC.ARCHIVE_OPEN),
+  readArchiveEntry: (
+    archiveFilePath: string,
+    entryPath: string
+  ): Promise<ArchiveReadEntryResult> =>
+    ipcRenderer.invoke(IPC.ARCHIVE_READ_ENTRY, { archiveFilePath, entryPath }),
+  exportArchiveTree: (request: ArchiveTreeExportRequest): Promise<ArchiveExportResult> =>
+    ipcRenderer.invoke(IPC.ARCHIVE_EXPORT_TREE, request),
 
   encryptionStatus: (): Promise<EncryptionAssetInfo> =>
     ipcRenderer.invoke(IPC.ENCRYPTION_STATUS),

@@ -34,7 +34,9 @@
     "fast-xml-parser": "^5.2.5",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "tar-stream": "^3.2.0",
     "yaml": "^2.8.0",
+    "yauzl": "^3.4.0",
     "zustand": "^5.0.6"
   },
   "devDependencies": {
@@ -42,6 +44,8 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/react": "^18.3.23",
     "@types/react-dom": "^18.3.7",
+    "@types/tar-stream": "^3.1.4",
+    "@types/yauzl": "^3.4.0",
     "@vitejs/plugin-react": "^4.6.0",
     "autoprefixer": "^10.4.21",
     "electron": "^36.9.5",
@@ -69,7 +73,9 @@
       {
         "from": "resources",
         "to": "resources",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "win": {

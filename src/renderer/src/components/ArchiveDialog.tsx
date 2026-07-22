@@ -8,7 +8,7 @@ import type {
 } from '@shared/types'
 
 const FORMATS: ExportFormat[] = ['json', 'yaml', 'xml', 'csv', 'txt']
-const EXTENSIONS: ArchiveExt[] = ['.zip', '.ZIP', '.tar', '.TAR']
+const EXTENSIONS: ArchiveExt[] = ['.zip', '.ZIP', '.tar', '.TAR', '.tar.gz', '.tgz']
 
 function extForFormat(format: ExportFormat): string {
   return format === 'yaml' ? 'yml' : format

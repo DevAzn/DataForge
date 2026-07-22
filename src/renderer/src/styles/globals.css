@@ -92,6 +92,75 @@ body {
     @apply btn bg-danger/15 text-danger hover:bg-danger/25;
   }
 
+  /* Colorful action buttons — easy to scan */
+  .btn-open {
+    @apply btn border border-sky-500/40 bg-sky-500/15 text-sky-300
+      hover:border-sky-400 hover:bg-sky-500/30 hover:text-sky-100
+      active:scale-[0.98] transition;
+  }
+  .btn-new {
+    @apply btn border border-violet-500/40 bg-violet-500/15 text-violet-300
+      hover:border-violet-400 hover:bg-violet-500/30 hover:text-violet-100
+      active:scale-[0.98] transition;
+  }
+  .btn-generate {
+    @apply btn border border-emerald-500/50 bg-emerald-500 text-white
+      hover:bg-emerald-400 hover:shadow-[0_0_12px_rgba(52,211,153,0.35)]
+      active:scale-[0.98] transition;
+  }
+  .btn-export {
+    @apply btn border border-amber-500/50 bg-amber-500 text-amber-950 font-semibold
+      hover:bg-amber-400 hover:shadow-[0_0_12px_rgba(251,191,36,0.4)]
+      active:scale-[0.98] transition;
+  }
+  .btn-save {
+    @apply btn border border-cyan-500/40 bg-cyan-500/20 text-cyan-200
+      hover:border-cyan-400 hover:bg-cyan-500/35 hover:text-cyan-50
+      active:scale-[0.98] transition;
+  }
+  .btn-schema {
+    @apply btn border border-fuchsia-500/40 bg-fuchsia-500/15 text-fuchsia-300
+      hover:border-fuchsia-400 hover:bg-fuchsia-500/30 hover:text-fuchsia-100
+      active:scale-[0.98] transition;
+  }
+  .btn-ok {
+    @apply btn border border-emerald-500/40 bg-emerald-500/20 text-emerald-200
+      hover:bg-emerald-500/35 hover:text-emerald-50
+      active:scale-[0.98] transition;
+  }
+  .btn-cancel {
+    @apply btn border border-border bg-surface-2 text-muted
+      hover:border-muted hover:bg-surface-2 hover:text-text
+      active:scale-[0.98] transition;
+  }
+
+  /* Tiny explorer row chips */
+  .chip {
+    @apply inline-flex items-center rounded px-1 py-0.5 text-[10px] font-medium
+      transition active:scale-95;
+  }
+  .chip-rename {
+    @apply chip bg-sky-500/20 text-sky-300 hover:bg-sky-500/40 hover:text-sky-100;
+  }
+  .chip-move {
+    @apply chip bg-amber-500/20 text-amber-300 hover:bg-amber-500/40 hover:text-amber-100;
+  }
+  .chip-schema {
+    @apply chip bg-fuchsia-500/20 text-fuchsia-300 hover:bg-fuchsia-500/40 hover:text-fuchsia-100;
+  }
+  .chip-delete {
+    @apply chip bg-rose-500/20 text-rose-300 hover:bg-rose-500/45 hover:text-rose-100;
+  }
+  .chip-icon {
+    @apply rounded p-1 transition active:scale-95;
+  }
+  .chip-icon-file {
+    @apply chip-icon text-emerald-400 hover:bg-emerald-500/25 hover:text-emerald-200;
+  }
+  .chip-icon-folder {
+    @apply chip-icon text-amber-400 hover:bg-amber-500/25 hover:text-amber-200;
+  }
+
   .input {
     @apply w-full rounded-md border border-border bg-bg px-3 py-1.5 text-sm text-text
       placeholder:text-muted outline-none focus:border-accent focus:ring-1 focus:ring-accent;
@@ -99,6 +168,17 @@ body {
 
   .label {
     @apply text-xs font-medium text-muted uppercase tracking-wide;
+  }
+
+  /* VS Code–style list selection (Archive Explorer) */
+  .bg-list-hover {
+    background: color-mix(in srgb, var(--color-text) 6%, transparent);
+  }
+  .bg-list-active {
+    background: color-mix(in srgb, var(--color-accent) 28%, var(--color-surface));
+  }
+  .explorer-row {
+    user-select: none;
   }
 }
 

@@ -22,7 +22,11 @@ export type { StreamGenerateRequest }
 import { getSettings } from '../db/database'
 import { logInteraction } from '../db/history'
 import { extensionForFormat, sanitizeExportFileName } from './formats'
-import { applyTiedFieldPaths } from '../../shared/fieldHistory'
+import {
+  applyTiedFieldPaths,
+  buildTiedTemplateFromSchema,
+  mergeMissingTiedPaths
+} from '../../shared/fieldHistory'
 import {
   createGenerationContext,
   finalizeGenerationReport,
@@ -180,7 +184,10 @@ export async function streamGenerateToFile(
       const tiedPaths = (request.schema.csvTiedFieldPaths ?? [])
         .map((p) => p.trim())
         .filter(Boolean)
-      let templateRecord: Record<string, unknown> | null = null
+      const tieTemplate: Record<string, unknown> | null =
+        tiedPaths.length > 0
+          ? buildTiedTemplateFromSchema(request.schema.root, tiedPaths)
+          : null
 
       const writeNext = (): void => {
         if (settled) return
@@ -197,18 +204,17 @@ export async function streamGenerateToFile(
           let canWrite = true
           const chunkEnd = Math.min(i + step, count)
           while (i < chunkEnd && canWrite) {
-            if (tiedPaths.length > 0 && i > 0) {
+            if (tiedPaths.length > 0) {
               setSuppressHistoryPaths(scratch, tiedPaths)
             } else {
               setSuppressHistoryPaths(scratch, null)
             }
             let rec = generateOneRecord(request.schema.root, scratch)
-            if (tiedPaths.length > 0) {
+            if (tiedPaths.length > 0 && tieTemplate) {
               if (i === 0) {
-                templateRecord = rec
-              } else if (templateRecord) {
-                rec = applyTiedFieldPaths(templateRecord, rec, tiedPaths)
+                mergeMissingTiedPaths(tieTemplate, rec, tiedPaths)
               }
+              rec = applyTiedFieldPaths(tieTemplate, rec, tiedPaths)
             }
             if (preview.length < sampleSize) preview.push(rec)
             const line =

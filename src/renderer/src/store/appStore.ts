@@ -15,6 +15,7 @@ import type {
 } from '@shared/types'
 import {
   DEFAULT_ENCRYPTION,
+  DEFAULT_FILE_NAMING,
   DEFAULT_SETTINGS,
   MAX_GENERATE_RECORDS,
   MAX_IN_MEMORY_GENERATE_RECORDS,
@@ -71,6 +72,8 @@ interface AppState {
   selectedRowId: string | null
   sidebarTab: 'schemas' | 'templates' | 'history' | 'settings'
   error: string | null
+  /** Non-error banner after a successful schema import */
+  importMessage: string | null
   recordCount: number
   /** Optional generation seed (empty string = random each run) */
   generateSeed: string
@@ -89,13 +92,20 @@ interface AppState {
   csvTieKeysEnabled: boolean
   generating: boolean
   streamGenerate: boolean
+  /**
+   * Write each generated record as its own file into a user-chosen folder.
+   * Mutually exclusive with streamGenerate (single file).
+   */
+  perFileOutput: boolean
   /** Format selected in preview panel (used by stream generate) */
   previewFormat: ExportFormat
   generateProgress: GenerateProgress | null
   lastGenerated: GenerateResult | null
   lastStreamPath: string | null
   clearError: () => void
+  clearImportMessage: () => void
   setStreamGenerate: (on: boolean) => void
+  setPerFileOutput: (on: boolean) => void
   setPreviewFormat: (f: ExportFormat) => void
   setGenerateSeed: (seed: string) => void
   setLockSeed: (on: boolean) => void
@@ -331,7 +341,11 @@ function moveRowInTree(
 export const useAppStore = create<AppState>((set, get) => ({
   ready: false,
   status: null,
-  settings: { ...DEFAULT_SETTINGS, encryption: { ...DEFAULT_ENCRYPTION } },
+  settings: {
+    ...DEFAULT_SETTINGS,
+    encryption: { ...DEFAULT_ENCRYPTION },
+    fileNaming: { ...DEFAULT_FILE_NAMING }
+  },
   schemas: [],
   templates: [],
   history: [],
@@ -339,6 +353,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   selectedRowId: null,
   sidebarTab: 'schemas',
   error: null,
+  importMessage: null,
   recordCount: DEFAULT_SETTINGS.defaultRecordCount,
   generateSeed: '',
   lockSeed: false,
@@ -348,12 +363,17 @@ export const useAppStore = create<AppState>((set, get) => ({
   csvTieKeysEnabled: false,
   generating: false,
   streamGenerate: false,
+  perFileOutput: false,
   previewFormat: DEFAULT_SETTINGS.defaultExportFormat,
   generateProgress: null,
   lastGenerated: null,
   lastStreamPath: null,
   clearError: () => set({ error: null }),
-  setStreamGenerate: (on) => set({ streamGenerate: on }),
+  clearImportMessage: () => set({ importMessage: null }),
+  setStreamGenerate: (on) =>
+    set(on ? { streamGenerate: true, perFileOutput: false } : { streamGenerate: false }),
+  setPerFileOutput: (on) =>
+    set(on ? { perFileOutput: true, streamGenerate: false } : { perFileOutput: false }),
   setPreviewFormat: (f) =>
     set((s) => (s.previewFormat === f ? s : { previewFormat: f })),
   setGenerateSeed: (seed) => set({ generateSeed: seed }),
@@ -450,6 +470,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         templates,
         history,
         recordCount: settings.defaultRecordCount || 10,
+        previewFormat: settings.defaultExportFormat || 'xml',
         activeSchema: active,
         selectedRowId: active.root[0]?.id ?? null,
         error: null
@@ -608,27 +629,36 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (typeof content === 'string' && content.length > 30_000_000) {
         throw new Error('Import file is too large (max ~25 MB).')
       }
-      const { schema, format, recordHint } = await window.dataforge.importSchemaFromContent(
-        fileName,
-        content
-      )
-      // Schema is auto-saved in main process; refresh list
+      const result = await window.dataforge.importSchemaFromContent(fileName, content)
       const schemas = await window.dataforge.listSchemas()
+      const histN = result.historySamples?.length ?? 0
+      const scanned = result.scannedRecords ?? result.recordHint
+      // Force preview format to the uploaded file's format and persist as last choice
+      const settings = {
+        ...get().settings,
+        defaultExportFormat: result.format
+      }
       set({
         schemas,
-        activeSchema: schema,
-        selectedRowId: schema.root[0]?.id ?? null,
+        activeSchema: result.schema,
+        selectedRowId: result.schema.root[0]?.id ?? null,
         lastGenerated: null,
         sidebarTab: 'schemas',
         error: null,
-        previewFormat: format
+        previewFormat: result.format,
+        settings,
+        importMessage: `Imported “${result.schema.name}” (${result.format.toUpperCase()}) · ${result.schema.root.length} top fields · scanned ${scanned} rec · ${histN} history values`
       })
-      if (recordHint > 0) {
-        get().setRecordCount(Math.min(Math.max(recordHint, 1), 10_000))
+      void window.dataforge.setSettings(settings).then((saved) => {
+        set({ settings: saved })
+      })
+      if (result.recordHint > 0) {
+        get().setRecordCount(Math.min(Math.max(result.recordHint, 1), 10_000))
       }
     } catch (e) {
       set({
-        error: e instanceof Error ? e.message : 'Failed to import schema from file'
+        error: e instanceof Error ? e.message : 'Failed to import schema from file',
+        importMessage: null
       })
     }
   },
@@ -641,6 +671,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       const result = await window.dataforge.importSchemaPick()
       if (result.canceled) return
       const schemas = await window.dataforge.listSchemas()
+      const histN = result.historySamples?.length ?? 0
+      const scanned = result.scannedRecords ?? result.recordHint
+      const settings = {
+        ...get().settings,
+        defaultExportFormat: result.format
+      }
       set({
         schemas,
         activeSchema: result.schema,
@@ -648,14 +684,20 @@ export const useAppStore = create<AppState>((set, get) => ({
         lastGenerated: null,
         sidebarTab: 'schemas',
         error: null,
-        previewFormat: result.format
+        previewFormat: result.format,
+        settings,
+        importMessage: `Imported “${result.schema.name}” (${result.format.toUpperCase()}) · ${result.schema.root.length} top fields · scanned ${scanned} rec · ${histN} history values`
+      })
+      void window.dataforge.setSettings(settings).then((saved) => {
+        set({ settings: saved })
       })
       if (result.recordHint > 0) {
         get().setRecordCount(Math.min(result.recordHint, 10_000))
       }
     } catch (e) {
       set({
-        error: e instanceof Error ? e.message : 'Failed to import schema from file'
+        error: e instanceof Error ? e.message : 'Failed to import schema from file',
+        importMessage: null
       })
     }
   },
@@ -876,24 +918,27 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (get().generating) return null
 
     let stream = get().streamGenerate
+    let perFile = get().perFileOutput
     const streamFormat = get().previewFormat
     const count = get().recordCount
     const streamable =
       streamFormat === 'csv' || streamFormat === 'json' || streamFormat === 'txt'
 
-    // Auto-stream large runs to avoid main/IPC OOM (B5)
-    if (!stream && count > MAX_IN_MEMORY_GENERATE_RECORDS) {
+    // Per-file mode can handle large N for all formats; prefer it over OOM
+    if (!stream && !perFile && count > MAX_IN_MEMORY_GENERATE_RECORDS) {
       if (streamable) {
         stream = true
-        set({ streamGenerate: true })
+        set({ streamGenerate: true, perFileOutput: false })
       } else {
-        set({
-          error:
-            `In-memory generate is limited to ${MAX_IN_MEMORY_GENERATE_RECORDS.toLocaleString()} records. ` +
-            `Switch format to CSV, JSON, or TXT and enable Stream generate, or lower the count.`
-        })
-        return null
+        // XML/YAML large runs → force per-file directory output
+        perFile = true
+        set({ perFileOutput: true, streamGenerate: false })
       }
+    }
+
+    if (stream && perFile) {
+      // Prefer per-file if both somehow on
+      stream = false
     }
 
     if (stream && !streamable) {
@@ -901,7 +946,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         generating: false,
         generateProgress: null,
         error:
-          'Stream generate supports CSV, JSON (NDJSON), or TXT only. Switch format or turn off stream.'
+          'Stream generate supports CSV, JSON (NDJSON), or TXT only. Use per-file output for XML/YAML, or switch format.'
       })
       return null
     }
@@ -924,11 +969,13 @@ export const useAppStore = create<AppState>((set, get) => ({
         current: 0,
         total: count,
         percent: 0,
-        message: stream
-          ? count > MAX_IN_MEMORY_GENERATE_RECORDS
-            ? `Large run — streaming to file…`
-            : 'Choose output file…'
-          : 'Starting…'
+        message: perFile
+          ? 'Choose output folder…'
+          : stream
+            ? count > MAX_IN_MEMORY_GENERATE_RECORDS
+              ? `Large run — streaming to file…`
+              : 'Choose output file…'
+            : 'Starting…'
       }
     })
     const unsub =
@@ -939,7 +986,35 @@ export const useAppStore = create<AppState>((set, get) => ({
         : () => undefined
     try {
       let result: GenerateResult
-      if (stream) {
+      if (perFile) {
+        if (typeof window.dataforge.generatePerFile !== 'function') {
+          throw new Error(
+            'Per-file generate API unavailable — fully restart the app (npm run dev)'
+          )
+        }
+        const s = get().settings
+        result = await window.dataforge.generatePerFile({
+          schema: active,
+          recordCount: get().recordCount,
+          recordHistory,
+          seed,
+          ciMode,
+          writeManifest,
+          format: streamFormat,
+          fileName: active.name,
+          csvFlattenDelimiter: s.csvFlattenDelimiter,
+          csvNestedAsJson: s.csvNestedAsJson,
+          csvLayoutMode: s.csvLayoutMode,
+          previewSampleSize: 25
+        })
+        if (result.canceled) {
+          set({
+            generating: false,
+            generateProgress: null
+          })
+          return null
+        }
+      } else if (stream) {
         if (typeof window.dataforge.generateStream !== 'function') {
           throw new Error(
             'Stream generate API unavailable — fully restart the app (npm run dev)'
@@ -997,6 +1072,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       const pathMsg = result.filePath
         ? ` → ${result.filePath}${result.encryptedPath ? ` (encrypted)` : ''}`
         : ''
+      const doneMsg = result.perFile
+        ? `Wrote ${result.filesWritten?.toLocaleString() ?? result.recordCount.toLocaleString()} files in ${result.ms}ms${pathMsg}`
+        : result.streamed
+          ? `Streamed ${result.recordCount.toLocaleString()} in ${result.ms}ms${pathMsg}`
+          : `Done in ${result.ms}ms`
       set({
         lastGenerated: result,
         lastStreamPath: result.filePath ?? null,
@@ -1006,9 +1086,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           current: result.recordCount,
           total: result.recordCount,
           percent: 100,
-          message: result.streamed
-            ? `Streamed ${result.recordCount.toLocaleString()} in ${result.ms}ms${pathMsg}`
-            : `Done in ${result.ms}ms`
+          message: doneMsg
         },
         status
       })
