@@ -10,8 +10,12 @@ Long-term, prefer [GitHub Releases](https://github.com/DevAzn/DataForge/releases
 |------|-----|
 | `DataForge Setup x.y.z.exe` | Normal installer (Start menu / uninstall) |
 | `DataForge x.y.z.exe` | Portable — no install, double-click to run |
+| `DataForge-x.y.z-Setup.zip` | Same Setup, zipped (handy for email / portals that prefer .zip) |
+| `DataForge-x.y.z-Portable.zip` | Same portable, zipped |
 
 Users do **not** need Node.js or npm.
+
+**GitHub limit:** each file must stay under **100 MB**. One zip containing both installers is too large (~185 MB), so Setup and portable are zipped separately.
 
 ## Notes
 
