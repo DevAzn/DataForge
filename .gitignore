@@ -16,6 +16,14 @@ installers/*
 # Local release packaging (combined zips can exceed GitHub 100MB)
 rel_compressed/
 
+# PV_DataForge (Python + Vue replica)
+# PV_DataForge/**/node_modules/
+# PV_DataForge/**/.venv/
+# PV_DataForge/**/__pycache__/
+# PV_DataForge/**/dist/
+# PV_DataForge/data/
+# PV_DataForge/**/*.sqlite
+
 # TypeScript incremental
 *.tsbuildinfo
 

@@ -1,30 +1,41 @@
-# Installers (temporary in-repo distribution)
+# Installers (in-repo distribution for end users)
 
-These Windows builds are checked into the repo so org networks that **block or flag GitHub Release downloads** can still get the app via a normal **clone** or **raw file** from the repository.
+These Windows builds are checked into the repo so people can **clone and run without Node**, or grab files when [GitHub Releases](https://github.com/DevAzn/DataForge/releases) are blocked by policy.
 
-Long-term, prefer [GitHub Releases](https://github.com/DevAzn/DataForge/releases) (or an internal software portal) and remove this folder from git when policy allows.
-
-## Files
+## End users (no Node)
 
 | File | Use |
 |------|-----|
 | `DataForge Setup x.y.z.exe` | Normal installer (Start menu / uninstall) |
 | `DataForge x.y.z.exe` | Portable — no install, double-click to run |
-| `DataForge-x.y.z-Setup.zip` | Same Setup, zipped (handy for email / portals that prefer .zip) |
-| `DataForge-x.y.z-Portable.zip` | Same portable, zipped |
 
 Users do **not** need Node.js or npm.
 
-**GitHub limit:** each file must stay under **100 MB**. One zip containing both installers is too large (~185 MB), so Setup and portable are zipped separately.
+**GitHub limit:** each file must stay under **100 MB**. Do not commit a single zip of both EXEs (~185 MB).
 
-## Notes
+## Developers (run from source)
 
-- Builds are **unsigned** until code signing is configured; SmartScreen / corporate AV may still warn.
-- Rebuild locally: `npm run dist:win`, then copy the new `.exe` files from `release/` into this folder.
-- CI still publishes to GitHub Releases on `v*` tags; keep this folder in sync only when you need repo-based distribution.
+Installers alone are not enough to *change* the app. From the repo root:
+
+```bash
+npm run setup    # install deps + native rebuild + Electron binary
+npm run dev
+```
+
+See the main [README](../README.md) section **Two ways to get DataForge**.
+
+## Refresh installers after a release build
+
+```bash
+npm run dist:win
+# copy release/DataForge Setup x.y.z.exe and release/DataForge x.y.z.exe here
+```
+
+CI also uploads the same artifacts on each `v*` tag push.
 
 ## Do not commit
 
 - `release/win-unpacked/` (huge)
-- `node_modules/`
+- `node_modules/` or the Electron download cache
 - User data / SQLite databases
+- `rel_compressed/` combined zips (over GitHub’s limit)

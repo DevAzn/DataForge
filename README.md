@@ -15,35 +15,74 @@
 
 ## Requirements
 
-- **Node.js** 20+ (LTS recommended)
+- **Node.js** 20+ (LTS recommended) — see `.nvmrc`
 - Windows or Linux (macOS works with the same codebase)
+- Network access on first setup so npm can download packages and the Electron binary
 
-## Install & run
+## Two ways to get DataForge
+
+### A) End users — run the app (no Node)
+
+Pick one:
+
+| Source | What to use |
+|--------|-------------|
+| **Repo `installers/`** | After clone: `installers/DataForge Setup x.y.z.exe` or portable `DataForge x.y.z.exe` |
+| **[GitHub Releases](https://github.com/DevAzn/DataForge/releases)** | Same Setup / portable builds from CI on each `v*` tag |
+
+See [`installers/README.md`](installers/README.md). No `npm install` required.
+
+### B) Developers — clone and run from source
+
+Dependencies are **not** committed (`node_modules` is huge and OS-specific). The lockfile + scripts make a clean machine ready after one install:
 
 ```bash
-npm install
+# Clone
+git clone https://github.com/DevAzn/DataForge.git
+cd DataForge
+
+# One-shot setup (install + rebuild native modules + repair Electron)
+npm run setup
+# or:  powershell -File scripts/setup-dev.ps1
+# or:  bash scripts/setup-dev.sh
+
+# Run in development
 npm run dev
 ```
 
-If you see **`Error: Electron uninstall`**, the Chromium binary did not finish extracting (occasional Windows issue). Fix with:
+What `npm install` / `postinstall` already does for you:
+
+1. Installs npm packages from `package-lock.json`  
+2. **`electron-builder install-app-deps`** — rebuilds `better-sqlite3` for Electron  
+3. **`scripts/ensure-electron.js`** — downloads/repairs the Electron Chromium binary if missing  
+
+If you see **`Error: Electron uninstall`** or a blank native module error:
 
 ```bash
 npm run repair:electron
-# or
-node scripts/ensure-electron.js
+# full reset:
+#   rm -rf node_modules
+#   npm run setup
 ```
 
-Then run `npm run dev` again.
+Build installers yourself (produces `release/*.exe`):
+
+```bash
+npm run dist:win
+# then copy Setup + portable into installers/ if you keep repo-based distribution
+```
 
 ### Scripts
 
 | Command | Description |
 |---------|-------------|
+| `npm run setup` | `npm install` + Electron repair (first-time / CI-friendly) |
 | `npm run dev` | Start Electron + Vite in development |
 | `npm run build` | Compile main / preload / renderer |
 | `npm run typecheck` | TypeScript check |
-| `npm run dist:win` | Windows installer / portable |
+| `npm run dist:win` | Windows installer / portable → `release/` |
 | `npm run dist:linux` | Linux AppImage / deb |
+| `npm run repair:electron` | Re-fetch Electron binary only |
 
 ## Releases (end users — no Node required)
 
@@ -57,6 +96,8 @@ Then run `npm run dev` again.
 If your org blocks or flags [GitHub Release](https://github.com/DevAzn/DataForge/releases) downloads, use the **`installers/`** folder in this repository (clone or download those files from the code browser). See [`installers/README.md`](installers/README.md).
 
 CI still also publishes to **GitHub Releases** on each `v*` tag. Prefer Releases long-term; keep `installers/` only while policy requires it.
+
+**Cannot ship in git:** full `node_modules` or Electron binary (~200MB+, platform-specific). Use `npm run setup` for that.
 
 ### GitHub Releases (preferred long-term)
 
