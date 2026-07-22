@@ -14,6 +14,12 @@ export type ExportFormat = 'json' | 'xml' | 'csv' | 'txt' | 'yaml'
 export const MAX_GENERATE_RECORDS = 1_000_000
 export const MIN_GENERATE_RECORDS = 1
 
+/**
+ * Max records for non-stream (in-memory + IPC) generate.
+ * Larger counts must use stream generate (CSV / JSON NDJSON / TXT).
+ */
+export const MAX_IN_MEMORY_GENERATE_RECORDS = 10_000
+
 /** Max bytes for schema import (content or file). ~25 MiB. */
 export const MAX_IMPORT_BYTES = 25 * 1024 * 1024
 

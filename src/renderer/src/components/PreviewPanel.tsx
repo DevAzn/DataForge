@@ -791,6 +791,7 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
               Low memory: write each row as generated (CSV single-header, JSON as NDJSON/.jsonl, or
               TXT). Opens a save dialog. Only a small preview stays in memory — Export/Archive of
               “Generated” is blocked for streamed runs; use the stream file for the full output.
+              Counts above 10,000 auto-enable stream for CSV/JSON/TXT.
               {streamGenerate &&
                 format === 'csv' &&
                 csvLayoutMode !== 'single-header' &&

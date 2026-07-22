@@ -109,6 +109,8 @@ export function setValueAtPath(
 /**
  * Copy selected leaf paths from `source` onto `target` (mutates and returns target).
  * Used so multi-row CSV can keep parent keys constant while other fields vary.
+ * Skips paths missing on the source (undefined) so a partial first row cannot
+ * blank columns on later rows. Explicit `null` is still copied.
  */
 export function applyTiedFieldPaths(
   source: Record<string, unknown>,
@@ -118,7 +120,24 @@ export function applyTiedFieldPaths(
   for (const path of paths) {
     const p = path.trim()
     if (!p) continue
+    if (!pathExistsOnObject(source, p)) continue
     setValueAtPath(target, p, getValueAtPath(source, p))
   }
   return target
+}
+
+/** True if every segment of `path` exists on `obj` (value may be null). */
+export function pathExistsOnObject(obj: unknown, path: string): boolean {
+  if (!path || obj === null || obj === undefined) return false
+  const parts = path.split('.').filter(Boolean)
+  let cur: unknown = obj
+  for (const p of parts) {
+    if (cur === null || cur === undefined || typeof cur !== 'object' || Array.isArray(cur)) {
+      return false
+    }
+    const rec = cur as Record<string, unknown>
+    if (!Object.prototype.hasOwnProperty.call(rec, p)) return false
+    cur = rec[p]
+  }
+  return true
 }

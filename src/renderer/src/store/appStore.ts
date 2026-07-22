@@ -17,6 +17,7 @@ import {
   DEFAULT_ENCRYPTION,
   DEFAULT_SETTINGS,
   MAX_GENERATE_RECORDS,
+  MAX_IN_MEMORY_GENERATE_RECORDS,
   MIN_GENERATE_RECORDS
 } from '@shared/types'
 import { applyThemeTokens } from '../theme/applyTheme'
@@ -713,7 +714,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       id: newId(),
       name: name?.trim() || `${active.name} template`,
       description,
-      schemaJson: JSON.stringify({ name: active.name, root: active.root }),
+      schemaJson: JSON.stringify({
+        name: active.name,
+        root: active.root,
+        csvTiedFieldPaths: active.csvTiedFieldPaths,
+        sourceFileName: active.sourceFileName,
+        sourceFormat: active.sourceFormat
+      }),
       createdAt: now,
       updatedAt: now
     }
@@ -737,14 +744,23 @@ export const useAppStore = create<AppState>((set, get) => ({
       const parsed = JSON.parse(template.schemaJson) as {
         name?: string
         root?: SchemaRow[]
+        csvTiedFieldPaths?: string[]
+        sourceFileName?: string
+        sourceFormat?: SchemaDoc['sourceFormat']
       }
       const root = remapRowIds(parsed.root ?? [])
       const now = new Date().toISOString()
+      const ties = (parsed.csvTiedFieldPaths ?? [])
+        .map((p) => String(p).trim())
+        .filter(Boolean)
       const doc: SchemaDoc = {
         id: newId(),
         name: parsed.name || template.name,
         description: template.description,
         root: root.length ? root : [createEmptyRow(0)],
+        csvTiedFieldPaths: ties.length ? ties : undefined,
+        sourceFileName: parsed.sourceFileName,
+        sourceFormat: parsed.sourceFormat,
         createdAt: now,
         updatedAt: now
       }
@@ -859,9 +875,28 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!active) return null
     if (get().generating) return null
 
-    const stream = get().streamGenerate
+    let stream = get().streamGenerate
     const streamFormat = get().previewFormat
-    if (stream && streamFormat !== 'csv' && streamFormat !== 'json' && streamFormat !== 'txt') {
+    const count = get().recordCount
+    const streamable =
+      streamFormat === 'csv' || streamFormat === 'json' || streamFormat === 'txt'
+
+    // Auto-stream large runs to avoid main/IPC OOM (B5)
+    if (!stream && count > MAX_IN_MEMORY_GENERATE_RECORDS) {
+      if (streamable) {
+        stream = true
+        set({ streamGenerate: true })
+      } else {
+        set({
+          error:
+            `In-memory generate is limited to ${MAX_IN_MEMORY_GENERATE_RECORDS.toLocaleString()} records. ` +
+            `Switch format to CSV, JSON, or TXT and enable Stream generate, or lower the count.`
+        })
+        return null
+      }
+    }
+
+    if (stream && !streamable) {
       set({
         generating: false,
         generateProgress: null,
@@ -887,9 +922,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       generateProgress: {
         phase: 'generating',
         current: 0,
-        total: get().recordCount,
+        total: count,
         percent: 0,
-        message: stream ? 'Choose output file…' : 'Starting…'
+        message: stream
+          ? count > MAX_IN_MEMORY_GENERATE_RECORDS
+            ? `Large run — streaming to file…`
+            : 'Choose output file…'
+          : 'Starting…'
       }
     })
     const unsub =

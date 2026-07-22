@@ -27,7 +27,8 @@ import {
   createGenerationContext,
   finalizeGenerationReport,
   flushGenerationHistory,
-  generateOneRecord
+  generateOneRecord,
+  setSuppressHistoryPaths
 } from './generator'
 import { runEncryptionOnFile, shouldEncryptExport } from './encryption'
 import { buildRunManifest, writeManifestBeside } from './manifest'
@@ -196,6 +197,11 @@ export async function streamGenerateToFile(
           let canWrite = true
           const chunkEnd = Math.min(i + step, count)
           while (i < chunkEnd && canWrite) {
+            if (tiedPaths.length > 0 && i > 0) {
+              setSuppressHistoryPaths(scratch, tiedPaths)
+            } else {
+              setSuppressHistoryPaths(scratch, null)
+            }
             let rec = generateOneRecord(request.schema.root, scratch)
             if (tiedPaths.length > 0) {
               if (i === 0) {

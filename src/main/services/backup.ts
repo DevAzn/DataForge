@@ -1,6 +1,7 @@
 import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'fs'
 import { basename, dirname, join } from 'path'
 import { dialog } from 'electron'
+import type { ExportFormat, SchemaRow, SchemaTreePayload } from '../../shared/types'
 import {
   getDb,
   getPaths,
@@ -11,7 +12,27 @@ import {
   writeUserCache,
   initDatabase
 } from '../db/database'
-import { listRecentHistory } from '../db/history'
+import { listHistoryForBackup, recordMany } from '../db/history'
+
+const BACKUP_VERSION = 2
+
+function encodeSchemaTree(s: {
+  root: unknown
+  sourceFileName?: string
+  sourceFilePath?: string
+  sourceFormat?: ExportFormat
+  csvTiedFieldPaths?: string[]
+}): string {
+  const root = Array.isArray(s.root) ? (s.root as SchemaRow[]) : []
+  const payload: SchemaTreePayload = {
+    root,
+    sourceFileName: s.sourceFileName,
+    sourceFilePath: s.sourceFilePath,
+    sourceFormat: s.sourceFormat,
+    csvTiedFieldPaths: s.csvTiedFieldPaths
+  }
+  return JSON.stringify(payload)
+}
 
 export async function exportBackup(): Promise<{ canceled: boolean; filePath?: string }> {
   const { dbPath, cachePath } = getPaths()
@@ -24,15 +45,18 @@ export async function exportBackup(): Promise<{ canceled: boolean; filePath?: st
   })
   if (result.canceled || !result.filePath) return { canceled: true }
 
+  const history = listHistoryForBackup(50_000)
   const payload = {
-    version: 1,
+    version: BACKUP_VERSION,
     exportedAt: new Date().toISOString(),
     settings: getSettings(),
     schemas: listSchemas(),
     templates: listTemplates(),
-    history: listRecentHistory(5000),
-    // Paths only — user may also copy sqlite manually
-    note: 'SQLite file can be copied separately for a full binary backup.',
+    history,
+    historyCount: history.length,
+    note:
+      'JSON backup includes settings, schemas (with csvTiedFieldPaths + source meta), templates, ' +
+      'and up to 50k recent history rows. A side .sqlite.bak is a full binary DB copy when present.',
     dbFileName: basename(dbPath),
     cacheFileName: basename(cachePath)
   }
@@ -59,12 +83,17 @@ export async function importBackup(): Promise<{ canceled: boolean; imported?: nu
 
   const raw = readFileSync(result.filePaths[0], 'utf-8')
   const payload = JSON.parse(raw) as {
+    version?: number
     settings?: unknown
     schemas?: Array<{
       id: string
       name: string
       description?: string
       root: unknown
+      sourceFileName?: string
+      sourceFilePath?: string
+      sourceFormat?: ExportFormat
+      csvTiedFieldPaths?: string[]
       createdAt: string
       updatedAt: string
       lastOpenedAt?: string
@@ -77,6 +106,12 @@ export async function importBackup(): Promise<{ canceled: boolean; imported?: nu
       sampleDataJson?: string
       createdAt: string
       updatedAt: string
+    }>
+    history?: Array<{
+      categoryName?: string
+      keyName?: string
+      value?: string
+      categoryId?: string
     }>
   }
 
@@ -93,6 +128,14 @@ export async function importBackup(): Promise<{ canceled: boolean; imported?: nu
     }
 
     for (const s of payload.schemas ?? []) {
+      // Prefer full SchemaTreePayload so ties + source meta survive (v2 + fixed v1 imports)
+      const treeJson = encodeSchemaTree({
+        root: s.root,
+        sourceFileName: s.sourceFileName,
+        sourceFilePath: s.sourceFilePath,
+        sourceFormat: s.sourceFormat,
+        csvTiedFieldPaths: s.csvTiedFieldPaths
+      })
       db.prepare(
         `INSERT INTO schema_meta (id, name, description, tree_json, created_at, updated_at, last_opened_at)
          VALUES (@id, @name, @description, @tree_json, @created_at, @updated_at, @last_opened_at)
@@ -106,7 +149,7 @@ export async function importBackup(): Promise<{ canceled: boolean; imported?: nu
         id: s.id,
         name: s.name,
         description: s.description ?? null,
-        tree_json: JSON.stringify(s.root),
+        tree_json: treeJson,
         created_at: s.createdAt,
         updated_at: s.updatedAt,
         last_opened_at: s.lastOpenedAt ?? null
@@ -137,6 +180,23 @@ export async function importBackup(): Promise<{ canceled: boolean; imported?: nu
     }
   })
   tx()
+
+  // History restore outside nested transaction concerns — ensure mode, no use_count spam
+  const historyInputs = (payload.history ?? [])
+    .map((h) => {
+      const categoryName = (h.categoryName || h.keyName || '').trim()
+      const keyName = (h.keyName || h.categoryName || '').trim()
+      const value = (h.value || '').trim()
+      if (!categoryName || !keyName || !value) return null
+      return { categoryName, keyName, value }
+    })
+    .filter((x): x is { categoryName: string; keyName: string; value: string } => x != null)
+
+  if (historyInputs.length > 0) {
+    const n = recordMany(historyInputs, 'ensure')
+    imported += n
+  }
+
   writeUserCache()
   return { canceled: false, imported }
 }

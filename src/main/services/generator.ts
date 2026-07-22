@@ -6,8 +6,12 @@ import type {
   HistoryRecordInput,
   SchemaRow
 } from '../../shared/types'
-import { MAX_GENERATE_RECORDS, MIN_GENERATE_RECORDS } from '../../shared/types'
-import { applyTiedFieldPaths } from '../../shared/fieldHistory'
+import {
+  MAX_GENERATE_RECORDS,
+  MAX_IN_MEMORY_GENERATE_RECORDS,
+  MIN_GENERATE_RECORDS
+} from '../../shared/types'
+import { applyTiedFieldPaths, fieldPathKey } from '../../shared/fieldHistory'
 import {
   fieldHistoryKey,
   fieldHistoryReadKeys,
@@ -334,7 +338,7 @@ interface GenStats {
   uniqueExhausted: number
 }
 
-interface GenScratch {
+export interface GenScratch {
   rand: () => number
   uniqueSets: Map<string, Set<string>>
   historyBuffer: HistoryRecordInput[]
@@ -345,6 +349,28 @@ interface GenScratch {
   /** Fixed epoch for date synthesis (from seed) */
   epochMs: number
   stats: GenStats
+  /**
+   * When set, pushHistory skips these field path keys (lowercase).
+   * Used so CSV tie rows after the first do not pollute history with discarded values.
+   */
+  suppressHistoryPaths: Set<string> | null
+}
+
+/** Suppress history writes for tied leaf paths on subsequent multi-row records. */
+export function setSuppressHistoryPaths(
+  scratch: GenScratch,
+  paths: string[] | null
+): void {
+  if (!paths || paths.length === 0) {
+    scratch.suppressHistoryPaths = null
+    return
+  }
+  const set = new Set<string>()
+  for (const p of paths) {
+    const t = p.trim().toLowerCase()
+    if (t) set.add(t)
+  }
+  scratch.suppressHistoryPaths = set.size ? set : null
 }
 
 function emptyStats(): GenStats {
@@ -389,6 +415,10 @@ function pushHistory(
   raw: string
 ): void {
   if (!raw || scratch.historyBuffer.length >= scratch.historyCap) return
+  if (scratch.suppressHistoryPaths) {
+    const pk = fieldPathKey(path, row).toLowerCase()
+    if (scratch.suppressHistoryPaths.has(pk)) return
+  }
   scratch.historyBuffer.push(historyRecordForField(path, row, raw))
 }
 
@@ -650,7 +680,8 @@ export function createGenerationContext(
     ciMode: Boolean(options?.ciMode),
     seed,
     epochMs: epochFromSeed(seed),
-    stats: emptyStats()
+    stats: emptyStats(),
+    suppressHistoryPaths: null
   }
 }
 
@@ -686,6 +717,12 @@ export async function generateData(
     Math.max(request.recordCount || 1, MIN_GENERATE_RECORDS),
     MAX_GENERATE_RECORDS
   )
+  if (count > MAX_IN_MEMORY_GENERATE_RECORDS) {
+    throw new Error(
+      `In-memory generate is limited to ${MAX_IN_MEMORY_GENERATE_RECORDS.toLocaleString()} records ` +
+        `(requested ${count.toLocaleString()}). Enable Stream generate (CSV / JSON / TXT) or lower the count.`
+    )
+  }
   const ciMode = Boolean(request.ciMode)
   const scratch = createGenerationContext(count, {
     seed: request.seed,
@@ -718,6 +755,12 @@ export async function generateData(
   for (let i = 0; i < count; ) {
     const chunkEnd = Math.min(i + step, count)
     for (; i < chunkEnd; i++) {
+      // After the first row, do not write discarded pre-tie values into history
+      if (tiedPaths.length > 0 && i > 0) {
+        setSuppressHistoryPaths(scratch, tiedPaths)
+      } else {
+        setSuppressHistoryPaths(scratch, null)
+      }
       let rec = generateOneRecord(request.schema.root, scratch)
       if (tiedPaths.length > 0) {
         if (i === 0) {

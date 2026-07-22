@@ -214,9 +214,30 @@ export function clearEncryptionKey(): void {
 }
 
 /**
+ * Quote a path/arg for command templates so Windows paths with spaces survive
+ * tokenize + spawn without shell. Skips re-quoting if already quoted.
+ */
+export function quoteCmdArg(value: string): string {
+  if (value === '') return '""'
+  const t = value.trim()
+  if (
+    (t.startsWith('"') && t.endsWith('"') && t.length >= 2) ||
+    (t.startsWith("'") && t.endsWith("'") && t.length >= 2)
+  ) {
+    return t
+  }
+  // Safe unquoted token (no whitespace / quotes)
+  if (!/[\s"']/.test(value)) return value
+  // Quote for tokenizeCommand; strip internal " so the naive parser stays correct.
+  // Do not escape backslashes — Windows paths must keep \.
+  return `"${value.replace(/"/g, '')}"`
+}
+
+/**
  * Build command from template.
  * Placeholders: {python} {script} {key} {input} {output}
  * {output} is optional — omit it if your script names the encrypted file itself.
+ * Path placeholders are quoted when they contain spaces.
  */
 export function buildInvokeCommand(
   template: string,
@@ -232,13 +253,17 @@ export function buildInvokeCommand(
   const replaceToken = (s: string, token: string, value: string): string =>
     s.split(token).join(value)
   let cmd = template
-  cmd = replaceToken(cmd, '{python}', python)
-  cmd = replaceToken(cmd, '{script}', vars.script)
-  cmd = replaceToken(cmd, '{key}', vars.key)
-  cmd = replaceToken(cmd, '{input}', vars.input)
+  cmd = replaceToken(cmd, '{python}', quoteCmdArg(python))
+  cmd = replaceToken(cmd, '{script}', quoteCmdArg(vars.script))
+  cmd = replaceToken(cmd, '{key}', quoteCmdArg(vars.key))
+  cmd = replaceToken(cmd, '{input}', quoteCmdArg(vars.input))
   // Only substitute {output} when present in the template; script may own naming entirely
   if (cmd.includes('{output}')) {
-    cmd = replaceToken(cmd, '{output}', vars.output || defaultEncryptedOutputPath(vars.input))
+    cmd = replaceToken(
+      cmd,
+      '{output}',
+      quoteCmdArg(vars.output || defaultEncryptedOutputPath(vars.input))
+    )
   }
   return cmd
 }

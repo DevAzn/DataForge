@@ -253,6 +253,28 @@ export function listRecentHistory(limit = 50): Array<ValueHistoryEntry & { categ
   return rows.map(mapHistoryRow)
 }
 
+/**
+ * Export a large history snapshot for JSON backup (not capped at 200).
+ * Ordered by last_used_at DESC. Soft cap prevents multi-GB JSON.
+ */
+export function listHistoryForBackup(
+  maxRows = 50_000
+): Array<ValueHistoryEntry & { categoryName: string }> {
+  const limit = Math.min(Math.max(Math.floor(maxRows) || 1, 1), 200_000)
+  const rows = getDb()
+    .prepare(
+      `SELECT vh.id, vh.category_id, vh.key_name, vh.value, vh.use_count, vh.last_used_at, vh.created_at,
+              c.name as category_name
+       FROM value_history vh
+       LEFT JOIN categories c ON c.id = vh.category_id
+       ORDER BY vh.last_used_at DESC
+       LIMIT ?`
+    )
+    .all(limit) as HistoryRow[]
+
+  return rows.map(mapHistoryRow)
+}
+
 export interface HistoryPageQuery {
   offset?: number
   limit?: number
