@@ -52,7 +52,7 @@
     "@types/yauzl": "^3.4.0",
     "@vitejs/plugin-react": "^4.6.0",
     "autoprefixer": "^10.4.21",
-    "electron": "^36.9.5",
+    "electron": "^39.8.5",
     "electron-builder": "^26.0.12",
     "electron-vite": "^3.1.0",
     "postcss": "^8.5.6",
