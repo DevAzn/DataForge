@@ -20,7 +20,14 @@ function parseTreeJson(
   raw: string
 ): Pick<
   SchemaDoc,
-  'root' | 'sourceFileName' | 'sourceFilePath' | 'sourceFormat' | 'csvTiedFieldPaths'
+  | 'root'
+  | 'sourceFileName'
+  | 'sourceFilePath'
+  | 'sourceFormat'
+  | 'csvTiedFieldPaths'
+  | 'isMultifile'
+  | 'packageId'
+  | 'isPackageMember'
 > {
   try {
     const parsed = JSON.parse(raw) as SchemaRow[] | SchemaTreePayload
@@ -33,7 +40,10 @@ function parseTreeJson(
         sourceFileName: parsed.sourceFileName,
         sourceFilePath: parsed.sourceFilePath,
         sourceFormat: parsed.sourceFormat,
-        csvTiedFieldPaths: parsed.csvTiedFieldPaths
+        csvTiedFieldPaths: parsed.csvTiedFieldPaths,
+        isMultifile: parsed.isMultifile,
+        packageId: parsed.packageId,
+        isPackageMember: parsed.isPackageMember
       }
     }
   } catch {
@@ -48,7 +58,10 @@ function encodeTreeJson(doc: SchemaDoc): string {
     sourceFileName: doc.sourceFileName,
     sourceFilePath: doc.sourceFilePath,
     sourceFormat: doc.sourceFormat,
-    csvTiedFieldPaths: doc.csvTiedFieldPaths
+    csvTiedFieldPaths: doc.csvTiedFieldPaths,
+    isMultifile: doc.isMultifile,
+    packageId: doc.packageId,
+    isPackageMember: doc.isPackageMember
   }
   return JSON.stringify(payload)
 }
@@ -206,6 +219,7 @@ export function initDatabase(): Database.Database {
         outer_extension TEXT,
         nested_json TEXT NOT NULL,
         skipped_json TEXT NOT NULL DEFAULT '[]',
+        multifile_schema_id TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -226,6 +240,16 @@ export function initDatabase(): Database.Database {
       );
       CREATE INDEX IF NOT EXISTS idx_package_member_pkg ON package_member(package_id);
     `)
+    try {
+      const pkgCols = db.prepare('PRAGMA table_info(package_import)').all() as Array<{
+        name: string
+      }>
+      if (pkgCols.length && !pkgCols.some((c) => c.name === 'multifile_schema_id')) {
+        db.exec('ALTER TABLE package_import ADD COLUMN multifile_schema_id TEXT')
+      }
+    } catch {
+      /* ignore */
+    }
     db.prepare(
       'INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)'
     ).run(2, new Date().toISOString())
@@ -326,7 +350,12 @@ export function setSettings(settings: AppSettings): AppSettings {
   return getSettings()
 }
 
-export function listSchemas(): SchemaDoc[] {
+/**
+ * List schemas for the sidebar / picker.
+ * Hides package-member child schemas (isPackageMember) so multifile imports
+ * appear as a single “Multifile schema” entry.
+ */
+export function listSchemas(options?: { includePackageMembers?: boolean }): SchemaDoc[] {
   const rows = getDb()
     .prepare(
       `SELECT id, name, description, tree_json, created_at, updated_at, last_opened_at
@@ -342,21 +371,28 @@ export function listSchemas(): SchemaDoc[] {
     last_opened_at: string | null
   }>
 
-  return rows.map((r) => {
+  const includeMembers = Boolean(options?.includePackageMembers)
+  return rows.flatMap((r) => {
     const tree = parseTreeJson(r.tree_json)
-    return {
-      id: r.id,
-      name: r.name,
-      description: r.description ?? undefined,
-      root: tree.root,
-      sourceFileName: tree.sourceFileName,
-      sourceFilePath: tree.sourceFilePath,
-      sourceFormat: tree.sourceFormat,
-      csvTiedFieldPaths: tree.csvTiedFieldPaths,
-      createdAt: r.created_at,
-      updatedAt: r.updated_at,
-      lastOpenedAt: r.last_opened_at ?? undefined
-    }
+    if (!includeMembers && tree.isPackageMember) return []
+    return [
+      {
+        id: r.id,
+        name: r.name,
+        description: r.description ?? undefined,
+        root: tree.root,
+        sourceFileName: tree.sourceFileName,
+        sourceFilePath: tree.sourceFilePath,
+        sourceFormat: tree.sourceFormat,
+        csvTiedFieldPaths: tree.csvTiedFieldPaths,
+        isMultifile: tree.isMultifile,
+        packageId: tree.packageId,
+        isPackageMember: tree.isPackageMember,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
+        lastOpenedAt: r.last_opened_at ?? undefined
+      }
+    ]
   })
 }
 
@@ -389,6 +425,9 @@ export function getSchema(id: string): SchemaDoc | null {
     sourceFilePath: tree.sourceFilePath,
     sourceFormat: tree.sourceFormat,
     csvTiedFieldPaths: tree.csvTiedFieldPaths,
+    isMultifile: tree.isMultifile,
+    packageId: tree.packageId,
+    isPackageMember: tree.isPackageMember,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     lastOpenedAt: r.last_opened_at ?? undefined

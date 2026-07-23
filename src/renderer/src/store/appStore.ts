@@ -124,6 +124,8 @@ interface AppState {
 
   init: () => Promise<void>
   refreshStatus: () => Promise<void>
+  /** Reload schema list from SQLite (e.g. after package / multifile import). */
+  reloadSchemas: () => Promise<void>
   refreshHistory: () => Promise<void>
   setSidebarTab: (tab: AppState['sidebarTab']) => void
   setThemeMode: (mode: AppSettings['themeMode']) => Promise<void>
@@ -494,6 +496,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       const status = await window.dataforge.getStatus()
       set({ status })
+    } catch {
+      /* ignore */
+    }
+  },
+
+  reloadSchemas: async () => {
+    try {
+      const schemas = await window.dataforge.listSchemas()
+      set({ schemas })
+      await get().refreshStatus()
     } catch {
       /* ignore */
     }

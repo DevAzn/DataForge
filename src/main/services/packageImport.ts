@@ -29,10 +29,11 @@ import type {
   PackageMember,
   PackageNestedArchiveMeta,
   PackageOuterFormat,
-  SchemaDoc
+  SchemaDoc,
+  SchemaRow
 } from '../../shared/types'
 import { formatFromFileName, isLikelyTextFile, pathToSegments } from '../../shared/archiveTree'
-import { getPaths, saveSchema } from '../db/database'
+import { getPaths, listSchemas, saveSchema } from '../db/database'
 import { savePackage } from '../db/packages'
 import { harvestSchemaSamples, logInteraction, recordMany } from '../db/history'
 import { inferSchemaFromFile } from './schemaInfer'
@@ -247,6 +248,29 @@ function walkFolder(dir: string, base: string): RawFile[] {
   return out
 }
 
+function uniqueMultifileName(baseName: string): string {
+  const preferred = baseName.trim() || 'Multifile schema'
+  const existing = new Set(listSchemas().map((s) => s.name.toLowerCase()))
+  if (!existing.has(preferred.toLowerCase())) return preferred
+  let n = 2
+  while (existing.has(`${preferred} (${n})`.toLowerCase())) n++
+  return `${preferred} (${n})`
+}
+
+function cloneRowsWithNewIds(rows: SchemaRow[]): SchemaRow[] {
+  return rows.map((r, i) => ({
+    ...r,
+    id: randomUUID(),
+    sortOrder: r.sortOrder ?? i,
+    children: r.children?.length ? cloneRowsWithNewIds(r.children) : []
+  }))
+}
+
+/** Safe object key for a file path inside the multifile umbrella schema. */
+function pathAsSchemaKey(path: string): string {
+  return path.replace(/\\/g, '/').replace(/^\//, '') || 'file'
+}
+
 async function buildPackageFromFiles(
   name: string,
   sourceKind: PackageDoc['sourceKind'],
@@ -258,8 +282,17 @@ async function buildPackageFromFiles(
   const skipped: string[] = []
   const expanded = await expandFiles(rawFiles, '', 0, nested, skipped)
 
+  const packageId = randomUUID()
   const members: PackageMember[] = []
   const schemas: Record<string, SchemaDoc> = {}
+  const pendingText: Array<{
+    path: string
+    fileName: string
+    text: string
+    format: ExportFormat
+    inferredRoot: SchemaRow[]
+    historySamples: ReturnType<typeof inferSchemaFromFile>['historySamples']
+  }> = []
 
   // Folder markers for nested archives (so generate knows to re-pack)
   for (const n of nested) {
@@ -292,33 +325,58 @@ async function buildPackageFromFiles(
       const inferred = inferSchemaFromFile(fileName, text, {
         maxScanRecords: 200
       })
-      const schema: SchemaDoc = {
-        ...inferred.schema,
-        id: randomUUID(),
-        name: `${name}/${f.path}`,
-        sourceFileName: fileName,
-        sourceFormat: inferred.format
-      }
-      // Persist schema + history
-      const saved = saveSchema(schema)
-      const samples = harvestSchemaSamples(saved.root)
-      if (samples.length) recordMany([...samples, ...inferred.historySamples], 'ensure')
-      else if (inferred.historySamples.length) recordMany(inferred.historySamples, 'ensure')
-
-      members.push({
-        id: randomUUID(),
+      pendingText.push({
         path: f.path,
-        name: fileName,
-        kind: 'text',
+        fileName,
+        text,
         format: inferred.format,
-        content: text,
-        schemaId: saved.id,
-        verified: false
+        inferredRoot: inferred.schema.root,
+        historySamples: inferred.historySamples
       })
-      schemas[f.path] = saved
     } catch {
       skipped.push(f.path)
     }
+  }
+
+  const isMultifile = pendingText.length > 1
+  const displayName = isMultifile
+    ? uniqueMultifileName(
+        name && name !== 'package' ? `Multifile schema — ${name}` : 'Multifile schema'
+      )
+    : name
+
+  for (const item of pendingText) {
+    const memberSchemaName = isMultifile
+      ? `${displayName} › ${item.path}`
+      : item.fileName.replace(/\.[^.]+$/, '') || item.fileName
+
+    const schema: SchemaDoc = {
+      id: randomUUID(),
+      name: memberSchemaName,
+      root: item.inferredRoot,
+      sourceFileName: item.fileName,
+      sourceFormat: item.format,
+      isPackageMember: isMultifile || undefined,
+      packageId: isMultifile ? packageId : undefined,
+      createdAt: nowIso(),
+      updatedAt: nowIso()
+    }
+    const saved = saveSchema(schema)
+    const samples = harvestSchemaSamples(saved.root)
+    if (samples.length) recordMany([...samples, ...item.historySamples], 'ensure')
+    else if (item.historySamples.length) recordMany(item.historySamples, 'ensure')
+
+    members.push({
+      id: randomUUID(),
+      path: item.path,
+      name: item.fileName,
+      kind: 'text',
+      format: item.format,
+      content: item.text,
+      schemaId: saved.id,
+      verified: false
+    })
+    schemas[item.path] = saved
   }
 
   // Sort: folders first then text by path
@@ -327,15 +385,50 @@ async function buildPackageFromFiles(
     return a.path.localeCompare(b.path)
   })
 
+  let multifileSchemaId: string | undefined
+  if (isMultifile) {
+    // Umbrella schema: one object node per text file, children = that file's schema tree
+    const multifileRoot: SchemaRow[] = pendingText.map((item, i) => {
+      const memberSchema = schemas[item.path]
+      return {
+        id: randomUUID(),
+        key: pathAsSchemaKey(item.path),
+        kind: 'object' as const,
+        isPrimary: false,
+        isUnique: false,
+        sampleValue: undefined,
+        children: memberSchema
+          ? cloneRowsWithNewIds(memberSchema.root)
+          : cloneRowsWithNewIds(item.inferredRoot),
+        sortOrder: i
+      }
+    })
+    const multifile: SchemaDoc = {
+      id: randomUUID(),
+      name: displayName,
+      description: `Multifile package (${pendingText.length} files): ${pendingText.map((p) => p.path).join(', ')}`,
+      root: multifileRoot,
+      sourceFileName: name,
+      isMultifile: true,
+      packageId,
+      createdAt: nowIso(),
+      updatedAt: nowIso()
+    }
+    const savedMulti = saveSchema(multifile)
+    multifileSchemaId = savedMulti.id
+    schemas['__multifile__'] = savedMulti
+  }
+
   const doc: PackageDoc = {
-    id: randomUUID(),
-    name,
+    id: packageId,
+    name: displayName,
     sourceKind,
     outerFormat,
     outerExtension,
     members,
     nestedArchives: nested,
     skipped,
+    multifileSchemaId,
     createdAt: nowIso(),
     updatedAt: nowIso()
   }
@@ -344,7 +437,9 @@ async function buildPackageFromFiles(
     id: saved.id,
     members: saved.members.length,
     skipped: saved.skipped.length,
-    nested: saved.nestedArchives.length
+    nested: saved.nestedArchives.length,
+    multifile: isMultifile,
+    multifileSchemaId
   })
   return { ...saved, schemas }
 }

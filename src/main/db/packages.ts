@@ -26,6 +26,7 @@ export function ensurePackageTables(): void {
       outer_extension TEXT,
       nested_json TEXT NOT NULL,
       skipped_json TEXT NOT NULL DEFAULT '[]',
+      multifile_schema_id TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -46,6 +47,15 @@ export function ensurePackageTables(): void {
     );
     CREATE INDEX IF NOT EXISTS idx_package_member_pkg ON package_member(package_id);
   `)
+  // Migrate older DBs
+  const cols = db.prepare('PRAGMA table_info(package_import)').all() as Array<{ name: string }>
+  if (!cols.some((c) => c.name === 'multifile_schema_id')) {
+    try {
+      db.exec('ALTER TABLE package_import ADD COLUMN multifile_schema_id TEXT')
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 export function listPackages(): PackageDoc[] {
@@ -53,7 +63,7 @@ export function listPackages(): PackageDoc[] {
   const rows = getDb()
     .prepare(
       `SELECT id, name, source_kind, outer_format, outer_extension, nested_json,
-              skipped_json, created_at, updated_at
+              skipped_json, multifile_schema_id, created_at, updated_at
        FROM package_import ORDER BY updated_at DESC`
     )
     .all() as Array<{
@@ -64,6 +74,7 @@ export function listPackages(): PackageDoc[] {
     outer_extension: string | null
     nested_json: string
     skipped_json: string
+    multifile_schema_id: string | null
     created_at: string
     updated_at: string
   }>
@@ -78,6 +89,7 @@ function loadPackageFromRow(r: {
   outer_extension: string | null
   nested_json: string
   skipped_json: string
+  multifile_schema_id?: string | null
   created_at: string
   updated_at: string
 }): PackageDoc {
@@ -122,6 +134,7 @@ function loadPackageFromRow(r: {
     outerExtension: r.outer_extension ?? undefined,
     nestedArchives: nested,
     skipped,
+    multifileSchemaId: r.multifile_schema_id ?? undefined,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     members: members.map(
@@ -146,7 +159,7 @@ export function getPackage(id: string): PackageDoc | null {
   const r = getDb()
     .prepare(
       `SELECT id, name, source_kind, outer_format, outer_extension, nested_json,
-              skipped_json, created_at, updated_at
+              skipped_json, multifile_schema_id, created_at, updated_at
        FROM package_import WHERE id = ?`
     )
     .get(id) as
@@ -158,6 +171,7 @@ export function getPackage(id: string): PackageDoc | null {
         outer_extension: string | null
         nested_json: string
         skipped_json: string
+        multifile_schema_id: string | null
         created_at: string
         updated_at: string
       }
@@ -192,8 +206,9 @@ export function savePackage(doc: PackageDoc): PackageDoc {
   const tx = db.transaction(() => {
     db.prepare(
       `INSERT INTO package_import
-        (id, name, source_kind, outer_format, outer_extension, nested_json, skipped_json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (id, name, source_kind, outer_format, outer_extension, nested_json, skipped_json,
+         multifile_schema_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          name = excluded.name,
          source_kind = excluded.source_kind,
@@ -201,6 +216,7 @@ export function savePackage(doc: PackageDoc): PackageDoc {
          outer_extension = excluded.outer_extension,
          nested_json = excluded.nested_json,
          skipped_json = excluded.skipped_json,
+         multifile_schema_id = excluded.multifile_schema_id,
          updated_at = excluded.updated_at`
     ).run(
       id,
@@ -210,6 +226,7 @@ export function savePackage(doc: PackageDoc): PackageDoc {
       doc.outerExtension ?? null,
       JSON.stringify(doc.nestedArchives || []),
       JSON.stringify(doc.skipped || []),
+      doc.multifileSchemaId ?? null,
       created,
       ts
     )

@@ -1115,6 +1115,9 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
         onOpenChange={setPackageOpen}
         onError={(msg) => setStatusMsg(msg)}
         onStatus={(msg) => setStatusMsg(msg)}
+        onImported={() => {
+          void useAppStore.getState().reloadSchemas()
+        }}
       />
     </section>
   )

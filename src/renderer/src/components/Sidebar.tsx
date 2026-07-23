@@ -169,10 +169,23 @@ export function Sidebar({ fill = false }: { fill?: boolean }): JSX.Element {
                     }`}
                     onClick={() => selectSchema(s.id)}
                   >
-                    <div className="font-medium truncate">{s.name}</div>
+                    <div className="flex items-center gap-1.5 font-medium truncate">
+                      <span className="truncate">{s.name}</span>
+                      {s.isMultifile && (
+                        <span
+                          className="shrink-0 rounded bg-[#d4a017]/20 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[#d4a017]"
+                          title="Multi-file package schema"
+                        >
+                          multi
+                        </span>
+                      )}
+                    </div>
                     <div className="text-[10px] text-muted truncate">
-                      {s.root.length} field{s.root.length === 1 ? '' : 's'}
-                      {s.sourceFileName ? ` · ${s.sourceFileName}` : ''}
+                      {s.isMultifile
+                        ? `${s.root.length} file${s.root.length === 1 ? '' : 's'}`
+                        : `${s.root.length} field${s.root.length === 1 ? '' : 's'}`}
+                      {s.sourceFileName && !s.isMultifile ? ` · ${s.sourceFileName}` : ''}
+                      {s.isMultifile && s.packageId ? ' · package' : ''}
                     </div>
                   </button>
                   {activeSchema?.id === s.id && (

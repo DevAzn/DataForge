@@ -94,6 +94,18 @@ export interface SchemaDoc {
    * Other fields vary per row. Used when CSV “tie keys” option is on.
    */
   csvTiedFieldPaths?: string[]
+  /**
+   * True when this schema represents a multi-file package import
+   * (name typically “Multifile schema”).
+   */
+  isMultifile?: boolean
+  /** Linked package_import.id when isMultifile or a package member child schema */
+  packageId?: string
+  /**
+   * Hidden from the main schema list — member schema under a multifile package
+   * (still used for package generate).
+   */
+  isPackageMember?: boolean
   createdAt: string
   updatedAt: string
   lastOpenedAt?: string
@@ -106,6 +118,9 @@ export interface SchemaTreePayload {
   sourceFilePath?: string
   sourceFormat?: ExportFormat
   csvTiedFieldPaths?: string[]
+  isMultifile?: boolean
+  packageId?: string
+  isPackageMember?: boolean
 }
 
 export interface Category {
@@ -697,6 +712,8 @@ export interface PackageDoc {
   nestedArchives: PackageNestedArchiveMeta[]
   /** Paths skipped (unsupported extensions) */
   skipped: string[]
+  /** Umbrella “Multifile schema” id when 2+ text files */
+  multifileSchemaId?: string
   createdAt: string
   updatedAt: string
 }

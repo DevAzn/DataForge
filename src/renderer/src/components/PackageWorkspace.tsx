@@ -13,6 +13,8 @@ export interface PackageWorkspaceProps {
   onOpenChange: (open: boolean) => void
   onError?: (message: string) => void
   onStatus?: (message: string) => void
+  /** Called after a package import so the main schema list can refresh */
+  onImported?: () => void
 }
 
 type Step = 'list' | 'verify' | 'generate'
@@ -27,7 +29,8 @@ export function PackageWorkspace({
   open,
   onOpenChange,
   onError,
-  onStatus
+  onStatus,
+  onImported
 }: PackageWorkspaceProps): JSX.Element {
   const [step, setStep] = useState<Step>('list')
   const [packages, setPackages] = useState<PackageDocHydrated[]>([])
@@ -110,9 +113,15 @@ export function PackageWorkspace({
       const nested = res.package.nestedArchives?.length
         ? ` · expanded ${res.package.nestedArchives.length} nested archive(s)`
         : ''
-      const msg = `Imported “${res.package.name}” · ${res.package.members.filter((m) => m.kind === 'text').length} text file(s)${nested}${skipped}`
+      const nText = res.package.members.filter((m) => m.kind === 'text').length
+      const multi =
+        nText > 1 || res.package.multifileSchemaId
+          ? ' · saved as Multifile schema'
+          : ''
+      const msg = `Imported “${res.package.name}” · ${nText} text file(s)${nested}${skipped}${multi}`
       setStatus(msg)
       onStatus?.(msg)
+      onImported?.()
       await refreshList()
       if (res.package.id) {
         const leaves = await window.dataforge.packageLeafPaths(res.package.id)
@@ -143,9 +152,15 @@ export function PackageWorkspace({
       const first = res.package.members.find((m) => m.kind === 'text')
       setSelectedPath(first?.path ?? null)
       if (first?.content) setPreview(first.content.slice(0, 50_000))
+      onImported?.()
       await refreshList()
       const leaves = await window.dataforge.packageLeafPaths(res.package.id)
       setLeafPaths(leaves)
+      const multi =
+        res.package.members.filter((m) => m.kind === 'text').length > 1
+          ? ' (saved as Multifile schema)'
+          : ''
+      onStatus?.(`Imported “${res.package.name}”${multi}`)
     } catch (e) {
       onError?.(e instanceof Error ? e.message : String(e))
     } finally {
