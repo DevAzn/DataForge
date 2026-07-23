@@ -10,19 +10,19 @@ release/
 # Prefer GitHub Releases long-term; remove installers/ when policy allows.
 # Do NOT commit release/win-unpacked or other build junk.
 installers/*
-!installers/*.exe
-!installers/README.md
+installers/*.exe
+installers/README.md
 
 # Local release packaging (combined zips can exceed GitHub 100MB)
 rel_compressed/
 
-# PV_DataForge (Python + Vue replica)
-# PV_DataForge/**/node_modules/
-# PV_DataForge/**/.venv/
-# PV_DataForge/**/__pycache__/
-# PV_DataForge/**/dist/
-# PV_DataForge/data/
-# PV_DataForge/**/*.sqlite
+PV_DataForge (Python + Vue replica)
+PV_DataForge/**/node_modules/
+PV_DataForge/**/.venv/
+PV_DataForge/**/__pycache__/
+PV_DataForge/**/dist/
+PV_DataForge/data/
+PV_DataForge/**/*.sqlite
 
 # TypeScript incremental
 *.tsbuildinfo
@@ -52,3 +52,6 @@ DataForge_user_cache
 # Electron / native build cruft
 *.node
 .electron/
+
+# notes
+RELEASE_1.1.0.MD
