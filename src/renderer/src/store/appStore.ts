@@ -1005,6 +1005,9 @@ export const useAppStore = create<AppState>((set, get) => ({
           csvFlattenDelimiter: s.csvFlattenDelimiter,
           csvNestedAsJson: s.csvNestedAsJson,
           csvLayoutMode: s.csvLayoutMode,
+          xmlRootTag: s.xmlRootTag,
+          xmlRecordTag: s.xmlRecordTag,
+          xmlSelfClosing: s.xmlSelfClosing,
           previewSampleSize: 25
         })
         if (result.canceled) {
@@ -1147,7 +1150,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       csvFlattenDelimiter: s.csvFlattenDelimiter,
       csvNestedAsJson: s.csvNestedAsJson,
       csvLayoutMode: s.csvLayoutMode,
-      csvMultiRow: s.csvMultiRow
+      csvMultiRow: s.csvMultiRow,
+      xmlRootTag: s.xmlRootTag,
+      xmlRecordTag: s.xmlRecordTag,
+      xmlSelfClosing: s.xmlSelfClosing
       // encrypt flag omitted → uses settings.encryption.encryptOnExport when enabled
     })
     if (result.canceled) return null
@@ -1167,9 +1173,17 @@ export const useAppStore = create<AppState>((set, get) => ({
         'Archive API unavailable — fully restart the app (stop and run npm run dev)'
       )
     }
+    const s = get().settings
     const safe: ArchiveExportRequest = {
       ...request,
-      data: JSON.parse(JSON.stringify(request.data)) as unknown
+      data: JSON.parse(JSON.stringify(request.data)) as unknown,
+      csvFlattenDelimiter: request.csvFlattenDelimiter ?? s.csvFlattenDelimiter,
+      csvNestedAsJson: request.csvNestedAsJson ?? s.csvNestedAsJson,
+      csvLayoutMode: request.csvLayoutMode ?? s.csvLayoutMode,
+      csvMultiRow: request.csvMultiRow ?? s.csvMultiRow,
+      xmlRootTag: request.xmlRootTag ?? s.xmlRootTag,
+      xmlRecordTag: request.xmlRecordTag ?? s.xmlRecordTag,
+      xmlSelfClosing: request.xmlSelfClosing ?? s.xmlSelfClosing
     }
     const result = await window.dataforge.exportArchive(safe)
     if (result.canceled) return null

@@ -47,7 +47,16 @@ export const IPC = {
   ENCRYPTION_TEST: 'encryption:test',
   CACHE_REFRESH: 'cache:refresh',
   BACKUP_EXPORT: 'backup:export',
-  BACKUP_IMPORT: 'backup:import'
+  BACKUP_IMPORT: 'backup:import',
+  PACKAGE_LIST: 'package:list',
+  PACKAGE_GET: 'package:get',
+  PACKAGE_IMPORT: 'package:import',
+  PACKAGE_IMPORT_FILES: 'package:import-files',
+  PACKAGE_DELETE: 'package:delete',
+  PACKAGE_VERIFY_MEMBER: 'package:verify-member',
+  PACKAGE_SAVE_MEMBER_SCHEMA: 'package:save-member-schema',
+  PACKAGE_LEAF_PATHS: 'package:leaf-paths',
+  PACKAGE_GENERATE: 'package:generate'
 } as const
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC]

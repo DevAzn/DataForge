@@ -78,6 +78,22 @@ import { generateData } from './services/generator'
 import { streamGenerateToFile } from './services/streamGenerate'
 import { generatePerFileToDirectory } from './services/generatePerFile'
 import { inferSchemaFromFile } from './services/schemaInfer'
+import {
+  deletePackage,
+  getPackageHydrated,
+  listPackages,
+  setMemberVerified,
+  updateMemberSchema
+} from './db/packages'
+import {
+  pickAndImportPackage,
+  pickAndImportPackageFiles
+} from './services/packageImport'
+import {
+  generatePackageVariants,
+  listLeafModesForPackage
+} from './services/packageGenerate'
+import type { PackageGenerateRequest } from '../shared/types'
 
 export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.APP_GET_STATUS, (): AppStatus => {
@@ -316,7 +332,10 @@ export function registerIpcHandlers(): void {
         csvFlattenDelimiter: request.csvFlattenDelimiter ?? settings.csvFlattenDelimiter,
         csvNestedAsJson: request.csvNestedAsJson ?? settings.csvNestedAsJson,
         csvLayoutMode: request.csvLayoutMode ?? settings.csvLayoutMode,
-        csvMultiRow: request.csvMultiRow ?? settings.csvMultiRow
+        csvMultiRow: request.csvMultiRow ?? settings.csvMultiRow,
+        xmlRootTag: request.xmlRootTag ?? settings.xmlRootTag,
+        xmlRecordTag: request.xmlRecordTag ?? settings.xmlRecordTag,
+        xmlSelfClosing: request.xmlSelfClosing ?? settings.xmlSelfClosing
       })
 
       writeFileSync(result.filePath, text, 'utf-8')
@@ -454,4 +473,48 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC.BACKUP_EXPORT, () => exportBackup())
   ipcMain.handle(IPC.BACKUP_IMPORT, () => importBackup())
+
+  // ── Package variation (whole multi-file upload = one record) ─────
+  ipcMain.handle(IPC.PACKAGE_LIST, () => listPackages())
+  ipcMain.handle(IPC.PACKAGE_GET, (_e, id: string) => getPackageHydrated(id))
+  ipcMain.handle(IPC.PACKAGE_IMPORT, (e) => pickAndImportPackage(e.sender))
+  ipcMain.handle(IPC.PACKAGE_IMPORT_FILES, (e) => pickAndImportPackageFiles(e.sender))
+  ipcMain.handle(IPC.PACKAGE_DELETE, (_e, id: string) => ({ ok: deletePackage(id) }))
+  ipcMain.handle(
+    IPC.PACKAGE_VERIFY_MEMBER,
+    (_e, payload: { packageId: string; memberPath: string; verified: boolean }) => {
+      setMemberVerified(payload.packageId, payload.memberPath, payload.verified)
+      return { ok: true }
+    }
+  )
+  ipcMain.handle(
+    IPC.PACKAGE_SAVE_MEMBER_SCHEMA,
+    (
+      _e,
+      payload: { packageId: string; memberPath: string; schema: SchemaDoc }
+    ) => updateMemberSchema(payload.packageId, payload.memberPath, payload.schema)
+  )
+  ipcMain.handle(IPC.PACKAGE_LEAF_PATHS, (_e, packageId: string) =>
+    listLeafModesForPackage(packageId)
+  )
+  ipcMain.handle(
+    IPC.PACKAGE_GENERATE,
+    async (event, request: PackageGenerateRequest) => {
+      const sendProgress = (p: {
+        current: number
+        total: number
+        percent: number
+        message?: string
+      }): void => {
+        event.sender.send(IPC.GENERATE_PROGRESS, {
+          phase: 'generating' as const,
+          current: p.current,
+          total: p.total,
+          percent: p.percent,
+          message: p.message
+        })
+      }
+      return generatePackageVariants(event.sender, request, sendProgress)
+    }
+  )
 }

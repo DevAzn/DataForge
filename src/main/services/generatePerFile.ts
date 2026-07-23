@@ -132,7 +132,10 @@ export async function generatePerFileToDirectory(
     csvFlattenDelimiter: delim,
     csvNestedAsJson: nestedAsJson,
     csvLayoutMode: layout,
-    csvMultiRow: false
+    csvMultiRow: false,
+    xmlRootTag: request.xmlRootTag ?? settings.xmlRootTag,
+    xmlRecordTag: request.xmlRecordTag ?? settings.xmlRecordTag,
+    xmlSelfClosing: request.xmlSelfClosing ?? settings.xmlSelfClosing
   }
   const forceUnique = naming.ensureUniqueNames !== false
   // When ensure-unique is on, never skip — always suffix to keep every record on disk

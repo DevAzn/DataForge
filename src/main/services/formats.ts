@@ -1,8 +1,9 @@
 import YAML from 'yaml'
 import type { ExportFormat } from '../../shared/types'
 import { serializeCsv, type CsvFormatOptions } from '../../shared/csv'
+import { serializeXml, type XmlFormatOptions } from '../../shared/xml'
 
-export type FormatOptions = CsvFormatOptions
+export type FormatOptions = CsvFormatOptions & XmlFormatOptions
 
 export function serializeData(
   data: unknown,
@@ -17,7 +18,11 @@ export function serializeData(
     case 'txt':
       return typeof data === 'string' ? data : JSON.stringify(data, null, 2)
     case 'xml':
-      return toXml(data, 'root')
+      return serializeXml(data, {
+        xmlRootTag: options.xmlRootTag,
+        xmlRecordTag: options.xmlRecordTag,
+        xmlSelfClosing: options.xmlSelfClosing
+      })
     case 'csv':
       return serializeCsv(data, options)
     default:
@@ -47,34 +52,4 @@ export function sanitizeExportFileName(name: string): string {
     .replace(/\.+$/g, '')
     .trim()
   return cleaned || 'dataforge-export'
-}
-
-function escapeXml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-}
-
-function toXml(data: unknown, tag: string): string {
-  const safeTag = tag.replace(/[^\w.-]/g, '_') || 'item'
-  if (data === null || data === undefined) return `<${safeTag}/>`
-  if (typeof data !== 'object') {
-    return `<${safeTag}>${escapeXml(String(data))}</${safeTag}>`
-  }
-  if (Array.isArray(data)) {
-    return data.map((item, i) => toXml(item, `${safeTag}_${i}`)).join('\n')
-  }
-  const inner = Object.entries(data as Record<string, unknown>)
-    .map(([k, v]) => toXml(v, k))
-    .join('\n')
-  return `<${safeTag}>\n${indent(inner)}\n</${safeTag}>`
-}
-
-function indent(s: string): string {
-  return s
-    .split('\n')
-    .map((l) => (l ? `  ${l}` : l))
-    .join('\n')
 }

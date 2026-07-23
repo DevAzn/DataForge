@@ -166,7 +166,37 @@ const api = {
   exportBackup: (): Promise<{ canceled: boolean; filePath?: string }> =>
     ipcRenderer.invoke(IPC.BACKUP_EXPORT),
   importBackup: (): Promise<{ canceled: boolean; imported?: number }> =>
-    ipcRenderer.invoke(IPC.BACKUP_IMPORT)
+    ipcRenderer.invoke(IPC.BACKUP_IMPORT),
+
+  listPackages: (): Promise<import('../shared/types').PackageDoc[]> =>
+    ipcRenderer.invoke(IPC.PACKAGE_LIST),
+  getPackage: (
+    id: string
+  ): Promise<import('../shared/types').PackageDocHydrated | null> =>
+    ipcRenderer.invoke(IPC.PACKAGE_GET, id),
+  importPackage: (): Promise<import('../shared/types').PackageImportResult> =>
+    ipcRenderer.invoke(IPC.PACKAGE_IMPORT),
+  importPackageFiles: (): Promise<import('../shared/types').PackageImportResult> =>
+    ipcRenderer.invoke(IPC.PACKAGE_IMPORT_FILES),
+  deletePackage: (id: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke(IPC.PACKAGE_DELETE, id),
+  verifyPackageMember: (payload: {
+    packageId: string
+    memberPath: string
+    verified: boolean
+  }): Promise<{ ok: boolean }> => ipcRenderer.invoke(IPC.PACKAGE_VERIFY_MEMBER, payload),
+  savePackageMemberSchema: (payload: {
+    packageId: string
+    memberPath: string
+    schema: import('../shared/types').SchemaDoc
+  }): Promise<import('../shared/types').SchemaDoc> =>
+    ipcRenderer.invoke(IPC.PACKAGE_SAVE_MEMBER_SCHEMA, payload),
+  packageLeafPaths: (packageId: string): Promise<Record<string, string[]>> =>
+    ipcRenderer.invoke(IPC.PACKAGE_LEAF_PATHS, packageId),
+  generatePackage: (
+    request: import('../shared/types').PackageGenerateRequest
+  ): Promise<import('../shared/types').PackageGenerateResult> =>
+    ipcRenderer.invoke(IPC.PACKAGE_GENERATE, request)
 }
 
 export type DataForgeApi = typeof api

@@ -207,6 +207,7 @@ export function ArchiveWorkspace({
   onError
 }: ArchiveWorkspaceProps): JSX.Element {
   const activeSchema = useAppStore((s) => s.activeSchema)
+  const settings = useAppStore((s) => s.settings)
   const recordCount = useAppStore((s) => s.recordCount)
   const setRecordCount = useAppStore((s) => s.setRecordCount)
   const generate = useAppStore((s) => s.generate)
@@ -499,10 +500,19 @@ export function ArchiveWorkspace({
 
   function confirmAddFile(): void {
     let content = ''
+    const xmlOpts = {
+      xmlRootTag: settings.xmlRootTag,
+      xmlRecordTag: settings.xmlRecordTag,
+      xmlSelfClosing: settings.xmlSelfClosing,
+      csvLayoutMode: settings.csvLayoutMode,
+      csvMultiRow: settings.csvMultiRow,
+      csvFlattenDelimiter: settings.csvFlattenDelimiter,
+      csvNestedAsJson: settings.csvNestedAsJson
+    }
     if (newFileSource === 'generated' && effectiveGenerated != null) {
-      content = serializeDataForArchive(effectiveGenerated, newFileFormat)
+      content = serializeDataForArchive(effectiveGenerated, newFileFormat, xmlOpts)
     } else if (newFileSource === 'schema' && effectiveSchemaSample != null) {
-      content = serializeDataForArchive(effectiveSchemaSample, newFileFormat)
+      content = serializeDataForArchive(effectiveSchemaSample, newFileFormat, xmlOpts)
     }
     let name = newFileName.trim() || defaultBaseName || 'data'
     let addedPath = ''

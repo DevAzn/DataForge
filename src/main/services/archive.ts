@@ -129,7 +129,10 @@ function buildEntries(request: ArchiveExportRequest): BuiltEntry[] {
     csvFlattenDelimiter: request.csvFlattenDelimiter ?? settings.csvFlattenDelimiter,
     csvNestedAsJson: request.csvNestedAsJson ?? settings.csvNestedAsJson,
     csvLayoutMode: request.csvLayoutMode ?? settings.csvLayoutMode,
-    csvMultiRow: request.csvMultiRow ?? settings.csvMultiRow
+    csvMultiRow: request.csvMultiRow ?? settings.csvMultiRow,
+    xmlRootTag: request.xmlRootTag ?? settings.xmlRootTag,
+    xmlRecordTag: request.xmlRecordTag ?? settings.xmlRecordTag,
+    xmlSelfClosing: request.xmlSelfClosing ?? settings.xmlSelfClosing
   }
   const files = request.options.files.filter((f) => f.fileName?.trim())
   if (files.length === 0) {

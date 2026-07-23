@@ -1,14 +1,12 @@
 # PV_DataForge
 
-Python + Vue.js + SQLite replica of **DataForge** — local ETL test-data generation.
+Python + Vue.js + SQLite replica of **DataForge** with near feature parity to the Electron app’s core product surface.
 
 | Layer | Stack |
 |--------|--------|
 | API | FastAPI + Uvicorn |
 | UI | Vue 3 + Vite |
 | DB | SQLite (`data/pv_dataforge.sqlite`) |
-
-This is a **working MVP** of the Electron app’s core flows: schemas, import, generate, history, export. Advanced pieces (archives, stream, encryption, CI manifests) can be ported next.
 
 ## Requirements
 
@@ -19,8 +17,6 @@ This is a **working MVP** of the Electron app’s core flows: schemas, import, g
 
 ### Windows (scripts)
 
-In two terminals from the repo root:
-
 ```powershell
 .\PV_DataForge\scripts\start-backend.ps1
 .\PV_DataForge\scripts\start-frontend.ps1
@@ -28,24 +24,19 @@ In two terminals from the repo root:
 
 ### Manual
 
-**1. Backend**
+**Backend**
 
 ```bash
 cd PV_DataForge/backend
 python -m venv .venv
-
-# Windows
-.venv\Scripts\activate
-# macOS/Linux
-# source .venv/bin/activate
-
+# Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8765
 ```
 
 API docs: http://127.0.0.1:8765/docs
 
-**2. Frontend**
+**Frontend**
 
 ```bash
 cd PV_DataForge/frontend
@@ -55,31 +46,49 @@ npm run dev
 
 App: http://127.0.0.1:5173 (proxies `/api` → backend)
 
-## Features (MVP)
+## Feature parity with Electron DataForge
 
-- Create / edit hierarchical schemas (value / object / array)
-- Import JSON / CSV / XML / YAML sample files (infer schema + harvest history)
-- Generate N records (seeded RNG, path-scoped history, sample/enum/null constraints)
-- CSV **tie keys** (lock schema sample values on tied paths)
-- Export JSON / XML / CSV / YAML / TXT
-- Settings (theme, default format, record count)
-- SQLite persistence under `PV_DataForge/data/`
+| Feature | Electron | PV |
+|---------|----------|-----|
+| Schema builder (value/object/array) | ✓ | ✓ |
+| Field props: PK/unique, null%, min/max length, min/max num, regex, enums | ✓ | ✓ |
+| History pools / category override / source keys | ✓ | ✓ |
+| Import JSON/CSV/XML/YAML | ✓ | ✓ |
+| Pattern-aware generation (dates, email, UUID, currency, …) | ✓ | ✓ |
+| Seeded RNG + CI mode + generation report | ✓ | ✓ |
+| CSV multi-row + **tie keys** | ✓ | ✓ |
+| CSV layouts: single-header / entity-sections / per-key-sections | ✓ | ✓ |
+| CSV flatten delimiter + nested-as-JSON | ✓ | ✓ |
+| Stream generate (large counts / NDJSON) | ✓ | ✓ |
+| Per-file generate + naming pattern tokens | ✓ folder dialog | ✓ ZIP download |
+| Templates | ✓ | ✓ |
+| History page / search / edit / delete / clear | ✓ | ✓ |
+| Settings (theme, CSV, file naming) | ✓ | ✓ |
+| Backup import/export JSON | ✓ | ✓ |
+| Multi-format archive export | ✓ | ✓ ZIP |
+| Open archive & read entries | ✓ | ✓ |
+| Encryption (custom Python script) | ✓ | ◐ web: paths only / not full UI yet |
+| Desktop installers / native dialogs | ✓ | — browser |
+| Archive workspace visual tree editor | ✓ | ◐ open/list/read |
 
-## Layout vs Electron DataForge
+## API surface (REST ≈ IPC)
 
-| Electron DataForge | PV_DataForge |
-|--------------------|--------------|
-| Electron main + IPC | FastAPI REST |
-| React + Zustand | Vue 3 (Composition API) |
-| better-sqlite3 | Python `sqlite3` |
-| Desktop window | Browser at localhost |
+- `/api/schemas` CRUD + import  
+- `/api/generate`, `/api/generate/stream`, `/api/generate/per-file`  
+- `/api/export`, `/api/export/archive`  
+- `/api/history/*` (page, suggest, clear, update, delete)  
+- `/api/templates`  
+- `/api/backup/export|import`  
+- `/api/archive/list|read`  
+- `/api/settings`, `/api/status`
 
-## Project layout
+## Layout
 
 ```
 PV_DataForge/
-  backend/app/          # FastAPI application
-  frontend/             # Vue 3 SPA
-  data/                 # SQLite DB (created at runtime)
+  backend/app/           # FastAPI + services
+  frontend/src/          # Vue SPA
+  data/                  # SQLite + encryption dir (runtime)
+  scripts/               # start-backend / start-frontend
   README.md
 ```

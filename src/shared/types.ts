@@ -272,6 +272,15 @@ export interface AppSettings {
    * (single-header) or expand all records into sections. When false, only the first record.
    */
   csvMultiRow: boolean
+  /** Outer XML wrapper element name (e.g. Orders, Document) */
+  xmlRootTag: string
+  /** XML element name for each record when exporting a list */
+  xmlRecordTag: string
+  /**
+   * When true, null/empty XML fields use self-closing tags: <tag/>
+   * When false: <tag></tag>
+   */
+  xmlSelfClosing: boolean
   defaultExportFormat: ExportFormat
   defaultRecordCount: number
   encryption: EncryptionSettings
@@ -345,6 +354,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   csvNestedAsJson: false,
   csvLayoutMode: 'single-header',
   csvMultiRow: true,
+  xmlRootTag: 'root',
+  xmlRecordTag: 'record',
+  xmlSelfClosing: true,
   defaultExportFormat: 'xml',
   defaultRecordCount: 10,
   encryption: { ...DEFAULT_ENCRYPTION },
@@ -522,6 +534,9 @@ export interface GeneratePerFileRequest {
   csvFlattenDelimiter?: string
   csvNestedAsJson?: boolean
   csvLayoutMode?: CsvLayoutMode
+  xmlRootTag?: string
+  xmlRecordTag?: string
+  xmlSelfClosing?: boolean
   previewSampleSize?: number
   /** Write a single .manifest.json in the output directory */
   writeManifest?: boolean
@@ -537,6 +552,10 @@ export interface ExportRequest {
   csvNestedAsJson?: boolean
   csvLayoutMode?: CsvLayoutMode
   csvMultiRow?: boolean
+  /** XML options */
+  xmlRootTag?: string
+  xmlRecordTag?: string
+  xmlSelfClosing?: boolean
   /** Override: run custom Python encryption after writing the file */
   encrypt?: boolean
   /** Write run manifest beside the export */
@@ -568,6 +587,10 @@ export interface ArchiveExportRequest {
   csvNestedAsJson?: boolean
   csvLayoutMode?: CsvLayoutMode
   csvMultiRow?: boolean
+  /** XML options */
+  xmlRootTag?: string
+  xmlRecordTag?: string
+  xmlSelfClosing?: boolean
   /** Override: run custom Python encryption after writing the archive */
   encrypt?: boolean
 }
@@ -615,4 +638,102 @@ export interface ArchiveTreeExportRequest {
   extension: ArchiveExt
   entries: Array<{ path: string; content: string }>
   encrypt?: boolean
+}
+
+// ── Package variation (whole upload = one record) ───────────────────
+
+/** How the package was imported. */
+export type PackageSourceKind = 'archive' | 'folder' | 'files'
+
+/** Outer packaging when re-emitting variants. */
+export type PackageOuterFormat = 'zip' | 'tar' | 'tar.gz' | 'folder'
+
+/** Nested archive kinds we expand and can re-pack. */
+export type NestedArchiveFormat = 'zip' | 'tar' | 'tar.gz'
+
+/**
+ * How a leaf field is filled when generating package variants.
+ * - same: lock to schema sample on every variant
+ * - random: normal generation (history + patterns)
+ * - unique: unique within one variant run (across package variants)
+ */
+export type FieldGenerateMode = 'same' | 'random' | 'unique'
+
+/** One text file (or expanded nested-archive folder marker) inside a package. */
+export interface PackageMember {
+  id: string
+  /** Posix path in the expanded logical tree */
+  path: string
+  name: string
+  /** text = handled content; nested_archive_folder = folder that replaces a nested archive */
+  kind: 'text' | 'nested_archive_folder'
+  format?: ExportFormat
+  /** Original nested archive file path (e.g. payload/data.tar.gz) */
+  nestedArchivePath?: string
+  nestedArchiveFormat?: NestedArchiveFormat
+  /** Original text content (for text members) */
+  content?: string
+  schemaId?: string
+  /** True after user reviewed schema for this member */
+  verified?: boolean
+}
+
+export interface PackageNestedArchiveMeta {
+  /** Expanded folder path (no trailing slash) */
+  folderPath: string
+  /** Original archive entry path inside parent */
+  originalArchivePath: string
+  format: NestedArchiveFormat
+}
+
+export interface PackageDoc {
+  id: string
+  name: string
+  sourceKind: PackageSourceKind
+  outerFormat: PackageOuterFormat
+  /** e.g. .zip / .TAR.GZ for re-pack casing */
+  outerExtension?: string
+  members: PackageMember[]
+  nestedArchives: PackageNestedArchiveMeta[]
+  /** Paths skipped (unsupported extensions) */
+  skipped: string[]
+  createdAt: string
+  updatedAt: string
+}
+
+/** Package with hydrated schemas for verify UI. */
+export interface PackageDocHydrated extends PackageDoc {
+  schemas: Record<string, SchemaDoc>
+}
+
+export interface PackageImportResult {
+  canceled: boolean
+  package?: PackageDocHydrated
+  error?: string
+}
+
+/**
+ * fieldModes[memberPath][fieldPath] = mode
+ * e.g. { "orders.xml": { "id": "unique", "status": "same" } }
+ */
+export interface PackageGenerateRequest {
+  packageId: string
+  /** Number of full package variants (= records; whole package is one record) */
+  recordCount: number
+  seed?: number
+  ciMode?: boolean
+  defaultFieldMode?: FieldGenerateMode
+  fieldModes?: Record<string, Record<string, FieldGenerateMode>>
+  /** When true, write re-packed archives (or folders) to a chosen directory */
+  repack: boolean
+}
+
+export interface PackageGenerateResult {
+  canceled: boolean
+  written: number
+  outputDir?: string
+  samplePaths?: string[]
+  seed?: number
+  ms?: number
+  error?: string
 }

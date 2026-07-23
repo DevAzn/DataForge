@@ -13,13 +13,16 @@ import type {
 } from '@shared/types'
 import { MAX_GENERATE_RECORDS, MIN_GENERATE_RECORDS } from '@shared/types'
 import { serializeCsv } from '@shared/csv'
+import { serializeXml, type XmlFormatOptions } from '@shared/xml'
 import { useAppStore } from '../store/appStore'
 import { ArchiveWorkspace } from './ArchiveWorkspace'
+import { PackageWorkspace } from './PackageWorkspace'
 
 export interface PreviewPanelHandle {
   generate: () => void
   exportCurrent: () => void
   openArchive: () => void
+  openPackage: () => void
 }
 
 export interface PreviewPanelProps {
@@ -77,12 +80,12 @@ export function buildSchemaDefinition(doc: SchemaDoc): Record<string, unknown> {
 function toPreviewString(
   data: unknown,
   format: ExportFormat,
-  csvOpts?: {
+  opts?: {
     csvLayoutMode?: CsvLayoutMode
     csvMultiRow?: boolean
     csvFlattenDelimiter?: string
     csvNestedAsJson?: boolean
-  }
+  } & XmlFormatOptions
 ): string {
   switch (format) {
     case 'json':
@@ -91,13 +94,17 @@ function toPreviewString(
       return jsonToSimpleYaml(data)
     case 'csv':
       return serializeCsv(data, {
-        csvLayoutMode: csvOpts?.csvLayoutMode ?? 'single-header',
-        csvMultiRow: csvOpts?.csvMultiRow !== false,
-        csvFlattenDelimiter: csvOpts?.csvFlattenDelimiter ?? '.',
-        csvNestedAsJson: csvOpts?.csvNestedAsJson ?? false
+        csvLayoutMode: opts?.csvLayoutMode ?? 'single-header',
+        csvMultiRow: opts?.csvMultiRow !== false,
+        csvFlattenDelimiter: opts?.csvFlattenDelimiter ?? '.',
+        csvNestedAsJson: opts?.csvNestedAsJson ?? false
       })
     case 'xml':
-      return objectToXmlPreview(data)
+      return serializeXml(data, {
+        xmlRootTag: opts?.xmlRootTag,
+        xmlRecordTag: opts?.xmlRecordTag,
+        xmlSelfClosing: opts?.xmlSelfClosing
+      })
     case 'txt':
       return JSON.stringify(data, null, 2)
     default:
@@ -132,35 +139,6 @@ function jsonToSimpleYaml(data: unknown, indent = 0): string {
       return `${pad}${k}: ${jsonToSimpleYaml(v)}`
     })
     .join('\n')
-}
-
-function objectToXmlPreview(data: unknown, tag = 'root'): string {
-  if (data === null || data === undefined) return `<${tag}/>`
-  if (typeof data !== 'object') return `<${tag}>${escapeXml(String(data))}</${tag}>`
-  if (Array.isArray(data)) {
-    return `<${tag}>\n${data
-      .map((item, i) => indentBlock(objectToXmlPreview(item, `item_${i}`)))
-      .join('\n')}\n</${tag}>`
-  }
-  const inner = Object.entries(data as Record<string, unknown>)
-    .map(([k, v]) => objectToXmlPreview(v, k))
-    .join('\n')
-  return `<${tag}>\n${indentBlock(inner)}\n</${tag}>`
-}
-
-function indentBlock(s: string): string {
-  return s
-    .split('\n')
-    .map((l) => '  ' + l)
-    .join('\n')
-}
-
-function escapeXml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
 }
 
 const FORMATS: ExportFormat[] = ['json', 'yaml', 'xml', 'csv', 'txt']
@@ -241,6 +219,7 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
   const [statusMsg, setStatusMsg] = useState<string | null>(null)
   const [exporting, setExporting] = useState(false)
   const [archiveOpen, setArchiveOpen] = useState(false)
+  const [packageOpen, setPackageOpen] = useState(false)
   /** Editable export base name (no extension). Defaults to schema name. */
   const [exportFileName, setExportFileName] = useState('dataforge-export')
   const [fileNameTouched, setFileNameTouched] = useState(false)
@@ -287,14 +266,25 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
           ? 'generated'
           : 'schema'
 
-  const csvOpts = useMemo(
+  const formatOpts = useMemo(
     () => ({
       csvLayoutMode,
       csvMultiRow,
       csvFlattenDelimiter: settings.csvFlattenDelimiter,
-      csvNestedAsJson: settings.csvNestedAsJson
+      csvNestedAsJson: settings.csvNestedAsJson,
+      xmlRootTag: settings.xmlRootTag ?? 'root',
+      xmlRecordTag: settings.xmlRecordTag ?? 'record',
+      xmlSelfClosing: settings.xmlSelfClosing !== false
     }),
-    [csvLayoutMode, csvMultiRow, settings.csvFlattenDelimiter, settings.csvNestedAsJson]
+    [
+      csvLayoutMode,
+      csvMultiRow,
+      settings.csvFlattenDelimiter,
+      settings.csvNestedAsJson,
+      settings.xmlRootTag,
+      settings.xmlRecordTag,
+      settings.xmlSelfClosing
+    ]
   )
 
   const text = useMemo(() => {
@@ -317,11 +307,11 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
           { _note: `… ${generatedData.length - 50} more records not shown` }
         ]
       }
-      return toPreviewString(data, format, csvOpts)
+      return toPreviewString(data, format, formatOpts)
     }
     if (!schemaSample) return '// No schema — add fields in the builder'
-    return toPreviewString(schemaSample, format, csvOpts)
-  }, [previewSource, generatedData, schemaSample, format, csvOpts])
+    return toPreviewString(schemaSample, format, formatOpts)
+  }, [previewSource, generatedData, schemaSample, format, formatOpts])
 
   async function onGenerate(): Promise<void> {
     setStatusMsg(null)
@@ -362,6 +352,9 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
       },
       openArchive: () => {
         setArchiveOpen(true)
+      },
+      openPackage: () => {
+        setPackageOpen(true)
       }
     }),
     // Keep handle fresh for keyboard shortcuts
@@ -817,6 +810,61 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
         )}
         </div>
 
+        {format === 'xml' && (
+          <div className="space-y-2 rounded-md border border-border bg-bg p-2">
+            <div className="label">XML options</div>
+            <label className="block text-xs">
+              <span className="mb-0.5 block font-medium text-text">Root tag</span>
+              <input
+                className="input w-full font-mono text-xs"
+                value={settings.xmlRootTag ?? 'root'}
+                onChange={(e) =>
+                  void patchSettings({
+                    xmlRootTag: e.target.value.trim() || 'root'
+                  })
+                }
+                placeholder="root"
+                spellCheck={false}
+                title="Outer wrapper element name"
+              />
+            </label>
+            <label className="block text-xs">
+              <span className="mb-0.5 block font-medium text-text">
+                Record tag (multi-record)
+              </span>
+              <input
+                className="input w-full font-mono text-xs"
+                value={settings.xmlRecordTag ?? 'record'}
+                onChange={(e) =>
+                  void patchSettings({
+                    xmlRecordTag: e.target.value.trim() || 'record'
+                  })
+                }
+                placeholder="record"
+                spellCheck={false}
+                title="Element name for each record when exporting a list"
+              />
+            </label>
+            <label className="flex items-start gap-2 text-xs">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={settings.xmlSelfClosing !== false}
+                onChange={(e) =>
+                  void patchSettings({ xmlSelfClosing: e.target.checked })
+                }
+              />
+              <span>
+                <span className="font-medium text-text">Self-closing empty tags</span>
+                <span className="block text-muted">
+                  On: <span className="font-mono text-text">&lt;note/&gt;</span> · Off:{' '}
+                  <span className="font-mono text-text">&lt;note&gt;&lt;/note&gt;</span>
+                </span>
+              </span>
+            </label>
+          </div>
+        )}
+
         {format === 'csv' && (
           <div className="space-y-2 rounded-md border border-border bg-bg p-2">
             <div className="label">CSV options</div>
@@ -1012,6 +1060,15 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
         >
           Archive Workspace…
         </button>
+        <button
+          type="button"
+          className="btn-ghost w-full border border-border border-[#d4a017]/40 text-xs"
+          disabled={exporting}
+          onClick={() => setPackageOpen(true)}
+          title="Import multi-file package, verify schemas, generate N full variants"
+        >
+          Package variation…
+        </button>
 
         {statusMsg && (
           <p
@@ -1052,6 +1109,12 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
           setStatusMsg(`Archive saved: ${path}`)
         }}
         onError={(msg) => setStatusMsg(msg)}
+      />
+      <PackageWorkspace
+        open={packageOpen}
+        onOpenChange={setPackageOpen}
+        onError={(msg) => setStatusMsg(msg)}
+        onStatus={(msg) => setStatusMsg(msg)}
       />
     </section>
   )
