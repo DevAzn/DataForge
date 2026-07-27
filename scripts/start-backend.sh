@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start DataForge FastAPI backend on port 8765 (Linux / macOS)
+# Start DataForge FastAPI backend on port 8765 (bash: Linux, macOS, WSL, Git Bash)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -31,15 +31,29 @@ resolve_python() {
   exit 1
 }
 
-VENV_PY="$BACKEND/.venv/bin/python"
-if [[ ! -x "$VENV_PY" ]]; then
+# Unix venv layout vs Windows (Git Bash / WSL using a Windows venv)
+resolve_venv_python() {
+  if [[ -x "$BACKEND/.venv/bin/python" ]]; then
+    echo "$BACKEND/.venv/bin/python"
+  elif [[ -f "$BACKEND/.venv/Scripts/python.exe" ]]; then
+    echo "$BACKEND/.venv/Scripts/python.exe"
+  else
+    echo ""
+  fi
+}
+
+VENV_PY="$(resolve_venv_python)"
+if [[ -z "$VENV_PY" ]]; then
   PY="$(resolve_python)"
   echo "Creating virtualenv with: $PY ($("$PY" -c 'import sys; print(sys.version.split()[0])'))"
   "$PY" -m venv .venv
-  # shellcheck disable=SC1091
-  source "$BACKEND/.venv/bin/activate"
-  python -m pip install --upgrade pip
-  python -m pip install -r requirements.txt
+  VENV_PY="$(resolve_venv_python)"
+  if [[ -z "$VENV_PY" ]]; then
+    echo "error: venv created but python not found under .venv/bin or .venv/Scripts" >&2
+    exit 1
+  fi
+  "$VENV_PY" -m pip install --upgrade pip
+  "$VENV_PY" -m pip install -r requirements.txt
 else
   echo "Using existing venv Python $("$VENV_PY" -c 'import sys; print(sys.version.split()[0])')"
 fi

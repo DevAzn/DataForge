@@ -21,14 +21,15 @@ Generated file bodies are written only on generate/export/delivery.
 
 - **Python 3.12+** (`python3` / `python3.12`)
 - **Node.js 18+** and **npm**
-- Two terminals (or use `scripts/dev.sh` on Linux/macOS)
+- **bash** (Linux, macOS, WSL, or Git Bash on Windows)
+- Two terminals (or use `scripts/dev.sh`)
 
-## Quick start — Linux / macOS
+## Quick start
 
 ```bash
 cd /path/to/DataForge
 
-# make scripts executable once
+# make scripts executable once (if needed)
 chmod +x scripts/*.sh
 
 # Terminal 1 — API
@@ -53,7 +54,7 @@ Or both in one terminal (Ctrl+C stops both):
 # Backend
 cd backend
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate          # Windows Git Bash may use: source .venv/Scripts/activate
 pip install -r requirements.txt
 python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8765
 
@@ -63,20 +64,13 @@ npm install
 npm run dev -- --host 127.0.0.1 --port 5173
 ```
 
-## Quick start — Windows (PowerShell)
+## Notes
 
-```powershell
-cd C:\path\to\DataForge
-.\scripts\start-backend.ps1
-.\scripts\start-frontend.ps1
-```
-
-## Notes for Linux
-
-- Venv path is `backend/.venv/bin/python` (not `Scripts\\python.exe`).
-- Prefer **http://localhost:5173** if `127.0.0.1:5173` fails (IPv6 / host binding).
-- Ensure ports **8765** and **5173** are free: `ss -tlnp | grep -E '8765|5173'`.
-- Optional bulk helpers: `pip install "pv-dataforge[bulk]"` from the project root after venv is active.
+- Start scripts are **bash only** (no PowerShell).
+- Venv: Unix → `backend/.venv/bin/python`; Windows venv under bash → `backend/.venv/Scripts/python.exe` (auto-detected).
+- Prefer **http://localhost:5173** if `127.0.0.1:5173` fails.
+- Free ports **8765** and **5173** (Linux: `ss -tlnp | grep -E '8765|5173'`).
+- Optional bulk helpers: `pip install "pv-dataforge[bulk]"` with the venv active.
 
 ## Layout
 
@@ -84,6 +78,6 @@ cd C:\path\to\DataForge
 DataForge/
   backend/app/          # FastAPI + services
   frontend/src/         # Vue UI
-  scripts/              # start-backend / start-frontend (sh + ps1)
+  scripts/              # start-backend.sh / start-frontend.sh / dev.sh
   data/                 # local SQLite + exports (gitignored)
 ```

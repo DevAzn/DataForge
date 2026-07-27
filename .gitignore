@@ -64,7 +64,8 @@ SCORECARD.md
 GOALS.md
 *.session.md
 
-# Path-migration helpers (not required to run)
+# PowerShell / path-migration leftovers (bash only for run scripts)
+*.ps1
 scripts/cleanup-electron-remnants.ps1
 scripts/finalize-dataforge-path.ps1
 scripts/finalize-pv-path.ps1

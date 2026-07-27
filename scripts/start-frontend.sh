@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Start DataForge Vue dev server (proxies /api -> :8765) — Linux / macOS
+# Start DataForge Vue dev server (proxies /api -> :8765)
+# bash: Linux, macOS, WSL, Git Bash
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -16,5 +17,5 @@ if [[ ! -d "$FRONTEND/node_modules" ]]; then
   npm install
 fi
 
-echo "UI: http://localhost:5173  (prefer localhost over 127.0.0.1 on some Linux setups)"
+echo "UI: http://localhost:5173  (prefer localhost over 127.0.0.1 if binding fails)"
 exec npm run dev -- --host 127.0.0.1 --port 5173

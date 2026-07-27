@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# Optional: start API + UI in one terminal (Linux / macOS). Ctrl+C stops both.
+# Optional: start API + UI in one terminal. Ctrl+C stops both.
+# bash: Linux, macOS, WSL, Git Bash
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 cleanup() {
-  jobs -p | xargs -r kill 2>/dev/null || true
+  # xargs -r is GNU; fall back for BSD/macOS
+  if jobs -p | grep -q .; then
+    jobs -p | xargs kill 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT INT TERM
 
