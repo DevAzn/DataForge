@@ -1,0 +1,70 @@
+# ── Python ──────────────────────────────────────────────────────────
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.cover
+
+# ── Node / Vue ──────────────────────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+npm-debug.log*
+yarn-error.log*
+.pnpm-store/
+
+# ── Runtime data (local only) ───────────────────────────────────────
+data/
+*.sqlite
+*.sqlite3
+*.db
+
+# ── Secrets & env ───────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── OS / editor ─────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── Logs & temp ─────────────────────────────────────────────────────
+*.log
+tmp/
+temp/
+*.tmp
+
+# ── Nested / accidental clones ──────────────────────────────────────
+/DataForge/
+
+# ── Docs: README only ───────────────────────────────────────────────
+*.md
+!README.md
+
+# ── CI & agent tooling (local only — do not push) ───────────────────
+.github/
+.grok/
+GOAL.md
+SCORECARD.md
+GOALS.md
+*.session.md
+
+# Path-migration helpers (not required to run)
+scripts/cleanup-electron-remnants.ps1
+scripts/finalize-dataforge-path.ps1
+scripts/finalize-pv-path.ps1
