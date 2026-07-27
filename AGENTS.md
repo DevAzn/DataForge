@@ -14,6 +14,15 @@ Power-user style: plan first, parallelize hard work, verify every ship, capture 
 **Primary path:** `C:\Users\terro\Projects\Sandbox\DataForge`  
 (Product brand remains **DataForge**. `DataForge` may exist as a path alias.)
 
+## Goal & Role Discipline (DataForge stabilize runs)
+
+When running under /goal:
+- Always maintain the multi-role team: PO, DEV/DEV LEAD, TESTER/QA, Technical Writer.
+- Only the QA/TESTER role may declare a Done-when item satisfied, and only after running the actual checks.
+- Technical Writer owns SCORECARD.md and keeps AGENTS.md / skills in sync.
+- Never expand Delivery or introduce new feature work.
+- Prefer small, verifiable increments. Use Plan Mode for non-trivial UI or schema changes.
+
 ---
 
 ## 1. Project purpose & goals

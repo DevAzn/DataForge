@@ -1,4 +1,4 @@
-"""FastAPI entry — PV_DataForge API."""
+"""FastAPI entry — DataForge API."""
 from __future__ import annotations
 
 import base64
@@ -28,9 +28,12 @@ from app.services import (
 )
 from app.services import file_naming
 
+APP_VERSION = "0.5.0"
+APP_NAME = "DataForge"
+
 app = FastAPI(
-    title="PV_DataForge",
-    version="0.5.0",
+    title=APP_NAME,
+    version=APP_VERSION,
     description=(
         "Local ETL test-data generator. SQLite stores schemas, history, custom values, "
         "and themes only — never auto-generated file bodies."
@@ -285,7 +288,7 @@ def _run_generate(body: GenerateBody) -> dict:
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "app": "PV_DataForge", "version": "0.5.0"}
+    return {"ok": True, "app": APP_NAME, "version": APP_VERSION}
 
 
 @app.get("/api/status")
@@ -294,7 +297,7 @@ def status():
     templates = db.list_templates()
     return {
         "ok": True,
-        "version": "0.5.0",
+        "version": APP_VERSION,
         "schemaCount": len(schemas),
         "templateCount": len(templates),
         "valueHistoryCount": db.history_count(),
@@ -770,7 +773,7 @@ def export_archive(body: ArchiveBuildBody):
     return Response(
         content=raw,
         media_type=media or "application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="PV_DataForge{ext}"'},
+        headers={"Content-Disposition": f'attachment; filename="DataForge{ext}"'},
     )
 
 
@@ -904,14 +907,14 @@ def backup_export():
         "schemas": db.list_schemas(),
         "templates": db.list_templates(),
         "history": db.list_history_for_backup(50_000),
-        "note": "PV_DataForge JSON backup (settings, schemas, templates, history).",
+        "note": "DataForge JSON backup (settings, schemas, templates, history).",
     }
     raw = json.dumps(payload, indent=2).encode("utf-8")
     return Response(
         content=raw,
         media_type="application/json",
         headers={
-            "Content-Disposition": f'attachment; filename="PV_DataForge-backup-{db.now_iso()[:10]}.json"'
+            "Content-Disposition": f'attachment; filename="DataForge-backup-{db.now_iso()[:10]}.json"'
         },
     )
 

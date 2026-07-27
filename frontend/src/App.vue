@@ -1540,17 +1540,6 @@ const enumText = computed({
     updateSelected({ enumValues: lines.length ? lines : undefined })
   }
 })
-
-const sourceKeysText = computed({
-  get: () => (selected.value?.historySourceKeys || []).join('\n'),
-  set: (v) => {
-    const lines = v
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean)
-    updateSelected({ historySourceKeys: lines.length ? lines : undefined })
-  }
-})
 </script>
 
 <template>
@@ -2534,7 +2523,10 @@ const sourceKeysText = computed({
         </div>
 
         <div v-if="selected" class="props">
-          <div class="label">Properties</div>
+          <div class="label">Field settings</div>
+          <p class="muted tiny" style="margin: 0 0 0.5rem; padding: 0 0.15rem">
+            Controls how this field is randomized. Sample value on the row is the primary template.
+          </p>
           <div class="props-grid">
             <label>
               Kind
@@ -2646,19 +2638,7 @@ const sourceKeysText = computed({
               />
             </label>
             <label v-if="selected.kind === 'value'" class="wide">
-              Pattern (regex)
-              <input
-                class="input mono"
-                :value="selected.pattern || ''"
-                @change="
-                  updateSelected({
-                    pattern: $event.target.value.trim() || undefined
-                  })
-                "
-              />
-            </label>
-            <label v-if="selected.kind === 'value'" class="wide">
-              Enum values (one per line)
+              Allowed values (enum, one per line)
               <textarea
                 class="input mono"
                 rows="3"
@@ -2694,52 +2674,8 @@ const sourceKeysText = computed({
                 <option v-for="c in themeCategories" :key="'ft-' + c" :value="c" />
               </datalist>
               <span class="muted tiny"
-                >Maps this field to values from active theme packs (Data packs)</span
+                >Optional — maps field to Data packs theme values</span
               >
-            </label>
-            <label class="wide">
-              History pool
-              <input
-                class="input mono"
-                :value="selected.historyPool || ''"
-                placeholder="shared pool name"
-                @change="
-                  updateSelected({
-                    historyPool: $event.target.value.trim() || undefined
-                  })
-                "
-              />
-            </label>
-            <label class="wide">
-              Category override
-              <input
-                class="input mono"
-                :value="selected.categoryOverride || ''"
-                @change="
-                  updateSelected({
-                    categoryOverride: $event.target.value.trim() || undefined
-                  })
-                "
-              />
-            </label>
-            <label class="wide">
-              History source keys (one per line)
-              <textarea
-                class="input mono"
-                rows="2"
-                :value="sourceKeysText"
-                @change="
-                  (e) => {
-                    const lines = e.target.value
-                      .split('\n')
-                      .map((s) => s.trim())
-                      .filter(Boolean)
-                    updateSelected({
-                      historySourceKeys: lines.length ? lines : undefined
-                    })
-                  }
-                "
-              />
             </label>
           </div>
         </div>
