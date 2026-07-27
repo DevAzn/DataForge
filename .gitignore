@@ -22,7 +22,7 @@ npm-debug.log*
 yarn-error.log*
 .pnpm-store/
 
-# ── Runtime data (local only — never commit SQLite or exports) ──────
+# ── Runtime data (local only) ───────────────────────────────────────
 data/
 *.sqlite
 *.sqlite3
@@ -49,22 +49,23 @@ tmp/
 temp/
 *.tmp
 
-# ── Nested / accidental clones (do not ship) ────────────────────────
+# ── Nested / accidental clones ──────────────────────────────────────
 /DataForge/
 
-# ── Agent / Grok session artifacts (not required to run the app) ────
+# ── Docs: README only ───────────────────────────────────────────────
+*.md
+!README.md
+
+# ── CI & agent tooling (local only — do not push) ───────────────────
+.github/
 .grok/
 GOAL.md
 SCORECARD.md
 GOALS.md
 *.session.md
 
-# Agent / product docs (local power-user; not required to run the app)
-AGENTS.md
-CONTEXT.md
-GROK_BUILD_SETUP.md
-
-# Path-migration helpers (not required to run)
+# PowerShell / path-migration leftovers (bash only for run scripts)
+*.ps1
 scripts/cleanup-electron-remnants.ps1
 scripts/finalize-dataforge-path.ps1
 scripts/finalize-pv-path.ps1
