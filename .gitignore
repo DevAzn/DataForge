@@ -52,20 +52,28 @@ temp/
 # ── Nested / accidental clones ──────────────────────────────────────
 /DataForge/
 
-# ── Docs: README only ───────────────────────────────────────────────
+# ── Docs: README + agent/Duo instruction files that must ship to GitLab ─
 *.md
 !README.md
+!AGENTS.md
+!.gitlab/**/*.md
+!skills/**/*.md
 
-# ── CI & agent tooling (local only — do not push) ───────────────────
+# ── Local-only tooling (keep on disk; do not commit) ────────────────
 .github/
 .grok/
 GOAL.md
 SCORECARD.md
 GOALS.md
 *.session.md
+CONTEXT.md
+GROK_BUILD_SETUP.md
 
-# PowerShell / path-migration leftovers (bash only for run scripts)
+# PowerShell leftovers (bash only for run scripts)
 *.ps1
 scripts/cleanup-electron-remnants.ps1
 scripts/finalize-dataforge-path.ps1
 scripts/finalize-pv-path.ps1
+
+# NOTE: .gitlab/ and AGENTS.md ARE intended for commit (GitLab Duo + CI).
+# Do not add a blanket ".gitlab/" ignore rule.

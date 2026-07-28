@@ -111,6 +111,8 @@ class ExportBody(BaseModel):
     xmlRootTag: str | None = None
     xmlRecordTag: str | None = None
     xmlSelfClosing: bool | None = None
+    # Optional path/tag overrides: { "field": true, "meta.child": false }
+    xmlSelfClosingMap: dict[str, bool] | None = None
 
 
 class StreamBody(GenerateBody):
@@ -122,6 +124,7 @@ class StreamBody(GenerateBody):
     xmlRootTag: str | None = None
     xmlRecordTag: str | None = None
     xmlSelfClosing: bool | None = None
+    xmlSelfClosingMap: dict[str, bool] | None = None
 
 
 class PerFileBody(GenerateBody):
@@ -701,7 +704,10 @@ def _xml_opts(body: Any, settings: dict[str, Any]) -> dict[str, Any]:
     sc = getattr(body, "xmlSelfClosing", None)
     if sc is None and isinstance(body, dict):
         sc = body.get("xmlSelfClosing")
-    return {
+    sc_map = getattr(body, "xmlSelfClosingMap", None)
+    if sc_map is None and isinstance(body, dict):
+        sc_map = body.get("xmlSelfClosingMap")
+    opts: dict[str, Any] = {
         "xml_root_tag": root or settings.get("xmlRootTag") or "root",
         "xml_record_tag": rec or settings.get("xmlRecordTag") or "record",
         "xml_self_closing": (
@@ -710,6 +716,11 @@ def _xml_opts(body: Any, settings: dict[str, Any]) -> dict[str, Any]:
             else bool(settings.get("xmlSelfClosing", True))
         ),
     }
+    if isinstance(sc_map, dict) and sc_map:
+        opts["xml_self_closing_map"] = {
+            str(k): bool(v) for k, v in sc_map.items()
+        }
+    return opts
 
 
 @app.post("/api/export")

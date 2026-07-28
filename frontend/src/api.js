@@ -309,6 +309,8 @@ export function emptyRow(sortOrder = 0) {
     historyPool: undefined,
     categoryOverride: undefined,
     historySourceKeys: undefined,
+    /** true | false | undefined (undefined = use schema xmlSelfClosing default) */
+    selfClosing: undefined,
     children: [],
     sortOrder
   }

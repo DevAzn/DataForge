@@ -1,0 +1,15 @@
+# Protect high-impact instruction and CI files.
+# Replace owners with real GitLab @username or @group after import.
+# CODEOWNERS only blocks merges if the target branch is protected with
+# "Require approval from Code Owners" (Premium/Ultimate).
+
+# Default
+* @your-gitlab-username
+
+# Duo / agent instructions (high impact)
+[Duo instructions][1]
+AGENTS.md @your-gitlab-username
+skills/** @your-gitlab-username
+.gitlab/duo/** @your-gitlab-username
+.gitlab/CODEOWNERS @your-gitlab-username
+.gitlab-ci.yml @your-gitlab-username

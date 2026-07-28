@@ -91,32 +91,71 @@ def _empty_xml(tag: str, self_closing: bool) -> str:
     return f"<{tag}></{tag}>"
 
 
-def _xml_node(tag: str, value: Any, *, self_closing: bool = True) -> str:
+def _resolve_self_closing(
+    path: str,
+    tag: str,
+    default: bool,
+    path_map: dict[str, bool] | None,
+) -> bool:
+    if not path_map:
+        return default
+    if path in path_map:
+        return bool(path_map[path])
+    if tag in path_map:
+        return bool(path_map[tag])
+    return default
+
+
+def _xml_node(
+    tag: str,
+    value: Any,
+    *,
+    self_closing: bool = True,
+    path: str = "",
+    self_closing_map: dict[str, bool] | None = None,
+) -> str:
     safe = sanitize_xml_tag(tag)
+    path = path or safe
+    sc = _resolve_self_closing(path, safe, self_closing, self_closing_map)
     if value is None:
-        return _empty_xml(safe, self_closing)
+        return _empty_xml(safe, sc)
     if isinstance(value, bool):
         return f"<{safe}>{str(value).lower()}</{safe}>"
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return f"<{safe}>{value}</{safe}>"
     if isinstance(value, list):
         if not value:
-            return _empty_xml(safe, self_closing)
+            return _empty_xml(safe, sc)
         inner = "\n".join(
-            _xml_node(f"{safe}_{i}", v, self_closing=self_closing)
+            _xml_node(
+                f"{safe}_{i}",
+                v,
+                self_closing=self_closing,
+                path=f"{path}.{i}",
+                self_closing_map=self_closing_map,
+            )
             for i, v in enumerate(value)
         )
         return f"<{safe}>\n{_indent(inner)}\n</{safe}>"
     if isinstance(value, dict):
         if not value:
-            return _empty_xml(safe, self_closing)
-        inner = "\n".join(
-            _xml_node(k, v, self_closing=self_closing) for k, v in value.items()
-        )
-        return f"<{safe}>\n{_indent(inner)}\n</{safe}>"
+            return _empty_xml(safe, sc)
+        parts = []
+        for k, v in value.items():
+            child_path = f"{path}.{k}" if path else str(k)
+            parts.append(
+                _xml_node(
+                    k,
+                    v,
+                    self_closing=self_closing,
+                    path=child_path,
+                    self_closing_map=self_closing_map,
+                )
+            )
+        return f"<{safe}>\n{_indent(chr(10).join(parts))}\n</{safe}>"
     text = str(value)
     if text == "":
-        return _empty_xml(safe, self_closing)
+        return _empty_xml(safe, sc)
     return f"<{safe}>{_escape_xml(text)}</{safe}>"
 
 
@@ -130,24 +169,51 @@ def to_xml(
     root_tag: str = "root",
     record_tag: str = "record",
     self_closing: bool = True,
+    self_closing_map: dict[str, bool] | None = None,
 ) -> str:
     """
     Serialize data as XML.
 
     - root_tag: outer wrapper name (e.g. Orders, Document)
     - record_tag: each array item name when data is a list of records
-    - self_closing: null/empty elements as <tag/> vs <tag></tag>
+    - self_closing: default for null/empty elements as <tag/> vs <tag></tag>
+    - self_closing_map: optional path or tag-name overrides (bool)
     """
     root = sanitize_xml_tag(root_tag, "root")
     rec = sanitize_xml_tag(record_tag, "record")
+    sc_map = self_closing_map
 
     if isinstance(data, list):
         if not data:
             return _empty_xml(root, self_closing)
-        body = "\n".join(
-            _xml_node(rec, r, self_closing=self_closing) for r in data
-        )
-        return f"<{root}>\n{_indent(body)}\n</{root}>"
+        parts: list[str] = []
+        for r in data:
+            if isinstance(r, dict):
+                if not r:
+                    parts.append(_empty_xml(rec, self_closing))
+                else:
+                    inner = "\n".join(
+                        _xml_node(
+                            k,
+                            v,
+                            self_closing=self_closing,
+                            path=str(k),
+                            self_closing_map=sc_map,
+                        )
+                        for k, v in r.items()
+                    )
+                    parts.append(f"<{rec}>\n{_indent(inner)}\n</{rec}>")
+            else:
+                parts.append(
+                    _xml_node(
+                        rec,
+                        r,
+                        self_closing=self_closing,
+                        path=rec,
+                        self_closing_map=sc_map,
+                    )
+                )
+        return f"<{root}>\n{_indent(chr(10).join(parts))}\n</{root}>"
 
     # Single object/scalar: still wrap in root when it's a dict so user always
     # gets a controllable root name. Scalars become root text content.
@@ -155,11 +221,20 @@ def to_xml(
         if not data:
             return _empty_xml(root, self_closing)
         inner = "\n".join(
-            _xml_node(k, v, self_closing=self_closing) for k, v in data.items()
+            _xml_node(
+                k,
+                v,
+                self_closing=self_closing,
+                path=str(k),
+                self_closing_map=sc_map,
+            )
+            for k, v in data.items()
         )
         return f"<{root}>\n{_indent(inner)}\n</{root}>"
 
-    return _xml_node(root, data, self_closing=self_closing)
+    return _xml_node(
+        root, data, self_closing=self_closing, path=root, self_closing_map=sc_map
+    )
 
 
 def csv_escape(value: str) -> str:
@@ -376,6 +451,7 @@ def serialize(
     xml_root_tag: str = "root",
     xml_record_tag: str = "record",
     xml_self_closing: bool = True,
+    xml_self_closing_map: dict[str, bool] | None = None,
 ) -> str:
     f = validate_format(fmt)
     if f == "json":
@@ -388,6 +464,7 @@ def serialize(
             root_tag=xml_root_tag,
             record_tag=xml_record_tag,
             self_closing=xml_self_closing,
+            self_closing_map=xml_self_closing_map,
         )
     if f == "csv":
         return to_csv(

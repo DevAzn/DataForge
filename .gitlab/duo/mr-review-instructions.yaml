@@ -1,0 +1,45 @@
+# GitLab Duo MR review guidance for DataForge.
+# Guidance only — not a security/compliance control.
+# Docs: https://docs.gitlab.com/user/duo_agent_platform/customize/review_instructions/
+
+instructions:
+  - name: minimal_change
+    instructions: |
+      Flag scope creep: changes unrelated to the MR description or issue.
+      Flag large refactors, new dependencies, or new abstractions without clear need.
+      Prefer comments that ask for smaller diffs when the change is oversized.
+      Do not demand style rewrites of pre-existing code that was not modified.
+
+  - name: dataforge_product
+    fileFilters:
+      - "backend/**/*"
+      - "frontend/**/*"
+    instructions: |
+      Verify product rules were not broken:
+      - SQLite must not store bulk generated record bodies or export binaries.
+      - Package generate still means whole package = one record.
+      - Multi-file archives should remain tar.gz by default when count > 1.
+      - Fill order remains enums → theme → custom → history → synthesize.
+      - UI formats should stay limited to xml/csv/txt unless the MR explicitly expands them.
+      - Do not require Delivery feature work unless the MR is about Delivery.
+
+  - name: backend_python
+    fileFilters:
+      - "backend/**/*.py"
+    instructions: |
+      Prefer logic in services/*, thin routes in main.py.
+      Flag unnecessary new modules or packages for small fixes.
+      Prefer stdlib and existing deps over new libraries.
+
+  - name: frontend_vue
+    fileFilters:
+      - "frontend/**/*.{vue,js,css}"
+    instructions: |
+      Prefer extending App.vue / api.js rather than introducing a new UI framework.
+      Flag dead UI controls and unexplained large template rewrites.
+      Generate button label should remain "Generate".
+
+  - name: secrets_and_runtime
+    instructions: |
+      Reject committing secrets, .env files, data/*.sqlite, node_modules, or .venv.
+      Flag hard-coded absolute machine paths that break Linux/macOS.

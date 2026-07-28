@@ -23,13 +23,42 @@ Optional: `pip install "pv-dataforge[bulk]"` (polars/numpy) — not required for
 
 ## Quick start
 
+### Install (recommended)
+
+Works on **Linux**, **macOS**, **WSL**, and **Git Bash** on Windows.
+
+**Already cloned** the repo:
+
 ```bash
-git clone <repo-url>
 cd DataForge
+chmod +x scripts/*.sh   # once, if needed
+./scripts/install.sh
+```
 
-# once after clone (if scripts are not executable)
-chmod +x scripts/*.sh
+**Download + install** in one step (clones into `./DataForge`):
 
+```bash
+curl -fsSL https://raw.githubusercontent.com/DevAzn/DataForge/main/scripts/install.sh | bash
+```
+
+| Flag | Meaning |
+|------|---------|
+| `--bulk` | Also install optional polars/numpy |
+| `--force` | Recreate Python venv + reinstall `node_modules` |
+| `--skip-backend` / `--skip-frontend` | Install only one side |
+| `--no-clone` | Fail if not already inside a DataForge tree |
+
+```bash
+./scripts/install.sh --bulk
+./scripts/install.sh --force
+curl -fsSL https://raw.githubusercontent.com/DevAzn/DataForge/main/scripts/install.sh | bash -s -- --bulk
+```
+
+The installer checks **Python 3.12+** and **Node.js 18+**, creates `backend/.venv`, installs pip deps, runs `npm install`, and prepares `data/`.
+
+### Run
+
+```bash
 # Terminal 1 — API
 ./scripts/start-backend.sh
 
@@ -49,7 +78,7 @@ Or both in one terminal (Ctrl+C stops both):
 | **API health** | http://127.0.0.1:8765/api/health |
 | **API docs (OpenAPI)** | http://127.0.0.1:8765/docs |
 
-First run creates `backend/.venv`, installs Python deps, and runs `npm install` if needed. Later starts are faster.
+If you skip `install.sh`, the start scripts still create the venv / run `npm install` on first launch.
 
 ### Confirm it works
 
@@ -145,6 +174,7 @@ DataForge/
     public/              # favicon / icons
     package.json
   scripts/
+    install.sh           # prereqs + venv + npm (Linux / Windows bash)
     start-backend.sh     # API on :8765
     start-frontend.sh    # UI on :5173
     dev.sh               # both (optional)
@@ -159,6 +189,7 @@ DataForge/
 
 | Script | What it does |
 |--------|----------------|
+| `./scripts/install.sh` | Check prereqs, create venv, install Python + npm deps |
 | `./scripts/start-backend.sh` | Create venv if needed, install deps, run Uvicorn |
 | `./scripts/start-frontend.sh` | `npm install` if needed, run Vite |
 | `./scripts/dev.sh` | Start API + UI; Ctrl+C stops both |
@@ -196,6 +227,27 @@ backend/.venv/bin/python backend/tests/test_fill_order.py
 
 ---
 
-## License / package name
+## GitLab & GitLab Duo
 
-Python package metadata may still use the name `pv-dataforge` in `pyproject.toml` for install extras. The **product brand** in the UI and API health response is **DataForge**.
+This repo is set up for **GitLab Duo** with **strict minimal-change** rules:
+
+| Path | Purpose |
+|------|---------|
+| `AGENTS.md` | Project conventions for Duo Chat / agents / flows |
+| `.gitlab/duo/chat-rules.md` | Auto-loaded Duo rules (no over-engineering) |
+| `skills/` | **Agent Skills discovery** (GitLab project layout) |
+| `.gitlab/duo/skills/` | Same skills for chat-rules paths (keep in sync) |
+| `.gitlab/duo/mr-review-instructions.yaml` | Duo MR review guidance (**advisory**, not a security control) |
+| `.gitlab/duo/README.md` | Setup + **admin checklist** (protected branches, code owners) |
+| `.gitlab-ci.yml` | Minimal CI (unit tests + frontend build + hygiene) |
+| `.gitlab/CODEOWNERS` | Protect instruction files (**set real @username**) |
+
+After changing those files, **start a new Duo conversation** so rules reload.
+
+**GitLab admin (required for real enforcement):** protect `main`, require Code Owner approval on MRs, replace CODEOWNERS placeholders — see `.gitlab/duo/README.md`.
+
+Local-only (gitignored): `.grok/`, `CONTEXT.md`, `GROK_BUILD_SETUP.md`, session scorecards.
+
+## Package name
+
+Python package metadata may still use `pv-dataforge` in `pyproject.toml` for install extras. The **product brand** in the UI and API health response is **DataForge**.

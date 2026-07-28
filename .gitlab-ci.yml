@@ -1,0 +1,58 @@
+# Minimal CI for DataForge (GitLab).
+# Keep jobs lean — no deploy, no extra tooling.
+
+stages:
+  - test
+
+variables:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  FF_USE_FASTZIP: "true"
+
+backend:unit:
+  stage: test
+  image: python:3.12-bookworm
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+  before_script:
+    - python -m pip install --upgrade pip
+    - pip install -r backend/requirements.txt
+  script:
+    - python backend/tests/test_fill_order.py
+  interruptible: true
+
+frontend:build:
+  stage: test
+  image: node:22-bookworm
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+  before_script:
+    - cd frontend
+    - npm ci
+  script:
+    - npm run build
+  interruptible: true
+
+# Cheap safety net — not a full secret scanner
+repo:hygiene:
+  stage: test
+  image: alpine:3.20
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+  script:
+    - |
+      set -e
+      # Fail if runtime junk was committed
+      if git ls-files | grep -E '(^|/)\.env($|\.)|(^|/)data/.*\.sqlite|(^|/)node_modules/|(^|/)\.venv/' ; then
+        echo "ERROR: forbidden runtime/secret paths are tracked" >&2
+        exit 1
+      fi
+      # Duo skill trees must stay in sync (same skill names)
+      for s in minimal-change bootstrap product-rules test-pass ui-workspace quality-audit; do
+        test -f "skills/$s/SKILL.md"
+        test -f ".gitlab/duo/skills/$s/SKILL.md"
+      done
+      echo "hygiene OK"
+  interruptible: true

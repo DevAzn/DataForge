@@ -1,0 +1,22 @@
+﻿# DataForge skills (GitLab Duo Agent Skills)
+
+**Canonical copies** for GitLab project-level Agent Skills discovery (`skills/<name>/SKILL.md`).  
+Keep in sync with `.gitlab/duo/skills/` (same content; chat-rules reference both).
+
+**Pick one skill per task.** Do not invent extra work.
+
+| Skill | When to use |
+|-------|-------------|
+| [minimal-change](./minimal-change/SKILL.md) | Default for every coding request |
+| [bootstrap](./bootstrap/SKILL.md) | Start / verify local stack |
+| [product-rules](./product-rules/SKILL.md) | Generate, package, persistence, formats |
+| [test-pass](./test-pass/SKILL.md) | Smoke / verify before calling done |
+| [ui-workspace](./ui-workspace/SKILL.md) | App.vue workspaces, layout, brand |
+| [quality-audit](./quality-audit/SKILL.md) | Read-only production readiness pass |
+
+Always also follow:
+
+- Root `AGENTS.md`
+- `.gitlab/duo/chat-rules.md`
+
+After editing any skill, update **both** `skills/` and `.gitlab/duo/skills/`, then start a **new Duo conversation**.

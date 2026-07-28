@@ -10,6 +10,11 @@ import {
   newId
 } from './api'
 import BrandIcon from './components/BrandIcon.vue'
+import {
+  buildSelfClosingMap,
+  moveNode,
+  walkDisplay
+} from './schemaTree.js'
 
 const schemas = ref([])
 const templates = ref([])
@@ -121,6 +126,64 @@ function flatten(rows, depth = 0, path = []) {
 
 const flatRows = computed(() => (active.value ? flatten(active.value.root) : []))
 
+/** Tree display: nodes + synthetic non-draggable close tags */
+const displayRows = computed(() =>
+  active.value ? walkDisplay(active.value.root || []) : []
+)
+
+const dragId = ref(null)
+const dropHint = ref(null) // { id, mode: 'before'|'after'|'into' }
+
+function selfClosingSelectValue(row) {
+  if (!row || typeof row.selfClosing !== 'boolean') return 'default'
+  return row.selfClosing ? 'self' : 'pair'
+}
+
+function setSelfClosingMode(mode) {
+  if (mode === 'default') updateSelected({ selfClosing: undefined })
+  else if (mode === 'self') updateSelected({ selfClosing: true })
+  else updateSelected({ selfClosing: false })
+}
+
+function onRowDragStart(ev, row) {
+  dragId.value = row.id
+  try {
+    ev.dataTransfer.setData('text/plain', row.id)
+    ev.dataTransfer.effectAllowed = 'move'
+  } catch {
+    /* ignore */
+  }
+}
+
+function onRowDragEnd() {
+  dragId.value = null
+  dropHint.value = null
+}
+
+function onRowDragOver(ev, item, mode) {
+  if (!dragId.value || item.type !== 'node') return
+  if (dragId.value === item.row.id) return
+  ev.preventDefault()
+  dropHint.value = { id: item.row.id, mode }
+}
+
+function onRowDrop(ev, item, mode) {
+  ev.preventDefault()
+  if (!active.value || !dragId.value || item.type !== 'node') return
+  const from = dragId.value
+  const to = item.row.id
+  const result = moveNode(active.value.root, from, to, mode)
+  dragId.value = null
+  dropHint.value = null
+  if (result.error) {
+    flashError(result.error)
+    return
+  }
+  active.value = { ...active.value, root: result.root }
+  selectedId.value = from
+  flashStatus('Field moved')
+}
+
 function pathLabel(path, row) {
   const leaf = (row.key || 'field').trim() || 'field'
   return [...path, leaf].join('.')
@@ -231,11 +294,17 @@ function setThemeWeight(id, weight) {
 }
 
 function xmlExportOpts() {
-  return {
+  const map =
+    active.value?.root != null
+      ? buildSelfClosingMap(active.value.root)
+      : {}
+  const opts = {
     xmlRootTag: xmlRootTag.value || 'root',
     xmlRecordTag: xmlRecordTag.value || 'record',
     xmlSelfClosing: xmlSelfClosing.value
   }
+  if (map && Object.keys(map).length) opts.xmlSelfClosingMap = map
+  return opts
 }
 
 async function persistXmlSettings() {
@@ -2472,53 +2541,140 @@ const enumText = computed({
           </button>
         </div>
 
-        <div class="rows">
+        <div class="rows schema-tree">
           <div
-            v-for="f in flatRows"
-            :key="f.row.id"
+            v-for="(item, idx) in displayRows"
+            :key="item.type === 'close' ? 'c-' + item.row.id + '-' + idx : item.row.id"
             class="row"
             :class="{
-              sel: selectedId === f.row.id,
-              tied: csvTieOn && isTied(f.path, f.row)
+              sel: item.type === 'node' && selectedId === item.row.id,
+              'row-close': item.type === 'close',
+              'row-container':
+                item.type === 'node' &&
+                (item.row.kind === 'object' ||
+                  item.row.kind === 'array' ||
+                  (item.row.children || []).length),
+              'drop-before':
+                dropHint &&
+                item.type === 'node' &&
+                dropHint.id === item.row.id &&
+                dropHint.mode === 'before',
+              'drop-after':
+                dropHint &&
+                item.type === 'node' &&
+                dropHint.id === item.row.id &&
+                dropHint.mode === 'after',
+              'drop-into':
+                dropHint &&
+                item.type === 'node' &&
+                dropHint.id === item.row.id &&
+                dropHint.mode === 'into',
+              dragging: dragId === item.row.id
             }"
-            :style="{ marginLeft: f.depth * 14 + 'px' }"
-            @click="selectedId = f.row.id"
+            :style="{ marginLeft: item.depth * 14 + 'px' }"
+            :draggable="item.type === 'node'"
+            @click="
+              item.type === 'close'
+                ? (selectedId = item.row.id)
+                : (selectedId = item.row.id)
+            "
+            @dragstart="item.type === 'node' && onRowDragStart($event, item.row)"
+            @dragend="onRowDragEnd"
+            @dragover="
+              (e) => {
+                if (item.type !== 'node') return
+                const rect = e.currentTarget.getBoundingClientRect()
+                const y = e.clientY - rect.top
+                const h = rect.height
+                let mode = 'after'
+                if (
+                  item.row.kind === 'object' ||
+                  item.row.kind === 'array' ||
+                  (item.row.children || []).length
+                ) {
+                  if (y < h * 0.28) mode = 'before'
+                  else if (y > h * 0.72) mode = 'after'
+                  else mode = 'into'
+                } else {
+                  mode = y < h * 0.5 ? 'before' : 'after'
+                }
+                onRowDragOver(e, item, mode)
+              }
+            "
+            @drop="
+              (e) => {
+                if (item.type !== 'node' || !dropHint) return
+                onRowDrop(e, item, dropHint.mode)
+              }
+            "
           >
-            <input
-              v-if="csvTieOn && f.row.kind === 'value'"
-              type="checkbox"
-              :checked="isTied(f.path, f.row)"
-              title="Tie sample value across rows"
-              @click.stop
-              @change="toggleTie(f.path, f.row)"
-            />
-            <span class="kind">{{
-              f.row.kind === 'object' ? '{}' : f.row.kind === 'array' ? '[]' : '·'
-            }}</span>
-            <input
-              class="input key"
-              :value="f.row.key"
-              @click.stop
-              @change="
-                (e) => {
-                  selectedId = f.row.id
-                  updateSelected({ key: e.target.value })
-                }
-              "
-            />
-            <input
-              v-if="f.row.kind === 'value'"
-              class="input sample"
-              :value="f.row.sampleValue || ''"
-              placeholder="sample"
-              @click.stop
-              @change="
-                (e) => {
-                  selectedId = f.row.id
-                  updateSelected({ sampleValue: e.target.value })
-                }
-              "
-            />
+            <template v-if="item.type === 'close'">
+              <span class="drag-handle ghost" aria-hidden="true" />
+              <span class="kind close-kind">&lt;/&gt;</span>
+              <span class="close-tag mono muted">&lt;/{{ item.closeKey }}&gt;</span>
+            </template>
+            <template v-else>
+              <span
+                class="drag-handle"
+                title="Drag to reorder · drop on a group to nest"
+                @click.stop
+              >⋮⋮</span>
+              <input
+                v-if="csvTieOn && item.row.kind === 'value'"
+                type="checkbox"
+                :checked="isTied(item.path.slice(0, -1), item.row)"
+                title="Tie sample value across rows"
+                @click.stop
+                @change="toggleTie(item.path.slice(0, -1), item.row)"
+              />
+              <span class="kind">{{
+                item.row.kind === 'object'
+                  ? '{}'
+                  : item.row.kind === 'array'
+                    ? '[]'
+                    : '·'
+              }}</span>
+              <span v-if="format === 'xml'" class="tag-open mono muted">&lt;</span>
+              <input
+                class="input key"
+                :value="item.row.key"
+                @click.stop
+                @change="
+                  (e) => {
+                    selectedId = item.row.id
+                    updateSelected({ key: e.target.value })
+                  }
+                "
+              />
+              <span
+                v-if="format === 'xml' && item.row.kind === 'value'"
+                class="tag-open mono muted"
+                >{{
+                  item.row.selfClosing === true ||
+                  (item.row.selfClosing === undefined && xmlSelfClosing)
+                    ? ' /&gt;'
+                    : '&gt;'
+                }}</span
+              >
+              <span
+                v-else-if="format === 'xml'"
+                class="tag-open mono muted"
+                >&gt;</span
+              >
+              <input
+                v-if="item.row.kind === 'value'"
+                class="input sample"
+                :value="item.row.sampleValue || ''"
+                placeholder="sample"
+                @click.stop
+                @change="
+                  (e) => {
+                    selectedId = item.row.id
+                    updateSelected({ sampleValue: e.target.value })
+                  }
+                "
+              />
+            </template>
           </div>
         </div>
 
@@ -2636,6 +2792,24 @@ const enumText = computed({
                   })
                 "
               />
+            </label>
+            <label v-if="selected.kind === 'value' && format === 'xml'" class="wide">
+              Empty tag style
+              <select
+                class="input"
+                :value="selfClosingSelectValue(selected)"
+                @change="setSelfClosingMode($event.target.value)"
+              >
+                <option value="default">
+                  Schema default ({{ xmlSelfClosing ? 'self-closing' : 'open pair' }})
+                </option>
+                <option value="self">Self-closing when empty (&lt;tag/&gt;)</option>
+                <option value="pair">Open pair when empty (&lt;tag&gt;&lt;/tag&gt;)</option>
+              </select>
+              <span class="muted tiny"
+                >Only affects empty/null values. Nesting is controlled by parent/child structure —
+                closing tags in the list are visual only.</span
+              >
             </label>
             <label v-if="selected.kind === 'value'" class="wide">
               Allowed values (enum, one per line)
@@ -3810,6 +3984,50 @@ body.resizing-cols * {
   flex: 1;
   font-family: ui-monospace, monospace;
   font-size: 12px;
+}
+.drag-handle {
+  cursor: grab;
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: -1px;
+  user-select: none;
+  width: 1.1rem;
+  text-align: center;
+  flex-shrink: 0;
+}
+.drag-handle.ghost {
+  visibility: hidden;
+  cursor: default;
+}
+.row.dragging {
+  opacity: 0.45;
+}
+.row.drop-before {
+  box-shadow: inset 0 2px 0 0 var(--accent);
+}
+.row.drop-after {
+  box-shadow: inset 0 -2px 0 0 var(--accent);
+}
+.row.drop-into {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.row-close {
+  opacity: 0.75;
+  cursor: pointer;
+}
+.row-close:hover {
+  opacity: 1;
+}
+.close-tag {
+  font-size: 12px;
+}
+.tag-open {
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.schema-tree .row-container .key {
+  font-weight: 600;
 }
 .props {
   border-top: 1px solid var(--border);
