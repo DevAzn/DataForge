@@ -60,10 +60,68 @@ def to_yaml(data: Any) -> str:
     return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
 
 
-def to_txt(data: Any) -> str:
+def _escape_delimited(value: str, sep: str) -> str:
+    """Escape a cell for delimited text (CSV-style quoting when needed)."""
+    if sep and any(c in value for c in (sep, '"', "\n", "\r")):
+        return '"' + value.replace('"', '""') + '"'
+    if any(c in value for c in ('"', "\n", "\r")):
+        return '"' + value.replace('"', '""') + '"'
+    return value
+
+
+def to_delimited_table(
+    records: list[dict],
+    *,
+    col_sep: str = ",",
+    flatten_delim: str = ".",
+    nested_as_json: bool = False,
+) -> str:
+    """
+    Header row + one data row per record.
+    Column order follows first-seen keys across flattened records.
+    """
+    if not records:
+        return ""
+    key_set: set[str] = set()
+    flat_rows = [
+        _flatten_object(r, flatten_delim, nested_as_json, key_set) for r in records
+    ]
+    headers: list[str] = []
+    seen: set[str] = set()
+    for fr in flat_rows:
+        for k in fr:
+            if k not in seen:
+                seen.add(k)
+                headers.append(k)
+    lines = [col_sep.join(_escape_delimited(h, col_sep) for h in headers)]
+    for fr in flat_rows:
+        lines.append(
+            col_sep.join(_escape_delimited(fr.get(h, ""), col_sep) for h in headers)
+        )
+    return "\n".join(lines)
+
+
+def to_txt(
+    data: Any,
+    *,
+    multi_row: bool = True,
+    delim: str = ".",
+    nested_as_json: bool = False,
+    col_sep: str = "\t",
+) -> str:
+    """
+    Plain-text tabular export: first line = column headers, following lines = values.
+    Default column separator is tab (TSV-style). Nested paths use ``delim``.
+    """
     if isinstance(data, str):
         return data
-    return to_json(data)
+    records = _normalize_records(data, multi_row)
+    return to_delimited_table(
+        records,
+        col_sep=col_sep,
+        flatten_delim=delim,
+        nested_as_json=nested_as_json,
+    )
 
 
 def _escape_xml(s: str) -> str:
@@ -303,25 +361,12 @@ def _normalize_records(data: Any, multi_row: bool) -> list[dict]:
 def to_csv_single_header(
     records: list[dict], delim: str, nested_as_json: bool
 ) -> str:
-    if not records:
-        return ""
-    key_set: set[str] = set()
-    flat_rows = [
-        _flatten_object(r, delim, nested_as_json, key_set) for r in records
-    ]
-    headers = list(key_set)
-    # preserve first-seen order via flat_rows scan
-    headers = []
-    seen: set[str] = set()
-    for fr in flat_rows:
-        for k in fr:
-            if k not in seen:
-                seen.add(k)
-                headers.append(k)
-    lines = [",".join(csv_escape(h) for h in headers)]
-    for fr in flat_rows:
-        lines.append(",".join(csv_escape(fr.get(h, "")) for h in headers))
-    return "\n".join(lines)
+    return to_delimited_table(
+        records,
+        col_sep=",",
+        flatten_delim=delim,
+        nested_as_json=nested_as_json,
+    )
 
 
 def _collect_entities(
@@ -475,7 +520,13 @@ def serialize(
             nested_as_json=nested_as_json,
         )
     if f == "txt":
-        return to_txt(data)
+        return to_txt(
+            data,
+            multi_row=multi_row,
+            delim=delim,
+            nested_as_json=nested_as_json,
+            col_sep="\t",
+        )
     if f == "jsonl":
         rows = data if isinstance(data, list) else [data]
         return "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + (

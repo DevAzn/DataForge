@@ -12,7 +12,12 @@ import {
 import BrandIcon from './components/BrandIcon.vue'
 import {
   buildSelfClosingMap,
+  insertAsChild,
+  insertAsSibling,
   moveNode,
+  parseFieldClip,
+  rekeyNode,
+  serializeFieldClip,
   walkDisplay
 } from './schemaTree.js'
 
@@ -131,6 +136,39 @@ const displayRows = computed(() =>
   active.value ? walkDisplay(active.value.root || []) : []
 )
 
+/** CSV/TXT: flat header+value grid instead of XML tree chrome */
+const isTabularFormat = computed(
+  () => format.value === 'csv' || format.value === 'txt'
+)
+
+/** Root-level fields as columns (header = key, value row = sample) */
+const tabularColumns = computed(() =>
+  active.value && Array.isArray(active.value.root) ? active.value.root : []
+)
+
+function updateColumnField(id, patch) {
+  if (!active.value || !id) return
+  pushSchemaUndo()
+  function walk(rows) {
+    return rows.map((r) => {
+      if (r.id === id) return { ...r, ...patch }
+      return { ...r, children: walk(r.children || []) }
+    })
+  }
+  active.value = { ...active.value, root: walk(active.value.root) }
+  selectedId.value = id
+}
+
+function addColumn() {
+  addRoot()
+}
+
+function removeColumn(id) {
+  if (!active.value || !id) return
+  selectedId.value = id
+  deleteSelected()
+}
+
 const dragId = ref(null)
 const dropHint = ref(null) // { id, mode: 'before'|'after'|'into' }
 
@@ -172,6 +210,7 @@ function onRowDrop(ev, item, mode) {
   if (!active.value || !dragId.value || item.type !== 'node') return
   const from = dragId.value
   const to = item.row.id
+  // Preview move without committing so we only push undo on success
   const result = moveNode(active.value.root, from, to, mode)
   dragId.value = null
   dropHint.value = null
@@ -179,9 +218,147 @@ function onRowDrop(ev, item, mode) {
     flashError(result.error)
     return
   }
+  pushSchemaUndo()
   active.value = { ...active.value, root: result.root }
   selectedId.value = from
   flashStatus('Field moved')
+}
+
+/** Schema edit undo stack (field tree + selection) */
+const UNDO_MAX = 50
+const schemaUndoStack = ref([])
+
+function clearSchemaUndo() {
+  schemaUndoStack.value = []
+}
+
+function pushSchemaUndo() {
+  if (!active.value) return
+  schemaUndoStack.value.push({
+    root: JSON.parse(JSON.stringify(active.value.root || [])),
+    selectedId: selectedId.value
+  })
+  if (schemaUndoStack.value.length > UNDO_MAX) {
+    schemaUndoStack.value.shift()
+  }
+}
+
+function undoSchemaEdit() {
+  if (!active.value) return
+  if (!schemaUndoStack.value.length) {
+    flashError('Nothing to undo')
+    return
+  }
+  const snap = schemaUndoStack.value.pop()
+  active.value = { ...active.value, root: snap.root }
+  selectedId.value = snap.selectedId
+  // Ensure selection still exists
+  if (selectedId.value && !findNodeById(active.value.root, selectedId.value)) {
+    selectedId.value = active.value.root[0]?.id || null
+  }
+  flashStatus('Undone')
+}
+
+const canUndoSchema = computed(() => schemaUndoStack.value.length > 0)
+
+/** In-memory fallback when Clipboard API is unavailable */
+const fieldClipboard = ref(null)
+
+function findNodeById(rows, id) {
+  for (const r of rows || []) {
+    if (r.id === id) return r
+    const hit = findNodeById(r.children || [], id)
+    if (hit) return hit
+  }
+  return null
+}
+
+async function copyField(rowId) {
+  if (!active.value) return
+  const id = rowId || selectedId.value
+  if (!id) {
+    flashError('Select a field to copy')
+    return
+  }
+  const node = findNodeById(active.value.root, id)
+  if (!node) {
+    flashError('Field not found')
+    return
+  }
+  selectedId.value = id
+  const text = serializeFieldClip(node)
+  fieldClipboard.value = text
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+    }
+  } catch {
+    /* memory fallback only */
+  }
+  flashStatus(`Copied “${(node.key || 'field').trim() || 'field'}”`)
+}
+
+async function pasteField() {
+  if (!active.value) return
+  let text = fieldClipboard.value
+  try {
+    if (navigator.clipboard?.readText) {
+      const sys = await navigator.clipboard.readText()
+      if (sys && parseFieldClip(sys)) text = sys
+    }
+  } catch {
+    /* use memory */
+  }
+  const raw = parseFieldClip(text)
+  if (!raw) {
+    flashError('Nothing to paste — copy a field first')
+    return
+  }
+  const node = rekeyNode(raw, newId)
+  if (!node) {
+    flashError('Invalid field clipboard')
+    return
+  }
+  pushSchemaUndo()
+  let next
+  if (selectedId.value) {
+    next = insertAsSibling(active.value.root, selectedId.value, node, 'after')
+  } else {
+    next = insertAsChild(active.value.root, null, node, -1)
+  }
+  active.value = { ...active.value, root: next }
+  selectedId.value = node.id
+  flashStatus(`Pasted “${(node.key || 'field').trim() || 'field'}”`)
+}
+
+function isEditableTarget(el) {
+  if (!el || !(el instanceof Element)) return false
+  const tag = el.tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true
+  if (el.isContentEditable) return true
+  return !!el.closest('input, textarea, select, [contenteditable="true"]')
+}
+
+function onSchemaClipboardKeydown(ev) {
+  if (workspaceMode.value !== 'schema' || !active.value) return
+  if (!(ev.ctrlKey || ev.metaKey) || ev.altKey) return
+  const key = (ev.key || '').toLowerCase()
+  if (key === 'z' && !ev.shiftKey) {
+    if (isEditableTarget(ev.target)) return
+    ev.preventDefault()
+    undoSchemaEdit()
+    return
+  }
+  if (key !== 'c' && key !== 'v') return
+  if (isEditableTarget(ev.target)) return
+  if (key === 'c') {
+    if (!selectedId.value) return
+    ev.preventDefault()
+    copyField(selectedId.value)
+  } else {
+    ev.preventDefault()
+    pasteField()
+  }
 }
 
 function pathLabel(path, row) {
@@ -201,6 +378,7 @@ function toggleTie(path, row) {
   const i = cur.findIndex((x) => x.toLowerCase() === p.toLowerCase())
   if (i >= 0) cur.splice(i, 1)
   else cur.push(p)
+  pushSchemaUndo()
   active.value = {
     ...active.value,
     csvTiedFieldPaths: cur.length ? cur : undefined
@@ -377,6 +555,7 @@ watch(errorMsg, (v) => {
 onMounted(async () => {
   loadLayoutPrefs()
   applyWorkspaceLayoutDefaults(workspaceMode.value)
+  window.addEventListener('keydown', onSchemaClipboardKeydown)
   try {
     await refresh()
     await loadRecentActivity()
@@ -396,9 +575,13 @@ onMounted(async () => {
 onUnmounted(() => {
   if (statusDismissTimer) clearTimeout(statusDismissTimer)
   if (errorDismissTimer) clearTimeout(errorDismissTimer)
+  window.removeEventListener('keydown', onSchemaClipboardKeydown)
   window.removeEventListener('pointermove', onResizePointerMove)
   window.removeEventListener('pointerup', onResizePointerUp)
+  window.removeEventListener('pointermove', onPropsResizeMove)
+  window.removeEventListener('pointerup', onPropsResizeUp)
   document.body.classList.remove('resizing-cols')
+  document.body.classList.remove('resizing-props')
 })
 
 function syncXmlTagsFromSchema(schema) {
@@ -427,6 +610,7 @@ async function saveSchema() {
 }
 
 function newSchema() {
+  clearSchemaUndo()
   active.value = emptySchema()
   selectedId.value = active.value.root[0].id
   lastGenerated.value = null
@@ -436,6 +620,7 @@ function newSchema() {
 async function selectSchema(id) {
   const s = schemas.value.find((x) => x.id === id)
   if (!s) return
+  clearSchemaUndo()
   active.value = JSON.parse(JSON.stringify(s))
   selectedId.value = active.value.root[0]?.id || null
   lastGenerated.value = null
@@ -481,6 +666,7 @@ async function onImport(ev) {
   if (!file) return
   try {
     const res = await api.importFile(file)
+    clearSchemaUndo()
     active.value = res.schema
     selectedId.value = active.value.root[0]?.id || null
     format.value = res.format || format.value
@@ -498,6 +684,7 @@ async function onImport(ev) {
 
 function addRoot() {
   if (!active.value) return
+  pushSchemaUndo()
   const row = emptyRow(active.value.root.length)
   active.value = { ...active.value, root: [...active.value.root, row] }
   selectedId.value = row.id
@@ -505,6 +692,7 @@ function addRoot() {
 
 function addChild() {
   if (!active.value || !selectedId.value) return
+  pushSchemaUndo()
   const parentId = selectedId.value
   const row = emptyRow()
   function walk(rows) {
@@ -526,6 +714,7 @@ function addChild() {
 
 function updateSelected(patch) {
   if (!active.value || !selectedId.value) return
+  pushSchemaUndo()
   const id = selectedId.value
   function walk(rows) {
     return rows.map((r) => {
@@ -538,6 +727,7 @@ function updateSelected(patch) {
 
 function deleteSelected() {
   if (!active.value || !selectedId.value) return
+  pushSchemaUndo()
   const id = selectedId.value
   function walk(rows) {
     return rows
@@ -636,6 +826,9 @@ const layout = ref({
   previewCollapsed: false,
   sideWidth: 280,
   previewWidth: 360,
+  /** Field settings panel height (px); user-resizable */
+  propsHeight: 220,
+  propsCollapsed: false,
   /** When true, keep user drag widths across workspace switches */
   lockWidths: false
 })
@@ -649,7 +842,9 @@ function loadLayoutPrefs() {
       ...layout.value,
       ...parsed,
       sideWidth: Math.min(480, Math.max(200, Number(parsed.sideWidth) || 280)),
-      previewWidth: Math.min(560, Math.max(240, Number(parsed.previewWidth) || 360))
+      previewWidth: Math.min(560, Math.max(240, Number(parsed.previewWidth) || 360)),
+      propsHeight: Math.min(520, Math.max(120, Number(parsed.propsHeight) || 220)),
+      propsCollapsed: !!parsed.propsCollapsed
     }
   } catch {
     /* ignore */
@@ -768,6 +963,56 @@ function onResizePointerUp() {
   document.body.classList.remove('resizing-cols')
   saveLayoutPrefs()
 }
+
+/** Vertical resize for Field settings panel */
+let propsResizeSession = null
+function onPropsResizeDown(ev) {
+  ev.preventDefault()
+  if (layout.value.propsCollapsed) {
+    layout.value.propsCollapsed = false
+  }
+  propsResizeSession = {
+    startY: ev.clientY,
+    startH: layout.value.propsHeight
+  }
+  window.addEventListener('pointermove', onPropsResizeMove)
+  window.addEventListener('pointerup', onPropsResizeUp)
+  document.body.classList.add('resizing-props')
+}
+
+function onPropsResizeMove(ev) {
+  if (!propsResizeSession) return
+  // Drag handle is above the panel: moving up grows panel
+  const dy = propsResizeSession.startY - ev.clientY
+  layout.value.propsHeight = Math.min(
+    520,
+    Math.max(120, propsResizeSession.startH + dy)
+  )
+}
+
+function onPropsResizeUp() {
+  propsResizeSession = null
+  window.removeEventListener('pointermove', onPropsResizeMove)
+  window.removeEventListener('pointerup', onPropsResizeUp)
+  document.body.classList.remove('resizing-props')
+  saveLayoutPrefs()
+}
+
+function togglePropsCollapsed() {
+  layout.value.propsCollapsed = !layout.value.propsCollapsed
+  saveLayoutPrefs()
+}
+
+const propsPanelStyle = computed(() => {
+  if (layout.value.propsCollapsed) {
+    return { height: 'auto', maxHeight: 'none', flexShrink: 0 }
+  }
+  return {
+    height: `${layout.value.propsHeight}px`,
+    maxHeight: 'none',
+    flexShrink: 0
+  }
+})
 
 watch(workspaceMode, (mode) => {
   applyWorkspaceLayoutDefaults(mode)
@@ -1082,6 +1327,7 @@ async function loadTemplate(t) {
   try {
     const schema = JSON.parse(t.schemaJson)
     schema.id = newId()
+    clearSchemaUndo()
     active.value = schema
     selectedId.value = active.value.root?.[0]?.id || null
     statusMsg.value = `Loaded template “${t.name}”`
@@ -1492,6 +1738,7 @@ async function editPackageMemberSchema() {
   try {
     // Member schemas are hidden from list_schemas; load by id
     const s = await api.getSchema(m.schemaId)
+    clearSchemaUndo()
     active.value = JSON.parse(JSON.stringify(s))
     selectedId.value = active.value.root?.[0]?.id || null
     sidebar.value = 'schemas'
@@ -2517,11 +2764,49 @@ const enumText = computed({
           <button type="button" class="btn btn-ghost" :disabled="!active" @click="saveSchema">
             Save
           </button>
-          <button type="button" class="btn btn-ghost" :disabled="!active" @click="addRoot">
-            + Field
+          <button
+            type="button"
+            class="btn btn-ghost"
+            :disabled="!active"
+            @click="isTabularFormat ? addColumn() : addRoot()"
+          >
+            {{ isTabularFormat ? '+ Column' : '+ Field' }}
           </button>
-          <button type="button" class="btn btn-ghost" :disabled="!selectedId" @click="addChild">
+          <button
+            v-if="!isTabularFormat"
+            type="button"
+            class="btn btn-ghost"
+            :disabled="!selectedId"
+            @click="addChild"
+          >
             + Child
+          </button>
+          <button
+            type="button"
+            class="btn btn-ghost"
+            :disabled="!selectedId"
+            title="Copy field (Ctrl+C)"
+            @click="copyField()"
+          >
+            Copy
+          </button>
+          <button
+            type="button"
+            class="btn btn-ghost"
+            :disabled="!active"
+            title="Paste field after selection (Ctrl+V)"
+            @click="pasteField()"
+          >
+            Paste
+          </button>
+          <button
+            type="button"
+            class="btn btn-ghost"
+            :disabled="!canUndoSchema"
+            title="Undo last field edit (Ctrl+Z)"
+            @click="undoSchemaEdit"
+          >
+            Undo
           </button>
           <button
             type="button"
@@ -2541,7 +2826,111 @@ const enumText = computed({
           </button>
         </div>
 
-        <div class="rows schema-tree">
+        <!-- CSV / TXT: header row = columns, value row = samples -->
+        <div
+          v-if="isTabularFormat"
+          class="rows tabular-schema"
+          :class="{ 'with-props': selected }"
+        >
+          <p class="muted tiny tabular-hint">
+            <strong>{{ format === 'csv' ? 'CSV' : 'TXT' }} columns:</strong>
+            first row = column names (headers); value row = sample/templates used when
+            generating. Export writes header line then data rows.
+          </p>
+          <div class="table-scroll">
+            <table class="schema-table" role="grid" aria-label="Column and value editor">
+              <thead>
+                <tr class="header-row">
+                  <th
+                    v-for="col in tabularColumns"
+                    :key="'h-' + col.id"
+                    :class="{ sel: selectedId === col.id }"
+                    scope="col"
+                    @click="selectedId = col.id"
+                  >
+                    <label class="col-label muted tiny">Column</label>
+                    <input
+                      class="input key mono"
+                      :value="col.key"
+                      :aria-label="`Column name for ${col.key || 'field'}`"
+                      placeholder="column"
+                      @click.stop="selectedId = col.id"
+                      @change="
+                        (e) => updateColumnField(col.id, { key: e.target.value })
+                      "
+                    />
+                    <div class="col-actions">
+                      <button
+                        type="button"
+                        class="btn btn-ghost tiny-btn"
+                        title="Copy column"
+                        @click.stop="copyField(col.id)"
+                      >
+                        Copy
+                      </button>
+                      <button
+                        type="button"
+                        class="btn btn-ghost tiny-btn danger"
+                        title="Remove column"
+                        @click.stop="removeColumn(col.id)"
+                      >
+                        Del
+                      </button>
+                    </div>
+                  </th>
+                  <th class="add-col-cell" scope="col">
+                    <button
+                      type="button"
+                      class="btn btn-ghost tiny-btn"
+                      :disabled="!active"
+                      title="Add column"
+                      @click="addColumn"
+                    >
+                      + Col
+                    </button>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr class="value-row">
+                  <td
+                    v-for="col in tabularColumns"
+                    :key="'v-' + col.id"
+                    :class="{ sel: selectedId === col.id }"
+                    @click="selectedId = col.id"
+                  >
+                    <label class="col-label muted tiny">Value</label>
+                    <input
+                      class="input sample mono"
+                      :value="col.sampleValue || ''"
+                      :aria-label="`Sample value for ${col.key || 'field'}`"
+                      placeholder="sample value"
+                      @click.stop="selectedId = col.id"
+                      @change="
+                        (e) =>
+                          updateColumnField(col.id, {
+                            sampleValue: e.target.value,
+                            kind: 'value'
+                          })
+                      "
+                    />
+                  </td>
+                  <td class="add-col-cell" />
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p v-if="!tabularColumns.length" class="muted tiny" style="padding: 0.5rem">
+            No columns yet — click <strong>+ Column</strong> to define headers.
+          </p>
+        </div>
+
+        <!-- XML: hierarchical tree with open/close chrome -->
+        <div
+          v-else
+          class="rows schema-tree"
+          :class="{ 'with-props': selected }"
+        >
           <div
             v-for="(item, idx) in displayRows"
             :key="item.type === 'close' ? 'c-' + item.row.id + '-' + idx : item.row.id"
@@ -2634,7 +3023,7 @@ const enumText = computed({
                     ? '[]'
                     : '·'
               }}</span>
-              <span v-if="format === 'xml'" class="tag-open mono muted">&lt;</span>
+              <span class="tag-open mono muted">&lt;</span>
               <input
                 class="input key"
                 :value="item.row.key"
@@ -2647,7 +3036,7 @@ const enumText = computed({
                 "
               />
               <span
-                v-if="format === 'xml' && item.row.kind === 'value'"
+                v-if="item.row.kind === 'value'"
                 class="tag-open mono muted"
                 >{{
                   item.row.selfClosing === true ||
@@ -2657,7 +3046,7 @@ const enumText = computed({
                 }}</span
               >
               <span
-                v-else-if="format === 'xml'"
+                v-else
                 class="tag-open mono muted"
                 >&gt;</span
               >
@@ -2674,14 +3063,48 @@ const enumText = computed({
                   }
                 "
               />
+              <button
+                type="button"
+                class="btn btn-ghost tiny-btn row-copy-btn"
+                title="Copy field"
+                @click.stop="copyField(item.row.id)"
+              >
+                Copy
+              </button>
             </template>
           </div>
         </div>
 
-        <div v-if="selected" class="props">
-          <div class="label">Field settings</div>
-          <p class="muted tiny" style="margin: 0 0 0.5rem; padding: 0 0.15rem">
+        <div
+          v-if="selected"
+          class="props-resizer"
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="Resize field settings"
+          title="Drag to resize Field settings"
+          @pointerdown="onPropsResizeDown"
+        />
+        <div
+          v-if="selected"
+          class="props"
+          :class="{ collapsed: layout.propsCollapsed }"
+          :style="propsPanelStyle"
+        >
+          <div class="props-head">
+            <div class="label">Field settings</div>
+            <button
+              type="button"
+              class="btn btn-ghost tiny-btn"
+              :title="layout.propsCollapsed ? 'Expand field settings' : 'Collapse field settings'"
+              @click="togglePropsCollapsed"
+            >
+              {{ layout.propsCollapsed ? 'Expand' : 'Collapse' }}
+            </button>
+          </div>
+          <template v-if="!layout.propsCollapsed">
+          <p class="muted tiny props-hint">
             Controls how this field is randomized. Sample value on the row is the primary template.
+            Drag the bar above to resize.
           </p>
           <div class="props-grid">
             <label>
@@ -2852,6 +3275,7 @@ const enumText = computed({
               >
             </label>
           </div>
+          </template>
         </div>
       </section>
 
@@ -3233,11 +3657,17 @@ const enumText = computed({
             <input v-model="streamMode" type="checkbox" />
             Stream generate (large counts → one file)
           </label>
-          <label v-if="format === 'csv' && outputMode === 'one-file'" class="chk">
+          <label
+            v-if="isTabularFormat && outputMode === 'one-file'"
+            class="chk"
+          >
             <input v-model="csvMultiRow" type="checkbox" />
-            Multiple CSV data rows
+            Multiple data rows ({{ format === 'csv' ? 'CSV' : 'TXT' }})
           </label>
-          <label v-if="format === 'csv' && outputMode === 'one-file' && csvMultiRow" class="chk gold">
+          <label
+            v-if="format === 'csv' && outputMode === 'one-file' && csvMultiRow"
+            class="chk gold"
+          >
             <input v-model="csvTieOn" type="checkbox" />
             Tie keys across rows (lock schema samples)
           </label>
@@ -3249,14 +3679,17 @@ const enumText = computed({
               <option value="per-key-sections">Per-key sections</option>
             </select>
           </label>
-          <label v-if="format === 'csv'">
+          <label v-if="isTabularFormat">
             Flatten delimiter
             <input v-model="csvDelim" class="input" />
           </label>
-          <label v-if="format === 'csv'" class="chk">
+          <label v-if="isTabularFormat" class="chk">
             <input v-model="csvNestedAsJson" type="checkbox" />
             Nested as JSON
           </label>
+          <p v-if="format === 'txt'" class="muted tiny">
+            TXT export: tab-separated header line, then one value line per record.
+          </p>
           <p v-if="format === 'xml'" class="muted tiny">
             Root / record tags are editable next to the schema name (saved with the schema).
           </p>
@@ -3948,6 +4381,114 @@ body.resizing-cols * {
   flex: 1;
   overflow: auto;
   padding: 0.5rem;
+  min-height: 80px;
+}
+.tabular-schema {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.tabular-hint {
+  margin: 0;
+  padding: 0 0.15rem;
+  line-height: 1.35;
+}
+.table-scroll {
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+.schema-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: max-content;
+  min-width: 100%;
+}
+.schema-table th,
+.schema-table td {
+  vertical-align: top;
+  padding: 0.45rem 0.5rem;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  min-width: 9.5rem;
+  max-width: 16rem;
+}
+.schema-table th:last-child,
+.schema-table td:last-child {
+  border-right: none;
+}
+.schema-table thead th {
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.schema-table .header-row th.sel,
+.schema-table .value-row td.sel {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.schema-table .col-label {
+  display: block;
+  margin-bottom: 0.2rem;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.schema-table .input.key,
+.schema-table .input.sample {
+  width: 100%;
+  min-width: 7rem;
+  font-size: 12px;
+}
+.schema-table .col-actions {
+  display: flex;
+  gap: 0.2rem;
+  margin-top: 0.3rem;
+}
+.schema-table .add-col-cell {
+  min-width: 4.5rem;
+  max-width: 5rem;
+  vertical-align: middle;
+  background: transparent;
+}
+.schema-table .value-row td {
+  background: var(--surface);
+}
+.props-resizer {
+  flex-shrink: 0;
+  height: 5px;
+  cursor: row-resize;
+  background: transparent;
+  position: relative;
+  z-index: 2;
+  touch-action: none;
+}
+.props-resizer::after {
+  content: '';
+  position: absolute;
+  left: 12%;
+  right: 12%;
+  top: 1px;
+  bottom: 1px;
+  border-radius: 2px;
+  background: var(--border);
+  opacity: 0.75;
+}
+.props-resizer:hover::after,
+.props-resizer:active::after {
+  background: var(--accent);
+  opacity: 1;
+}
+body.resizing-props {
+  cursor: row-resize !important;
+  user-select: none !important;
+}
+body.resizing-props * {
+  cursor: row-resize !important;
 }
 .row {
   display: flex;
@@ -3984,6 +4525,14 @@ body.resizing-cols * {
   flex: 1;
   font-family: ui-monospace, monospace;
   font-size: 12px;
+}
+.row-copy-btn {
+  flex-shrink: 0;
+  opacity: 0.55;
+}
+.row:hover .row-copy-btn,
+.row.sel .row-copy-btn {
+  opacity: 1;
 }
 .drag-handle {
   cursor: grab;
@@ -4031,9 +4580,26 @@ body.resizing-cols * {
 }
 .props {
   border-top: 1px solid var(--border);
-  padding: 0.6rem 0.75rem;
-  max-height: 38%;
+  padding: 0.45rem 0.75rem 0.6rem;
   overflow: auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.props.collapsed {
+  overflow: hidden;
+}
+.props-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+.props-hint {
+  margin: 0 0 0.5rem;
+  padding: 0 0.15rem;
+  flex-shrink: 0;
 }
 .props-grid {
   display: flex;
@@ -4041,6 +4607,9 @@ body.resizing-cols * {
   gap: 0.75rem;
   align-items: end;
   margin-top: 0.35rem;
+  overflow: auto;
+  min-height: 0;
+  flex: 1;
 }
 .props-grid label {
   font-size: 12px;

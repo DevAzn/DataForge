@@ -27,7 +27,12 @@ resolve_python() {
       fi
     fi
   done
-  echo "error: need Python 3.12+ on PATH (python3.12 / python3 / python)" >&2
+  echo "error: Python 3.12+ not found on PATH" >&2
+  echo "       Need: python3.12 / python3 / python (or set PYTHON=...)" >&2
+  echo "       Install: https://www.python.org/downloads/  (or pyenv / deadsnakes)" >&2
+  echo "       Windows: enable \"Add python.exe to PATH\" during setup" >&2
+  echo "       Then re-run: ./scripts/start-backend.sh" >&2
+  echo "       Or install deps first: ./scripts/install.sh" >&2
   exit 1
 }
 

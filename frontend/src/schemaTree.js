@@ -7,6 +7,46 @@ export function cloneTree(root) {
   return JSON.parse(JSON.stringify(root || []))
 }
 
+/** Clipboard envelope for field subtrees (system + in-memory). */
+export const FIELD_CLIP_TYPE = 'dataforge/field-v1'
+
+/**
+ * Deep-clone a field node and assign new ids throughout the subtree.
+ * @param {object} node
+ * @param {() => string} newId
+ */
+export function rekeyNode(node, newId) {
+  if (!node || typeof node !== 'object') return null
+  const n = cloneTree([node])[0]
+  function walk(r) {
+    r.id = newId()
+    if (Array.isArray(r.children)) {
+      r.children.forEach(walk)
+    }
+  }
+  walk(n)
+  return n
+}
+
+/** Serialize field for clipboard. */
+export function serializeFieldClip(node) {
+  return JSON.stringify({ type: FIELD_CLIP_TYPE, node: cloneTree([node])[0] })
+}
+
+/** Parse clipboard text; returns node or null. */
+export function parseFieldClip(text) {
+  if (!text || typeof text !== 'string') return null
+  try {
+    const data = JSON.parse(text)
+    if (data?.type !== FIELD_CLIP_TYPE || !data.node || typeof data.node !== 'object') {
+      return null
+    }
+    return data.node
+  } catch {
+    return null
+  }
+}
+
 /** Walk display items: { type:'node'|'close', row, depth, path } */
 export function walkDisplay(rows, depth = 0, path = []) {
   const out = []
