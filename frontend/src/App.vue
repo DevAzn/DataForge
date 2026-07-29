@@ -32,7 +32,6 @@ const recordCount = ref(10)
 const seed = ref('')
 const ciMode = ref(false)
 const csvMultiRow = ref(true)
-const csvTieOn = ref(false)
 const csvLayoutMode = ref('single-header')
 const csvDelim = ref('.')
 const csvNestedAsJson = ref(false)
@@ -42,8 +41,14 @@ const xmlSelfClosing = ref(true)
 const streamMode = ref(false)
 /** one-file = all records in a single export; per-file = one file per record (archive) */
 const outputMode = ref('one-file')
+/** Optional download archive: none | tar | tar.gz (checkboxes are mutually exclusive) */
+const archiveTar = ref(false)
+const archiveTarGz = ref(false)
 const generating = ref(false)
+/** Last seed-based Generate result (for stats / multi-format archive — file already downloaded). */
 const lastGenerated = ref(null)
+/** When true, harvest generated field tokens into value_history (off by default). */
+const recordGeneratedHistory = ref(false)
 const lastReport = ref(null)
 const previewText = ref('')
 const historyPage = ref({ items: [], total: 0, offset: 0, limit: 40 })
@@ -53,12 +58,14 @@ const recentActivity = ref([])
 const historySubTab = ref('recent') // recent | values
 const dataPackSearch = ref('')
 const dataPackSubTab = ref('themes') // themes | custom
-const themeEditor = ref(null) // { theme, category, bulk }
+/** Theme pack browser/editor: { theme, category, bulk, values, stats, loading } */
+const themeEditor = ref(null)
 const statusMsg = ref('')
 const errorMsg = ref('')
 let statusDismissTimer = null
 let errorDismissTimer = null
-const tab = ref('schema')
+/** Right Generate rail tab (schema options; kept for layout chrome) */
+const tab = ref('generate')
 const sidebar = ref('schemas')
 const schemasExpandedPackages = ref(true)
 const status = ref(null)
@@ -80,6 +87,9 @@ const packages = ref([])
 const activePackage = ref(null)
 const packageMemberPath = ref(null)
 const packagePreview = ref('')
+/** Editable design sample content for the selected supported member */
+const packageEditContent = ref('')
+const packageEditName = ref('')
 const packageCount = ref(5)
 /** Interactive package generate records history only when enabled (default off). */
 const packageRecordHistory = ref(false)
@@ -88,6 +98,10 @@ const packageDefaultMode = ref('random')
 const packageFieldModes = ref({})
 const packageWorking = ref(false)
 const packageEstimate = ref(null)
+/** itself | tar | tar.gz — form of each package variant */
+const packageOutputFormat = ref('itself')
+/** Expanded folder paths in nested package explorer */
+const packageTreeExpanded = ref({})
 const deliveryJobs = ref([])
 const deliveryWorking = ref(false)
 const deliveryForm = ref({
@@ -141,32 +155,318 @@ const isTabularFormat = computed(
   () => format.value === 'csv' || format.value === 'txt'
 )
 
-/** Root-level fields as columns (header = key, value row = sample) */
+/** Root-level fields as columns (header = key, value rows = samples) */
 const tabularColumns = computed(() =>
   active.value && Array.isArray(active.value.root) ? active.value.root : []
 )
 
-function updateColumnField(id, patch) {
+/** Per-column sample list; always at least one entry (from sampleValue). */
+function fieldSampleValues(row) {
+  if (!row) return ['']
+  if (Array.isArray(row.sampleValues) && row.sampleValues.length) {
+    return row.sampleValues.map((v) => (v == null ? '' : String(v)))
+  }
+  return [row.sampleValue == null ? '' : String(row.sampleValue)]
+}
+
+const tabularRowCount = computed(() => {
+  const cols = tabularColumns.value
+  if (!cols.length) return 1
+  let n = 1
+  for (const col of cols) {
+    n = Math.max(n, fieldSampleValues(col).length)
+  }
+  return n
+})
+
+const tabularRowIndexes = computed(() =>
+  Array.from({ length: tabularRowCount.value }, (_, i) => i)
+)
+
+function padSampleValues(row, len) {
+  const vals = fieldSampleValues(row)
+  while (vals.length < len) vals.push('')
+  return vals
+}
+
+function updateColumnField(id, patch, { undo = true } = {}) {
   if (!active.value || !id) return
-  pushSchemaUndo()
+  if (undo) pushSchemaUndo()
   function walk(rows) {
     return rows.map((r) => {
-      if (r.id === id) return { ...r, ...patch }
+      if (r.id === id) {
+        const next = { ...r, ...patch }
+        if ('sampleValue' in patch && !('sampleValues' in patch)) {
+          const vals = fieldSampleValues(r)
+          vals[0] = patch.sampleValue == null ? '' : String(patch.sampleValue)
+          next.sampleValues = vals
+          next.sampleValue = vals[0]
+        }
+        return next
+      }
       return { ...r, children: walk(r.children || []) }
     })
   }
   active.value = { ...active.value, root: walk(active.value.root) }
   selectedId.value = id
+  scheduleSchemaPreviewPush(20)
+}
+
+function getTabularCell(col, rowIndex) {
+  const vals = fieldSampleValues(col)
+  return vals[rowIndex] ?? ''
+}
+
+function setTabularCell(colId, rowIndex, value, { undo = true } = {}) {
+  if (!active.value || !colId) return
+  if (undo) pushSchemaUndo()
+  const n = Math.max(tabularRowCount.value, rowIndex + 1)
+  active.value = {
+    ...active.value,
+    root: active.value.root.map((r) => {
+      if (r.id !== colId) return r
+      const vals = padSampleValues(r, n)
+      vals[rowIndex] = value == null ? '' : String(value)
+      return {
+        ...r,
+        kind: 'value',
+        sampleValues: vals,
+        sampleValue: vals[0] ?? ''
+      }
+    })
+  }
+  selectedId.value = colId
+  scheduleSchemaPreviewPush(20)
+}
+
+function setTabularCellLive(colId, rowIndex, value) {
+  beginFieldEdit(`${colId}:r${rowIndex}`, colId)
+  setTabularCell(colId, rowIndex, value, { undo: false })
 }
 
 function addColumn() {
-  addRoot()
+  if (!active.value) return
+  pushSchemaUndo()
+  const row = emptyRow(active.value.root.length)
+  const n = tabularRowCount.value
+  row.sampleValues = Array.from({ length: n }, () => '')
+  row.sampleValue = ''
+  active.value = { ...active.value, root: [...active.value.root, row] }
+  selectedId.value = row.id
+}
+
+function addTabularRow() {
+  if (!active.value) return
+  pushSchemaUndo()
+  const n = tabularRowCount.value
+  active.value = {
+    ...active.value,
+    root: active.value.root.map((r) => {
+      const vals = padSampleValues(r, n)
+      vals.push('')
+      return {
+        ...r,
+        sampleValues: vals,
+        sampleValue: vals[0] ?? ''
+      }
+    })
+  }
+}
+
+function removeTabularRow(rowIndex) {
+  if (!active.value || tabularRowCount.value <= 1) return
+  if (rowIndex < 0 || rowIndex >= tabularRowCount.value) return
+  pushSchemaUndo()
+  const n = tabularRowCount.value
+  active.value = {
+    ...active.value,
+    root: active.value.root.map((r) => {
+      const vals = padSampleValues(r, n)
+      vals.splice(rowIndex, 1)
+      if (!vals.length) vals.push('')
+      return {
+        ...r,
+        sampleValues: vals,
+        sampleValue: vals[0] ?? ''
+      }
+    })
+  }
+}
+
+/** Reorder sample data rows (all columns stay aligned). */
+function reorderTabularRows(fromIndex, toIndex, mode) {
+  if (!active.value) return
+  const n = tabularRowCount.value
+  if (n <= 1) return
+  if (fromIndex < 0 || fromIndex >= n || toIndex < 0 || toIndex >= n) return
+
+  let insertAt = mode === 'before' ? toIndex : toIndex + 1
+  if (fromIndex < insertAt) insertAt -= 1
+  if (fromIndex === insertAt) return
+
+  pushSchemaUndo()
+  active.value = {
+    ...active.value,
+    root: active.value.root.map((r) => {
+      const vals = padSampleValues(r, n)
+      const [moved] = vals.splice(fromIndex, 1)
+      vals.splice(insertAt, 0, moved)
+      return {
+        ...r,
+        sampleValues: vals,
+        sampleValue: vals[0] ?? ''
+      }
+    })
+  }
+}
+
+const tabRowDragFrom = ref(null)
+/** @type {import('vue').Ref<{ index: number, mode: 'before'|'after' } | null>} */
+const tabRowDropHint = ref(null)
+
+function onTabRowDragStart(ev, rowIndex) {
+  tabRowDragFrom.value = rowIndex
+  tabRowDropHint.value = null
+  try {
+    ev.dataTransfer.setData('text/plain', `tab-row:${rowIndex}`)
+    ev.dataTransfer.effectAllowed = 'move'
+  } catch {
+    /* ignore */
+  }
+}
+
+function onTabRowDragEnd() {
+  tabRowDragFrom.value = null
+  tabRowDropHint.value = null
+}
+
+function onTabRowDragOver(ev, rowIndex) {
+  if (tabRowDragFrom.value == null) return
+  if (tabRowDragFrom.value === rowIndex) {
+    tabRowDropHint.value = null
+    return
+  }
+  ev.preventDefault()
+  try {
+    ev.dataTransfer.dropEffect = 'move'
+  } catch {
+    /* ignore */
+  }
+  const rect = ev.currentTarget.getBoundingClientRect()
+  const mode = ev.clientY - rect.top < rect.height * 0.5 ? 'before' : 'after'
+  tabRowDropHint.value = { index: rowIndex, mode }
+}
+
+function onTabRowDrop(ev, rowIndex) {
+  ev.preventDefault()
+  const from = tabRowDragFrom.value
+  const hint = tabRowDropHint.value
+  onTabRowDragEnd()
+  if (from == null) return
+  if (hint && hint.index === rowIndex) {
+    reorderTabularRows(from, hint.index, hint.mode)
+  } else if (from !== rowIndex) {
+    const rect = ev.currentTarget.getBoundingClientRect()
+    const mode = ev.clientY - rect.top < rect.height * 0.5 ? 'before' : 'after'
+    reorderTabularRows(from, rowIndex, mode)
+  }
 }
 
 function removeColumn(id) {
   if (!active.value || !id) return
+  if (id && tabularColWidths.value[id] != null) {
+    const next = { ...tabularColWidths.value }
+    delete next[id]
+    tabularColWidths.value = next
+    saveTabularSizes()
+  }
   selectedId.value = id
   deleteSelected()
+}
+
+/** CSV/TXT column width prefs (view only — not schema data) */
+const TABULAR_SIZE_KEY = 'dataforge.tabularSizes.v1'
+const DEFAULT_TAB_COL_W = 152
+const MIN_TAB_COL_W = 72
+const MAX_TAB_COL_W = 520
+const tabularColWidths = ref(/** @type {Record<string, number>} */ ({}))
+
+function loadTabularSizes() {
+  try {
+    const raw = localStorage.getItem(TABULAR_SIZE_KEY)
+    if (!raw) return
+    const parsed = JSON.parse(raw)
+    if (parsed?.cols && typeof parsed.cols === 'object') {
+      tabularColWidths.value = parsed.cols
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+function saveTabularSizes() {
+  try {
+    localStorage.setItem(
+      TABULAR_SIZE_KEY,
+      JSON.stringify({ cols: tabularColWidths.value })
+    )
+  } catch {
+    /* ignore */
+  }
+}
+
+function getTabColWidth(colId) {
+  const w = Number(tabularColWidths.value[colId])
+  if (Number.isFinite(w) && w > 0) {
+    return Math.min(MAX_TAB_COL_W, Math.max(MIN_TAB_COL_W, w))
+  }
+  return DEFAULT_TAB_COL_W
+}
+
+function tabularColStyle(colId) {
+  const w = getTabColWidth(colId)
+  return {
+    width: `${w}px`,
+    minWidth: `${w}px`,
+    maxWidth: `${w}px`
+  }
+}
+
+/** @type {{ id: string, startX: number, startSize: number } | null} */
+let tabResizeSession = null
+
+function onTabColResizeDown(ev, colId) {
+  ev.preventDefault()
+  ev.stopPropagation()
+  tabResizeSession = {
+    id: colId,
+    startX: ev.clientX,
+    startSize: getTabColWidth(colId)
+  }
+  window.addEventListener('pointermove', onTabResizeMove)
+  window.addEventListener('pointerup', onTabResizeUp)
+  document.body.classList.add('resizing-tab-col')
+}
+
+function onTabResizeMove(ev) {
+  if (!tabResizeSession) return
+  const dx = ev.clientX - tabResizeSession.startX
+  const w = Math.min(
+    MAX_TAB_COL_W,
+    Math.max(MIN_TAB_COL_W, tabResizeSession.startSize + dx)
+  )
+  tabularColWidths.value = {
+    ...tabularColWidths.value,
+    [tabResizeSession.id]: w
+  }
+}
+
+function onTabResizeUp() {
+  tabResizeSession = null
+  window.removeEventListener('pointermove', onTabResizeMove)
+  window.removeEventListener('pointerup', onTabResizeUp)
+  document.body.classList.remove('resizing-tab-col')
+  saveTabularSizes()
 }
 
 const dragId = ref(null)
@@ -366,22 +666,60 @@ function pathLabel(path, row) {
   return [...path, leaf].join('.')
 }
 
-function isTied(path, row) {
-  const p = pathLabel(path, row).toLowerCase()
-  return tiedPaths.value.some((t) => t.toLowerCase() === p)
+function pathIsTied(pathStr) {
+  if (!pathStr) return false
+  const p = String(pathStr).toLowerCase()
+  return tiedPaths.value.some((t) => String(t).toLowerCase() === p)
 }
 
-function toggleTie(path, row) {
-  if (!active.value || row.kind !== 'value') return
-  const p = pathLabel(path, row)
-  const cur = [...(active.value.csvTiedFieldPaths || [])]
-  const i = cur.findIndex((x) => x.toLowerCase() === p.toLowerCase())
-  if (i >= 0) cur.splice(i, 1)
-  else cur.push(p)
+/** random | same | unique — same model for XML / CSV / TXT value fields */
+function getSelectedGenerateMode() {
+  const row = selected.value
+  if (!row || row.kind !== 'value') return 'random'
+  if (row.isPrimary || row.isUnique) return 'unique'
+  if (pathIsTied(selectedFieldPath.value)) return 'same'
+  return 'random'
+}
+
+/**
+ * Set generate mode for the selected value field.
+ * same → csvTiedFieldPaths (backend keeps value constant across records)
+ * unique → isUnique
+ * random → neither
+ * @param {'random'|'same'|'unique'} mode
+ * @param {{ primary?: boolean }} [opts]
+ */
+function setSelectedGenerateMode(mode, opts = {}) {
+  if (!active.value || !selectedId.value || !selected.value) return
+  if (selected.value.kind !== 'value') return
+  const m = mode === 'same' || mode === 'unique' ? mode : 'random'
   pushSchemaUndo()
+  const id = selectedId.value
+  const path = selectedFieldPath.value
+  let tied = [...(active.value.csvTiedFieldPaths || [])]
+  if (path) {
+    tied = tied.filter((t) => String(t).toLowerCase() !== path.toLowerCase())
+    if (m === 'same') tied.push(path)
+  }
+  const forcePrimary = opts.primary === true
+  const clearPrimary = opts.primary === false || m !== 'unique'
+  function walk(rows) {
+    return (rows || []).map((r) => {
+      if (r.id === id) {
+        return {
+          ...r,
+          isUnique: m === 'unique',
+          isPrimary: forcePrimary ? true : clearPrimary ? false : !!r.isPrimary,
+          children: walk(r.children || [])
+        }
+      }
+      return { ...r, children: walk(r.children || []) }
+    })
+  }
   active.value = {
     ...active.value,
-    csvTiedFieldPaths: cur.length ? cur : undefined
+    root: walk(active.value.root),
+    csvTiedFieldPaths: tied.length ? tied : undefined
   }
 }
 
@@ -406,6 +744,8 @@ async function refresh() {
   settings.value = await api.getSettings()
   applySettingsLocal(settings.value)
   await loadHistory()
+  // Keep Field settings Category dropdown in sync with theme pools
+  await reloadFieldThemeCategories()
 }
 
 function applySettingsLocal(s) {
@@ -471,14 +811,80 @@ function setThemeWeight(id, weight) {
   }
 }
 
+/** Field marked as the multi-record unit (isRecordTag). */
+function findRecordTagField(rows) {
+  for (const r of rows || []) {
+    if (r?.isRecordTag) return r
+    const hit = findRecordTagField(r.children || [])
+    if (hit) return hit
+  }
+  return null
+}
+
+/** Schema path to the record-tag field, e.g. ['catalog','book']. */
+function pathToRecordTag(rows, prefix = []) {
+  for (const r of rows || []) {
+    const key = ((r?.key || 'field') + '').trim() || 'field'
+    const full = [...prefix, key]
+    if (r?.isRecordTag) return full
+    const hit = pathToRecordTag(r.children || [], full)
+    if (hit) return hit
+  }
+  return null
+}
+
+function resolveXmlRecordTag() {
+  const marked = active.value ? findRecordTagField(active.value.root) : null
+  if (marked) {
+    const tag = (marked.key || 'record').trim() || 'record'
+    return tag
+  }
+  return (xmlRecordTag.value || 'record').trim() || 'record'
+}
+
+/** Keep schema meta + local ref aligned with the marked field (if any). */
+function syncXmlRecordTagFromSchema() {
+  const tag = resolveXmlRecordTag()
+  xmlRecordTag.value = tag
+  if (active.value && active.value.xmlRecordTag !== tag) {
+    active.value = { ...active.value, xmlRecordTag: tag }
+  }
+}
+
+/** Exclusive checkbox: only one field can be the record tag. */
+function setSelectedAsRecordTag(enabled) {
+  if (!active.value || !selectedId.value) return
+  pushSchemaUndo()
+  const id = selectedId.value
+  function walk(rows) {
+    return (rows || []).map((r) => ({
+      ...r,
+      isRecordTag: enabled ? r.id === id : false,
+      children: walk(r.children || [])
+    }))
+  }
+  active.value = { ...active.value, root: walk(active.value.root) }
+  if (enabled) {
+    const row = findRow(active.value.root, id)
+    const tag = (row?.key || 'record').trim() || 'record'
+    xmlRecordTag.value = tag
+    active.value = { ...active.value, xmlRecordTag: tag }
+  } else {
+    xmlRecordTag.value = 'record'
+    active.value = { ...active.value, xmlRecordTag: 'record' }
+  }
+}
+
 function xmlExportOpts() {
   const map =
     active.value?.root != null
       ? buildSelfClosingMap(active.value.root)
       : {}
+  const recTag = resolveXmlRecordTag()
+  xmlRecordTag.value = recTag
   const opts = {
     xmlRootTag: xmlRootTag.value || 'root',
-    xmlRecordTag: xmlRecordTag.value || 'record',
+    xmlRecordTag: recTag,
     xmlSelfClosing: xmlSelfClosing.value
   }
   if (map && Object.keys(map).length) opts.xmlSelfClosingMap = map
@@ -554,6 +960,9 @@ watch(errorMsg, (v) => {
 
 onMounted(async () => {
   loadLayoutPrefs()
+  loadTabularSizes()
+  loadSchemaPreviewPrefs()
+  ensureSchemaPreviewChannel()
   applyWorkspaceLayoutDefaults(workspaceMode.value)
   window.addEventListener('keydown', onSchemaClipboardKeydown)
   try {
@@ -580,8 +989,27 @@ onUnmounted(() => {
   window.removeEventListener('pointerup', onResizePointerUp)
   window.removeEventListener('pointermove', onPropsResizeMove)
   window.removeEventListener('pointerup', onPropsResizeUp)
+  window.removeEventListener('pointermove', onTabResizeMove)
+  window.removeEventListener('pointerup', onTabResizeUp)
+  window.removeEventListener('pointermove', onSchemaFloatDragMove)
+  window.removeEventListener('pointerup', onSchemaFloatDragUp)
   document.body.classList.remove('resizing-cols')
   document.body.classList.remove('resizing-props')
+  document.body.classList.remove('resizing-tab-col')
+  document.body.classList.remove('dragging-schema-float')
+  stopSchemaPreviewWatch()
+  if (previewPushTimer) {
+    clearTimeout(previewPushTimer)
+    previewPushTimer = null
+  }
+  try {
+    schemaPreviewBc?.close()
+  } catch {
+    /* ignore */
+  }
+  schemaPreviewBc = null
+  // Leave pop-out open if user still wants it; drop our handle
+  schemaPreviewWin = null
 })
 
 function syncXmlTagsFromSchema(schema) {
@@ -590,19 +1018,52 @@ function syncXmlTagsFromSchema(schema) {
   if (schema.xmlRecordTag) xmlRecordTag.value = schema.xmlRecordTag
 }
 
+function prepareSchemaForSave() {
+  if (!active.value) return null
+  active.value.xmlRootTag = xmlRootTag.value || 'root'
+  active.value.xmlRecordTag = xmlRecordTag.value || 'record'
+  if (format.value && EXPORT_FORMATS.includes(format.value)) {
+    active.value.sourceFormat = format.value
+  }
+  return active.value
+}
+
 async function saveSchema() {
   if (!active.value) return
   try {
-    // Persist per-schema XML tags with the schema
-    active.value.xmlRootTag = xmlRootTag.value || 'root'
-    active.value.xmlRecordTag = xmlRecordTag.value || 'record'
-    if (format.value && EXPORT_FORMATS.includes(format.value)) {
-      active.value.sourceFormat = format.value
-    }
+    prepareSchemaForSave()
     const saved = await api.saveSchema(active.value)
     active.value = saved
     syncXmlTagsFromSchema(saved)
     flashStatus(`Saved “${saved.name}”`)
+    await refresh()
+  } catch (e) {
+    flashError(e.message)
+  }
+}
+
+/** Map every non-theme sample value into Field values pools (by tag/column). */
+async function mapSchemaFields() {
+  if (!active.value) return
+  try {
+    prepareSchemaForSave()
+    const res = await api.mapSchemaFields(active.value)
+    const saved = res.schema || res
+    active.value = saved
+    syncXmlTagsFromSchema(saved)
+    const sync = res.fieldValuesSynced || {}
+    const inserted = Number(sync.inserted) || 0
+    const fields = Number(sync.fields) || 0
+    const warn = Array.isArray(sync.warnings) && sync.warnings.length ? ` · ${sync.warnings[0]}` : ''
+    if (inserted || fields) {
+      flashStatus(
+        `Mapped ${inserted} new value(s) into ${fields} tag pool(s)${warn}`
+      )
+    } else {
+      flashStatus(
+        'No new pool values (add samples on fields, or pools already have them)'
+      )
+    }
     await refresh()
   } catch (e) {
     flashError(e.message)
@@ -715,14 +1176,56 @@ function addChild() {
 function updateSelected(patch) {
   if (!active.value || !selectedId.value) return
   pushSchemaUndo()
-  const id = selectedId.value
+  patchSelectedField(selectedId.value, patch, { undo: false })
+}
+
+/**
+ * Patch a field by id. Use undo:true for discrete actions; undo:false for live typing
+ * (caller should pushSchemaUndo once on focus).
+ */
+function patchSelectedField(id, patch, { undo = false } = {}) {
+  if (!active.value || !id) return
+  if (undo) pushSchemaUndo()
   function walk(rows) {
     return rows.map((r) => {
-      if (r.id === id) return { ...r, ...patch }
+      if (r.id === id) {
+        const next = { ...r, ...patch }
+        if ('sampleValue' in patch && !('sampleValues' in patch)) {
+          const vals = fieldSampleValues(r)
+          vals[0] = patch.sampleValue == null ? '' : String(patch.sampleValue)
+          next.sampleValues = vals
+          next.sampleValue = vals[0]
+        }
+        return next
+      }
       return { ...r, children: walk(r.children || []) }
     })
   }
   active.value = { ...active.value, root: walk(active.value.root) }
+  if (patch && (Object.prototype.hasOwnProperty.call(patch, 'key') || patch.isRecordTag)) {
+    syncXmlRecordTagFromSchema()
+  }
+  scheduleSchemaPreviewPush(20)
+}
+
+/** One undo snapshot per focused field edit session */
+let fieldEditUndoId = null
+function beginFieldEdit(sessionId, fieldId = null) {
+  if (!sessionId) return
+  if (fieldId) selectField(fieldId)
+  if (fieldEditUndoId !== sessionId) {
+    pushSchemaUndo()
+    fieldEditUndoId = sessionId
+  }
+}
+function endFieldEdit() {
+  fieldEditUndoId = null
+}
+
+/** Select a schema field/column so row highlight tracks pointer/focus. */
+function selectField(id) {
+  if (!id || selectedId.value === id) return
+  selectedId.value = id
 }
 
 function deleteSelected() {
@@ -744,17 +1247,19 @@ function deleteSelected() {
 
 function genBody(extra = {}) {
   const seedNum = seed.value.trim() === '' ? null : Number(seed.value)
+  syncXmlRecordTagFromSchema()
   return {
     schema: {
       ...active.value,
-      csvTiedFieldPaths: csvTieOn.value
-        ? active.value.csvTiedFieldPaths
-        : undefined
+      xmlRecordTag: resolveXmlRecordTag(),
+      // Tied paths = Generate mode "Same" (all formats; key name is legacy)
+      csvTiedFieldPaths: active.value.csvTiedFieldPaths
     },
     recordCount: recordCount.value,
     seed: Number.isFinite(seedNum) ? seedNum >>> 0 : null,
     ciMode: ciMode.value,
-    recordHistory: !ciMode.value,
+    // Only write field tokens to SQLite history when user opts in (never full rows)
+    recordHistory: !ciMode.value && recordGeneratedHistory.value,
     useDataThemes: useDataThemes.value,
     themePreferOverHistory: themePrefer.value,
     themeBlend: themeBlend.value.map((b) => ({
@@ -774,6 +1279,145 @@ function genBody(extra = {}) {
 const generateButtonLabel = computed(() =>
   generating.value ? 'Working…' : 'Generate'
 )
+
+function sanitizeFileBase(name) {
+  return (
+    String(name || 'export')
+      .replace(/[<>:"/\\|?*]/g, '_')
+      .replace(/\.+$/, '')
+      .trim() || 'export'
+  )
+}
+
+/**
+ * Folder name placed inside the archive (and archive file base name).
+ * Prefer a parent directory from source path; else schema name / file base.
+ */
+function resolveArchiveDirName() {
+  const schema = active.value
+  if (!schema) return 'export'
+  const src = String(schema.sourceFileName || '').replace(/\\/g, '/')
+  const parts = src.split('/').filter(Boolean)
+  if (parts.length >= 2) {
+    // path like MyDir/file.xml → archive dir MyDir
+    return sanitizeFileBase(parts[parts.length - 2])
+  }
+  let base = schema.name || (parts[0] ? parts[0].replace(/\.[^.]+$/, '') : '') || 'export'
+  base = String(base).replace(/\.(xml|csv|txt|json|yaml|yml)$/i, '')
+  return sanitizeFileBase(base)
+}
+
+function selectedArchiveFormat() {
+  if (archiveTarGz.value) return 'tar.gz'
+  if (archiveTar.value) return 'tar'
+  return null
+}
+
+function setArchiveTar(on) {
+  archiveTar.value = !!on
+  if (on) archiveTarGz.value = false
+}
+
+function setArchiveTarGz(on) {
+  archiveTarGz.value = !!on
+  if (on) archiveTar.value = false
+}
+
+function exportFileName(fmt) {
+  const base = sanitizeFileBase(active.value?.name || 'data')
+  const ext = EXPORT_FORMATS.includes(fmt) ? fmt : 'xml'
+  return `${base}.${ext}`
+}
+
+function designExportFileName(fmt) {
+  const base = sanitizeFileBase(active.value?.name || 'design')
+  const ext = EXPORT_FORMATS.includes(fmt) ? fmt : 'xml'
+  return `${base}-design.${ext}`
+}
+
+function generatedExportFileName(fmt) {
+  const base = sanitizeFileBase(active.value?.name || 'data')
+  const ext = EXPORT_FORMATS.includes(fmt) ? fmt : 'xml'
+  return `${base}-generated.${ext}`
+}
+
+/** Build export text from the schema the user is editing (samples only, no seed generate). */
+async function buildDesignExportText(fmt) {
+  const f = (fmt || format.value || 'xml').toLowerCase()
+  if (f === 'xml') {
+    return liveSchemaPreview.value || ''
+  }
+  if (!active.value) return ''
+  const sample = buildSample(active.value.root)
+  const exp = await api.exportData({
+    data: sample,
+    format: f,
+    multiRow: false,
+    layoutMode: csvLayoutMode.value,
+    delim: csvDelim.value,
+    nestedAsJson: csvNestedAsJson.value,
+    ...xmlExportOpts()
+  })
+  return exp.content || ''
+}
+
+/** Download user/design sample (schema + sample values you edited). */
+async function downloadDesignOutput() {
+  if (!active.value) {
+    flashError('Open a schema first')
+    return
+  }
+  const fmt = format.value || 'xml'
+  const text = await buildDesignExportText(fmt)
+  if (!text) {
+    flashError('Nothing to download for this design sample')
+    return
+  }
+  const archFmt = selectedArchiveFormat()
+  const dirName = resolveArchiveDirName()
+  if (archFmt) {
+    const packed = await downloadAsArchive({
+      text,
+      fmt,
+      archFmt,
+      dirName
+    })
+    flashStatus(`Downloaded design sample as ${packed.fileName}`)
+  } else {
+    downloadText(text, designExportFileName(fmt))
+    flashStatus(`Downloaded design sample (${fmt.toUpperCase()})`)
+  }
+}
+
+/** Pack text or structured data into tar / tar.gz under archiveDir/ and download. */
+async function downloadAsArchive({ text, data, fmt, archFmt, dirName }) {
+  const dir = sanitizeFileBase(dirName || resolveArchiveDirName())
+  const fileName = exportFileName(fmt)
+  const innerName = fileName.includes('/') ? fileName.split('/').pop() : fileName
+  const ext = archFmt === 'tar' ? '.tar' : '.tar.gz'
+  const files = [
+    {
+      fileName: innerName,
+      format: fmt,
+      content: text != null ? text : undefined,
+      data: data,
+      multiRow: csvMultiRow.value,
+      layoutMode: csvLayoutMode.value,
+      delim: csvDelim.value,
+      nestedAsJson: csvNestedAsJson.value,
+      documentShaped: !!(data && typeof data === 'object' && !Array.isArray(data)),
+      ...xmlExportOpts()
+    }
+  ]
+  const blob = await api.exportArchive({
+    extension: ext,
+    topFolderName: dir,
+    files
+  })
+  const outName = `${dir}${ext}`
+  downloadBlob(blob, outName)
+  return { fileName: outName, archiveDir: dir, archiveFormat: archFmt }
+}
 
 const fileNamePattern = computed(
   () => settings.value?.fileNaming?.pattern || '{schema}_{index:04}.{ext}'
@@ -827,7 +1471,7 @@ const layout = ref({
   sideWidth: 280,
   previewWidth: 360,
   /** Field settings panel height (px); user-resizable */
-  propsHeight: 220,
+  propsHeight: 200,
   propsCollapsed: false,
   /** When true, keep user drag widths across workspace switches */
   lockWidths: false
@@ -1114,8 +1758,8 @@ watch(format, (f) => {
 })
 
 watch(sidebar, (s) => {
-  if (s === 'schemas' && !['schema', 'generated', 'generate'].includes(tab.value)) {
-    tab.value = 'schema'
+  if (s === 'schemas') {
+    tab.value = 'generate'
   }
   if (s === 'packages' && activePackage.value) {
     void refreshPackageEstimate()
@@ -1138,41 +1782,106 @@ async function generate() {
   generating.value = true
   errorMsg.value = ''
   try {
+    const archFmt = selectedArchiveFormat()
+    const dirName = resolveArchiveDirName()
     if (streamMode.value) {
       const text = await api.generateStream(genBody())
       previewText.value = text
-      // Keep a lightweight shell so download/export chrome stays usable after stream
-      lastGenerated.value = {
-        records: null,
-        recordCount: recordCount.value,
-        seed: seed.value,
-        streamed: true,
-        format: format.value
-      }
       lastReport.value = null
-      tab.value = 'generated'
-      flashStatus(
-        `Streamed ${recordCount.value} record(s) into one ${format.value.toUpperCase()} file`
-      )
+      tab.value = 'generate'
+      if (archFmt) {
+        const packed = await downloadAsArchive({
+          text,
+          fmt: format.value,
+          archFmt,
+          dirName
+        })
+        lastGenerated.value = {
+          records: null,
+          document: null,
+          recordCount: recordCount.value,
+          seed: seed.value,
+          streamed: true,
+          format: format.value,
+          outputText: text,
+          fileName: packed.fileName,
+          archiveFormat: packed.archiveFormat,
+          archiveDir: packed.archiveDir
+        }
+        flashStatus(
+          `Streamed ${recordCount.value} · downloaded ${packed.fileName} (${dirName}/…)`
+        )
+      } else {
+        lastGenerated.value = {
+          records: null,
+          document: null,
+          recordCount: recordCount.value,
+          seed: seed.value,
+          streamed: true,
+          format: format.value,
+          outputText: text
+        }
+        downloadText(text, generatedExportFileName(format.value))
+        flashStatus(
+          `Streamed ${recordCount.value} record(s) · downloaded ${format.value.toUpperCase()} file`
+        )
+      }
     } else {
       const res = await api.generate(genBody())
-      lastGenerated.value = res
       lastReport.value = res.report || null
-      tab.value = 'generated'
-      // Always export the record list (stable ETL shape: array, even for N=1)
+      tab.value = 'generate'
+      // XML: schema-shaped document (matches tree / design preview).
+      // CSV/TXT: flat record list (tabular columns).
+      const fmt = (format.value || 'xml').toLowerCase()
+      const useDoc =
+        fmt === 'xml' &&
+        res.document != null &&
+        typeof res.document === 'object' &&
+        !Array.isArray(res.document)
+      const payload = useDoc ? res.document : res.records
       const exp = await api.exportData({
-        data: res.records,
+        data: payload,
         format: format.value,
         multiRow: csvMultiRow.value,
         layoutMode: csvLayoutMode.value,
         delim: csvDelim.value,
         nestedAsJson: csvNestedAsJson.value,
+        documentShaped: useDoc,
+        singleObject: useDoc,
         ...xmlExportOpts()
       })
-      previewText.value = exp.content
-      flashStatus(
-        `Generated ${res.recordCount} record(s) in one file · seed ${res.seed} · ${res.ms}ms`
-      )
+      const text = exp.content || ''
+      previewText.value = text
+      if (archFmt) {
+        const packed = await downloadAsArchive({
+          text,
+          data: payload,
+          fmt: format.value,
+          archFmt,
+          dirName
+        })
+        lastGenerated.value = {
+          ...res,
+          format: format.value,
+          outputText: text,
+          fileName: packed.fileName,
+          archiveFormat: packed.archiveFormat,
+          archiveDir: packed.archiveDir
+        }
+        flashStatus(
+          `Generated ${res.recordCount} · downloaded ${packed.fileName} (${dirName}/…) · seed ${res.seed}`
+        )
+      } else {
+        lastGenerated.value = {
+          ...res,
+          format: format.value,
+          outputText: text
+        }
+        downloadText(text, generatedExportFileName(format.value))
+        flashStatus(
+          `Generated ${res.recordCount} record(s) · downloaded · seed ${res.seed} · ${res.ms}ms`
+        )
+      }
     }
     await refresh()
     await loadRecentActivity()
@@ -1188,21 +1897,38 @@ async function generatePerFile() {
   generating.value = true
   errorMsg.value = ''
   try {
-    const res = await api.generatePerFile(genBody({ previewSampleSize: 5 }))
+    const archFmt = selectedArchiveFormat()
+    const dirName = resolveArchiveDirName()
+    const res = await api.generatePerFile(
+      genBody({
+        previewSampleSize: 5,
+        archiveFormat: archFmt || undefined,
+        archiveDir: dirName
+      })
+    )
     downloadBase64Zip(res.zipBase64 || res.archiveBase64, res.fileName)
-    lastGenerated.value = { ...res, records: null, perFile: true }
+    lastGenerated.value = {
+      ...res,
+      records: null,
+      perFile: true,
+      archiveDir: res.archiveDir || dirName
+    }
     lastReport.value = null
     const arch =
       res.archiveFormat ||
-      (String(res.fileName || '').endsWith('.tar.gz') ? 'tar.gz' : 'ZIP')
+      (String(res.fileName || '').endsWith('.tar.gz')
+        ? 'tar.gz'
+        : String(res.fileName || '').endsWith('.tar')
+          ? 'tar'
+          : 'ZIP')
     flashStatus(
-      `One file per record: wrote ${res.written} file(s) in ${arch} (skipped ${res.skipped}) · seed ${res.seed}`
+      `One file per record: ${res.written} file(s) in ${arch} as ${res.fileName} (${dirName}/…) · seed ${res.seed}`
     )
     if (res.sample?.length) {
       previewText.value = res.sample
         .map((s) => `// ${s.path}\n${s.preview}`)
         .join('\n\n')
-      tab.value = 'generated'
+      tab.value = 'generate'
     }
     await refresh()
     await loadRecentActivity()
@@ -1214,9 +1940,44 @@ async function generatePerFile() {
 }
 
 async function refreshPreview() {
-  const data = lastGenerated.value?.records
+  const gen = lastGenerated.value
+  const doc = gen?.document
+  const data = gen?.records
+  if (
+    (format.value || 'xml').toLowerCase() === 'xml' &&
+    doc &&
+    typeof doc === 'object' &&
+    !Array.isArray(doc)
+  ) {
+    // Prefer cached generate payload so re-export doesn't thrash after download
+    if (gen?.outputText && (gen.format || format.value) === format.value) {
+      previewText.value = gen.outputText
+      return
+    }
+    const exp = await api.exportData({
+      data: doc,
+      format: format.value,
+      multiRow: csvMultiRow.value,
+      layoutMode: csvLayoutMode.value,
+      delim: csvDelim.value,
+      nestedAsJson: csvNestedAsJson.value,
+      documentShaped: true,
+      singleObject: true,
+      ...xmlExportOpts()
+    })
+    previewText.value = exp.content
+    if (lastGenerated.value) {
+      lastGenerated.value = { ...lastGenerated.value, outputText: exp.content }
+    }
+    return
+  }
   if (!data?.length) {
     if (!active.value) return
+    // Design sample — client live preview already matches tree; keep API path for CSV/TXT
+    if ((format.value || 'xml').toLowerCase() === 'xml') {
+      previewText.value = liveSchemaPreview.value
+      return
+    }
     const sample = buildSample(active.value.root)
     const exp = await api.exportData({
       data: sample,
@@ -1257,6 +2018,657 @@ function buildSample(rows) {
   return o
 }
 
+/** —— Live schema preview: pop-out window (can leave main browser UI) —— */
+const SCHEMA_PREVIEW_BC = 'dataforge-schema-preview-v1'
+const SCHEMA_PREVIEW_STORE = 'dataforge.schemaPreview.state.v1'
+const SCHEMA_PREVIEW_PREF = 'dataforge.schemaPreview.pref.v1'
+const DEFAULT_PREVIEW_W = 440
+const DEFAULT_PREVIEW_H = 360
+/** Docked fallback only if pop-up blocked */
+const DEFAULT_FLOAT_W = 380
+const DEFAULT_FLOAT_H = 280
+
+const schemaPreviewOpen = ref(false)
+/** true when using in-page float because window.open was blocked */
+const schemaPreviewDocked = ref(false)
+const schemaFloat = ref({
+  x: null,
+  y: null,
+  w: DEFAULT_FLOAT_W,
+  h: DEFAULT_FLOAT_H
+})
+
+/** @type {Window | null} */
+let schemaPreviewWin = null
+/** @type {BroadcastChannel | null} */
+let schemaPreviewBc = null
+/** @type {ReturnType<typeof setInterval> | null} */
+let schemaPreviewWatchTimer = null
+
+function loadSchemaPreviewPrefs() {
+  try {
+    const raw = localStorage.getItem(SCHEMA_PREVIEW_PREF)
+    if (!raw) return
+    const p = JSON.parse(raw)
+    if (typeof p.docked === 'boolean') schemaPreviewDocked.value = p.docked
+    if (p.float && typeof p.float === 'object') {
+      schemaFloat.value = {
+        x: Number.isFinite(p.float.x) ? p.float.x : null,
+        y: Number.isFinite(p.float.y) ? p.float.y : null,
+        w: DEFAULT_FLOAT_W,
+        h: DEFAULT_FLOAT_H
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+function saveSchemaPreviewPrefs() {
+  try {
+    localStorage.setItem(
+      SCHEMA_PREVIEW_PREF,
+      JSON.stringify({
+        docked: schemaPreviewDocked.value,
+        float: {
+          x: schemaFloat.value.x,
+          y: schemaFloat.value.y
+          // size intentionally not persisted — always reset default on drag/open
+        }
+      })
+    )
+  } catch {
+    /* ignore */
+  }
+}
+
+function previewThemePayload() {
+  const cs = getComputedStyle(document.documentElement)
+  return {
+    bg: cs.getPropertyValue('--surface').trim() || '#1a2332',
+    bg2: cs.getPropertyValue('--surface-2').trim() || '#243044',
+    text: cs.getPropertyValue('--text').trim() || '#e8eef7',
+    muted: cs.getPropertyValue('--muted').trim() || '#8b9bb4',
+    border: cs.getPropertyValue('--border').trim() || '#2d3a4d',
+    accent: cs.getPropertyValue('--accent').trim() || '#3b82f6'
+  }
+}
+
+function schemaPreviewPayload() {
+  return {
+    type: 'preview',
+    text: liveSchemaPreview.value,
+    format: (format.value || 'xml').toUpperCase(),
+    name: active.value?.name || 'Schema',
+    theme: previewThemePayload(),
+    ts: Date.now()
+  }
+}
+
+function ensureSchemaPreviewChannel() {
+  if (schemaPreviewBc || typeof BroadcastChannel === 'undefined') return
+  try {
+    schemaPreviewBc = new BroadcastChannel(SCHEMA_PREVIEW_BC)
+  } catch {
+    schemaPreviewBc = null
+  }
+}
+
+/** Debounced push so deep watches / typing stay smooth */
+let previewPushTimer = null
+function scheduleSchemaPreviewPush(delayMs = 40) {
+  if (previewPushTimer) clearTimeout(previewPushTimer)
+  previewPushTimer = setTimeout(() => {
+    previewPushTimer = null
+    pushSchemaPreviewLive()
+  }, delayMs)
+}
+
+function pushSchemaPreviewLive() {
+  const winOpen = !!(schemaPreviewWin && !schemaPreviewWin.closed)
+  if (!schemaPreviewOpen.value && !winOpen) {
+    return
+  }
+  const payload = schemaPreviewPayload()
+  try {
+    localStorage.setItem(SCHEMA_PREVIEW_STORE, JSON.stringify(payload))
+  } catch {
+    /* ignore */
+  }
+  ensureSchemaPreviewChannel()
+  try {
+    schemaPreviewBc?.postMessage(payload)
+  } catch {
+    /* ignore */
+  }
+  if (winOpen) {
+    // Most reliable path for same-origin pop-outs (postMessage can race document.write)
+    try {
+      const doc = schemaPreviewWin.document
+      const bodyEl = doc.getElementById('body')
+      const metaEl = doc.getElementById('meta')
+      if (bodyEl) {
+        const text = payload.text == null ? '' : String(payload.text)
+        bodyEl.textContent = text || '// Empty sample'
+        bodyEl.classList.toggle('empty', !text)
+      }
+      if (metaEl) {
+        const name = payload.name || 'Schema'
+        const fmt = payload.format || ''
+        metaEl.textContent =
+          '· ' + name + (fmt ? ' · ' + fmt : '') + ' · design sample'
+        doc.title = 'DataForge · ' + name + ' preview'
+      }
+      const t = payload.theme || {}
+      const root = doc.documentElement
+      if (t.bg) root.style.setProperty('--bg', t.bg)
+      if (t.bg2) root.style.setProperty('--bg2', t.bg2)
+      if (t.text) root.style.setProperty('--text', t.text)
+      if (t.muted) root.style.setProperty('--muted', t.muted)
+      if (t.border) root.style.setProperty('--border', t.border)
+      if (t.accent) root.style.setProperty('--accent', t.accent)
+    } catch {
+      /* fall through to postMessage */
+    }
+    try {
+      schemaPreviewWin.postMessage(
+        { channel: SCHEMA_PREVIEW_BC, ...payload },
+        '*'
+      )
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function writeSchemaPreviewDocument(win) {
+  const doc = win.document
+  doc.open()
+  doc.write(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DataForge · Live schema preview</title>
+  <style>
+    :root {
+      --bg: #1a2332; --bg2: #243044; --text: #e8eef7;
+      --muted: #8b9bb4; --border: #2d3a4d; --accent: #3b82f6;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      font-family: system-ui, Segoe UI, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      padding: 0.45rem 0.75rem;
+      border-bottom: 1px solid var(--border);
+      background: color-mix(in srgb, var(--accent) 14%, var(--bg2));
+      user-select: none;
+    }
+    header .title { font-size: 13px; font-weight: 600; min-width: 0; }
+    header .meta { font-size: 11px; color: var(--muted); font-weight: 500; }
+    #body {
+      margin: 0;
+      padding: 0.65rem 0.8rem;
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.45;
+      white-space: pre;
+      tab-size: 2;
+    }
+    .empty { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="title">Live schema preview <span class="meta" id="meta"></span></div>
+  </header>
+  <pre id="body" class="empty">// Waiting for DataForge…</pre>
+  <script>
+    const BC = ${JSON.stringify(SCHEMA_PREVIEW_BC)};
+    const STORE = ${JSON.stringify(SCHEMA_PREVIEW_STORE)};
+    const bodyEl = document.getElementById('body');
+    const metaEl = document.getElementById('meta');
+    const root = document.documentElement;
+
+    function apply(payload) {
+      if (!payload || payload.type !== 'preview') return;
+      const t = payload.theme || {};
+      if (t.bg) root.style.setProperty('--bg', t.bg);
+      if (t.bg2) root.style.setProperty('--bg2', t.bg2);
+      if (t.text) root.style.setProperty('--text', t.text);
+      if (t.muted) root.style.setProperty('--muted', t.muted);
+      if (t.border) root.style.setProperty('--border', t.border);
+      if (t.accent) root.style.setProperty('--accent', t.accent);
+      const text = payload.text == null ? '' : String(payload.text);
+      bodyEl.textContent = text || '// Empty sample';
+      bodyEl.classList.toggle('empty', !text);
+      const name = payload.name || 'Schema';
+      const fmt = payload.format || '';
+      metaEl.textContent = '· ' + name + (fmt ? ' · ' + fmt : '') + ' · design sample';
+      document.title = 'DataForge · ' + name + ' preview';
+    }
+
+    function fromStorage() {
+      try {
+        const raw = localStorage.getItem(STORE);
+        if (raw) apply(JSON.parse(raw));
+      } catch (e) {}
+    }
+
+    window.addEventListener('message', function (ev) {
+      const d = ev.data;
+      if (!d || d.channel !== BC) return;
+      apply(d);
+    });
+
+    window.addEventListener('storage', function (ev) {
+      if (ev.key === STORE && ev.newValue) {
+        try { apply(JSON.parse(ev.newValue)); } catch (e) {}
+      }
+    });
+
+    try {
+      const ch = new BroadcastChannel(BC);
+      ch.onmessage = function (ev) { apply(ev.data); };
+    } catch (e) {}
+
+    fromStorage();
+    setInterval(fromStorage, 200);
+  <\/script>
+</body>
+</html>`)
+  doc.close()
+}
+
+function stopSchemaPreviewWatch() {
+  if (schemaPreviewWatchTimer) {
+    clearInterval(schemaPreviewWatchTimer)
+    schemaPreviewWatchTimer = null
+  }
+}
+
+function startSchemaPreviewWatch() {
+  stopSchemaPreviewWatch()
+  schemaPreviewWatchTimer = setInterval(() => {
+    if (schemaPreviewWin && schemaPreviewWin.closed) {
+      schemaPreviewWin = null
+      if (!schemaPreviewDocked.value) {
+        schemaPreviewOpen.value = false
+        saveSchemaPreviewPrefs()
+      }
+      stopSchemaPreviewWatch()
+      return
+    }
+    // Keep pop-out in sync even if a reactive watch is missed
+    if (schemaPreviewOpen.value || (schemaPreviewWin && !schemaPreviewWin.closed)) {
+      pushSchemaPreviewLive()
+    }
+  }, 250)
+}
+
+function openSchemaPreviewPopout() {
+  // Always open / re-show at default size (size resets)
+  const w = DEFAULT_PREVIEW_W
+  const h = DEFAULT_PREVIEW_H
+  const left = Math.max(40, Math.round((window.screenX || 0) + 60))
+  const top = Math.max(40, Math.round((window.screenY || 0) + 80))
+
+  if (schemaPreviewWin && !schemaPreviewWin.closed) {
+    try {
+      schemaPreviewWin.focus()
+      schemaPreviewWin.resizeTo(w, h)
+    } catch {
+      /* some browsers block resizeTo */
+    }
+    schemaPreviewOpen.value = true
+    schemaPreviewDocked.value = false
+    pushSchemaPreviewLive()
+    startSchemaPreviewWatch()
+    saveSchemaPreviewPrefs()
+    return
+  }
+
+  schemaPreviewWin = window.open(
+    '',
+    'dataforgeSchemaPreview',
+    `popup=yes,width=${w},height=${h},left=${left},top=${top},resizable=yes,scrollbars=yes,menubar=no,toolbar=no,location=no,status=no`
+  )
+
+  if (!schemaPreviewWin) {
+    // Pop-up blocked → docked fallback inside the page
+    schemaPreviewDocked.value = true
+    schemaPreviewOpen.value = true
+    schemaFloat.value = {
+      x: null,
+      y: null,
+      w: DEFAULT_FLOAT_W,
+      h: DEFAULT_FLOAT_H
+    }
+    flashError(
+      'Pop-up blocked — using docked preview. Allow pop-ups for DataForge to move the preview outside this window.'
+    )
+    saveSchemaPreviewPrefs()
+    return
+  }
+
+  writeSchemaPreviewDocument(schemaPreviewWin)
+  schemaPreviewDocked.value = false
+  schemaPreviewOpen.value = true
+  // First paint after document ready
+  setTimeout(() => pushSchemaPreviewLive(), 30)
+  setTimeout(() => pushSchemaPreviewLive(), 120)
+  startSchemaPreviewWatch()
+  saveSchemaPreviewPrefs()
+}
+
+function closeSchemaPreview() {
+  if (schemaPreviewWin && !schemaPreviewWin.closed) {
+    try {
+      schemaPreviewWin.close()
+    } catch {
+      /* ignore */
+    }
+  }
+  schemaPreviewWin = null
+  schemaPreviewOpen.value = false
+  schemaPreviewDocked.value = false
+  stopSchemaPreviewWatch()
+  saveSchemaPreviewPrefs()
+}
+
+function toggleSchemaPreview() {
+  // Docked fallback: button toggles closed
+  if (schemaPreviewDocked.value && schemaPreviewOpen.value) {
+    closeSchemaPreview()
+    return
+  }
+  // Pop-out: open, or focus + reset size if already open (close via the window chrome)
+  openSchemaPreviewPopout()
+}
+
+const schemaFloatStyle = computed(() => {
+  const f = schemaFloat.value
+  /** Size is always the default — resets whenever the docked popup is dragged */
+  const style = {
+    width: `${DEFAULT_FLOAT_W}px`,
+    height: `${DEFAULT_FLOAT_H}px`
+  }
+  if (f.x != null && f.y != null) {
+    style.left = `${f.x}px`
+    style.top = `${f.y}px`
+    style.right = 'auto'
+    style.bottom = 'auto'
+  }
+  return style
+})
+
+/** @type {{ startX: number, startY: number, origX: number, origY: number } | null} */
+let floatDragSession = null
+
+function onSchemaFloatDragDown(ev) {
+  if (ev.button != null && ev.button !== 0) return
+  if (ev.target?.closest?.('button')) return
+  ev.preventDefault()
+  const el = ev.currentTarget?.closest?.('.schema-float')
+  const rect = el?.getBoundingClientRect?.()
+  const f = schemaFloat.value
+  const origX = f.x != null ? f.x : rect ? rect.left : 24
+  const origY = f.y != null ? f.y : rect ? rect.top : 80
+  // Size always resets to default when dragging the docked popup
+  schemaFloat.value = {
+    x: origX,
+    y: origY,
+    w: DEFAULT_FLOAT_W,
+    h: DEFAULT_FLOAT_H
+  }
+  floatDragSession = {
+    startX: ev.clientX,
+    startY: ev.clientY,
+    origX,
+    origY
+  }
+  window.addEventListener('pointermove', onSchemaFloatDragMove)
+  window.addEventListener('pointerup', onSchemaFloatDragUp)
+  document.body.classList.add('dragging-schema-float')
+}
+
+function onSchemaFloatDragMove(ev) {
+  if (!floatDragSession) return
+  const dx = ev.clientX - floatDragSession.startX
+  const dy = ev.clientY - floatDragSession.startY
+  const maxX = Math.max(0, window.innerWidth - 120)
+  const maxY = Math.max(0, window.innerHeight - 48)
+  schemaFloat.value = {
+    x: Math.min(maxX, Math.max(0, floatDragSession.origX + dx)),
+    y: Math.min(maxY, Math.max(0, floatDragSession.origY + dy)),
+    w: DEFAULT_FLOAT_W,
+    h: DEFAULT_FLOAT_H
+  }
+}
+
+function onSchemaFloatDragUp() {
+  floatDragSession = null
+  window.removeEventListener('pointermove', onSchemaFloatDragMove)
+  window.removeEventListener('pointerup', onSchemaFloatDragUp)
+  document.body.classList.remove('dragging-schema-float')
+  saveSchemaPreviewPrefs()
+}
+
+function escapeDelimCell(val, delim) {
+  const t = val == null ? '' : String(val)
+  if (t.includes('"') || t.includes('\n') || t.includes('\r') || t.includes(delim)) {
+    return `"${t.replace(/"/g, '""')}"`
+  }
+  return t
+}
+
+function sanitizePreviewTag(name) {
+  const s = String(name || 'field')
+    .replace(/[^A-Za-z0-9_.-]/g, '_')
+    .replace(/^[^A-Za-z_]/, '_$&')
+  return s || 'field'
+}
+
+function buildXmlPreviewNodes(rows, indent, selfCloseDefault) {
+  const pad = '  '.repeat(indent)
+  const lines = []
+  for (const r of rows || []) {
+    const tag = sanitizePreviewTag(r.key || 'field')
+    const kids = r.children || []
+    const isContainer =
+      r.kind === 'object' || r.kind === 'array' || kids.length > 0
+    if (isContainer) {
+      if (r.kind === 'array') {
+        lines.push(`${pad}<${tag}>`)
+        if (kids.length) {
+          lines.push(...buildXmlPreviewNodes(kids, indent + 1, selfCloseDefault))
+        }
+        lines.push(`${pad}</${tag}>`)
+      } else {
+        lines.push(`${pad}<${tag}>`)
+        if (kids.length) {
+          lines.push(...buildXmlPreviewNodes(kids, indent + 1, selfCloseDefault))
+        }
+        lines.push(`${pad}</${tag}>`)
+      }
+      continue
+    }
+    const raw = r.sampleValue
+    const empty = raw == null || String(raw) === ''
+    const sc =
+      typeof r.selfClosing === 'boolean' ? r.selfClosing : selfCloseDefault
+    if (empty && sc) {
+      lines.push(`${pad}<${tag}/>`)
+    } else if (empty) {
+      lines.push(`${pad}<${tag}></${tag}>`)
+    } else {
+      const text = String(raw)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+      lines.push(`${pad}<${tag}>${text}</${tag}>`)
+    }
+  }
+  return lines
+}
+
+/** Instant client-side design preview (no generate, no API). */
+const liveSchemaPreview = computed(() => {
+  if (!active.value) return '// Select or create a schema'
+  const fmt = (format.value || 'xml').toLowerCase()
+  const root = active.value.root || []
+
+  if (fmt === 'csv' || fmt === 'txt') {
+    const delim = fmt === 'csv' ? ',' : '\t'
+    const cols = root
+    if (!cols.length) {
+      return fmt === 'csv' ? '// No columns yet' : '// No columns yet'
+    }
+    const headers = cols.map((c) =>
+      escapeDelimCell((c.key || 'field').trim() || 'field', delim)
+    )
+    const lines = [headers.join(delim)]
+    let n = 1
+    for (const c of cols) {
+      n = Math.max(n, fieldSampleValues(c).length)
+    }
+    for (let i = 0; i < n; i++) {
+      lines.push(
+        cols
+          .map((c) => escapeDelimCell(fieldSampleValues(c)[i] ?? '', delim))
+          .join(delim)
+      )
+    }
+    return lines.join('\n')
+  }
+
+  // XML design sample — same tree shape as generate.document / download
+  const rootTagOverride = sanitizePreviewTag(xmlRootTag.value || 'root')
+  const scDefault = xmlSelfClosing.value !== false
+  const recPath = pathToRecordTag(root)
+  const recField = findRecordTagField(root)
+  if (recField && recPath?.length) {
+    const recTag = sanitizePreviewTag(recField.key || 'record')
+    const kids = recField.children || []
+    const isContainer =
+      recField.kind === 'object' ||
+      recField.kind === 'array' ||
+      kids.length > 0
+    const bodyRows = isContainer ? kids : [recField]
+    // Body lines relative indent 1; outer wraps add indent
+    const body = buildXmlPreviewNodes(bodyRows, 1, scDefault)
+    const one =
+      body.length > 0
+        ? `<${recTag}>\n${body.join('\n')}\n</${recTag}>`
+        : `<${recTag}/>`
+    // Two sample records (same multi-record shape as download)
+    let content = `${one}\n${one}`
+    // Ancestors outside the record tag: catalog.book → wrap books in <catalog>
+    for (let i = recPath.length - 2; i >= 0; i--) {
+      const tag = sanitizePreviewTag(recPath[i])
+      content =
+        `<${tag}>\n` +
+        content
+          .split('\n')
+          .map((ln) => (ln ? '  ' + ln : ln))
+          .join('\n') +
+        `\n</${tag}>`
+    }
+    // Rename outermost schema key to xmlRootTag when user overrode document root
+    const outerSchema = sanitizePreviewTag(recPath[0])
+    if (rootTagOverride && rootTagOverride !== outerSchema) {
+      if (recPath.length >= 2) {
+        content = content
+          .replace(new RegExp(`^<${outerSchema}>`), `<${rootTagOverride}>`)
+          .replace(new RegExp(`</${outerSchema}>\\s*$`), `</${rootTagOverride}>`)
+      } else {
+        // Record tag alone at root: wrap with xmlRootTag
+        content =
+          `<${rootTagOverride}>\n` +
+          content
+            .split('\n')
+            .map((ln) => (ln ? '  ' + ln : ln))
+            .join('\n') +
+          `\n</${rootTagOverride}>`
+      }
+    }
+    return content + '\n'
+  }
+  // No record tag: single top-level field is the document root (matches download)
+  if (root.length === 1) {
+    const only = root[0]
+    const tag = sanitizePreviewTag(only?.key || 'root')
+    const kids = only?.children || []
+    const isContainer =
+      only?.kind === 'object' || only?.kind === 'array' || kids.length > 0
+    if (isContainer) {
+      const inner = buildXmlPreviewNodes(kids, 1, scDefault)
+      let doc =
+        inner.length > 0
+          ? `<${tag}>\n${inner.join('\n')}\n</${tag}>\n`
+          : `<${tag}/>\n`
+      if (rootTagOverride && rootTagOverride !== tag) {
+        doc = doc
+          .replace(new RegExp(`^<${tag}>`), `<${rootTagOverride}>`)
+          .replace(new RegExp(`</${tag}>\\s*$`), `</${rootTagOverride}>\n`)
+      }
+      return doc
+    }
+  }
+  const body = buildXmlPreviewNodes(root, 1, scDefault)
+  if (!body.length) {
+    return `<${rootTagOverride}/>\n`
+  }
+  return `<${rootTagOverride}>\n${body.join('\n')}\n</${rootTagOverride}>\n`
+})
+
+/** Docked float only when the OS pop-out window was blocked */
+const showSchemaFloat = computed(
+  () =>
+    schemaPreviewOpen.value &&
+    schemaPreviewDocked.value &&
+    workspaceMode.value === 'schema' &&
+    !!active.value
+)
+
+// Live preview must track nested field edits (keys, samples, modes, rows)
+watch(
+  liveSchemaPreview,
+  () => {
+    scheduleSchemaPreviewPush(20)
+  },
+  { flush: 'post' }
+)
+
+watch(
+  active,
+  () => {
+    scheduleSchemaPreviewPush(30)
+  },
+  { deep: true, flush: 'post' }
+)
+
+watch(
+  [format, xmlRootTag, xmlRecordTag, xmlSelfClosing, () => active.value?.name],
+  () => {
+    scheduleSchemaPreviewPush(20)
+  }
+)
+
 watch(
   [
     format,
@@ -1278,9 +2690,8 @@ watch(tab, () => {
 })
 
 function downloadPreview() {
-  if (!previewText.value) return
-  const ext = EXPORT_FORMATS.includes(format.value) ? format.value : 'xml'
-  downloadText(previewText.value, `${active.value?.name || 'data'}.${ext}`)
+  // Schema preview chrome: download the design sample (what you are editing)
+  void downloadDesignOutput()
 }
 
 async function downloadArchiveMulti() {
@@ -1289,13 +2700,19 @@ async function downloadArchiveMulti() {
     return
   }
   try {
+    const gen = lastGenerated.value
+    const doc =
+      gen?.document && typeof gen.document === 'object' && !Array.isArray(gen.document)
+        ? gen.document
+        : null
     // Multi-format = team formats only → tar.gz when more than one file
+    // XML uses schema-shaped document; CSV/TXT use flat records
     const blob = await api.exportArchive({
       topFolderName: active.value?.name || 'export',
       files: EXPORT_FORMATS.map((f) => ({
         fileName: `data.${f}`,
         format: f,
-        data: lastGenerated.value.records,
+        data: f === 'xml' && doc ? doc : gen.records,
         multiRow: csvMultiRow.value,
         layoutMode: csvLayoutMode.value,
         delim: csvDelim.value,
@@ -1379,7 +2796,6 @@ async function readArchiveEntry(path) {
   const res = await api.archiveRead(archiveFile.value, path)
   archivePreview.value = res.content
   previewText.value = res.content
-  tab.value = 'generated'
 }
 
 async function clearHistoryAll() {
@@ -1464,17 +2880,222 @@ async function createTheme() {
   if (!name?.trim()) return
   await api.saveTheme({ name: name.trim() })
   await refresh()
+  await reloadFieldThemeCategories()
   statusMsg.value = `Theme “${name.trim()}” created`
 }
 
-function openThemeValuesEditor(theme) {
+async function openThemeValuesEditor(theme, categoryHint) {
   themeEditor.value = {
     theme,
-    category: 'person_name',
-    bulk: ''
+    category: categoryHint || 'names',
+    bulk: '',
+    values: [],
+    stats: [],
+    /** Local categories created before any values exist (chips only). */
+    localCategories: [],
+    loading: true
   }
   sidebar.value = 'datapacks'
   dataPackSubTab.value = 'themes'
+  await loadThemeEditorValues()
+}
+
+async function loadThemeEditorValues() {
+  if (!themeEditor.value?.theme) return
+  themeEditor.value = { ...themeEditor.value, loading: true }
+  try {
+    const cat = (themeEditor.value.category || '').trim()
+    const res = await api.getThemeValues(
+      themeEditor.value.theme.id,
+      cat || undefined
+    )
+    // API returns { values, categories, count } (legacy list still handled)
+    const values = Array.isArray(res) ? res : res.values || []
+    const stats = Array.isArray(res) ? [] : res.categories || []
+    let filtered = values
+    if (cat) {
+      filtered = values.filter(
+        (v) => String(v.category || '').toLowerCase() === cat.toLowerCase()
+      )
+    }
+    // Drop local stubs once the category exists in DB stats
+    const dbCats = new Set(stats.map((s) => String(s.category).toLowerCase()))
+    const localCategories = (themeEditor.value.localCategories || []).filter(
+      (c) => !dbCats.has(String(c).toLowerCase())
+    )
+    themeEditor.value = {
+      ...themeEditor.value,
+      values: filtered,
+      stats,
+      localCategories,
+      loading: false
+    }
+  } catch (e) {
+    themeEditor.value = { ...themeEditor.value, loading: false, values: [] }
+    flashError(e.message)
+  }
+}
+
+function themeCatStat(category) {
+  const stats = themeEditor.value?.stats || []
+  const hit = stats.find(
+    (s) => String(s.category).toLowerCase() === String(category || '').toLowerCase()
+  )
+  return (
+    hit || {
+      category,
+      count: themeEditor.value?.values?.length || 0,
+      limit: THEME_CAT_LIMIT,
+      warnAt: THEME_CAT_WARN_AT,
+      nearLimit: false,
+      full: false
+    }
+  )
+}
+
+/** Chips: DB categories + empty local ones the user just created. */
+const themeEditorCategoryChips = computed(() => {
+  const ed = themeEditor.value
+  if (!ed) return []
+  const stats = [...(ed.stats || [])]
+  const seen = new Set(stats.map((s) => String(s.category).toLowerCase()))
+  for (const c of ed.localCategories || []) {
+    const key = String(c).toLowerCase()
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    stats.push({
+      category: c,
+      count: 0,
+      limit: THEME_CAT_LIMIT,
+      warnAt: THEME_CAT_WARN_AT,
+      nearLimit: false,
+      full: false,
+      local: true
+    })
+  }
+  return stats
+})
+
+const themeEditorCatStat = computed(() =>
+  themeCatStat(themeEditor.value?.category || '')
+)
+
+/**
+ * Create / switch to a category under the open theme.
+ * Empty categories are kept locally until the first value is saved.
+ */
+function addThemeCategory() {
+  if (!themeEditor.value?.theme) return
+  const raw = prompt(
+    'New category name (e.g. names, ships, lightsabers, codes)',
+    ''
+  )
+  if (raw == null) return
+  const name = String(raw).trim().replace(/\s+/g, '_').toLowerCase()
+  if (!name) {
+    flashError('Category name is required')
+    return
+  }
+  if (!/^[a-z0-9][a-z0-9_-]{0,47}$/i.test(name)) {
+    flashError('Use letters, numbers, underscore, or hyphen (max 48 chars)')
+    return
+  }
+  const chips = themeEditorCategoryChips.value
+  const exists = chips.some(
+    (s) => String(s.category).toLowerCase() === name.toLowerCase()
+  )
+  const local = [...(themeEditor.value.localCategories || [])]
+  if (!exists && !local.some((c) => c.toLowerCase() === name.toLowerCase())) {
+    local.push(name)
+  }
+  themeEditor.value = {
+    ...themeEditor.value,
+    category: name,
+    localCategories: local,
+    bulk: '',
+    values: exists ? themeEditor.value.values : []
+  }
+  void loadThemeEditorValues()
+  flashStatus(
+    exists
+      ? `Switched to category “${name}”`
+      : `Category “${name}” ready — add values below (saved when you add the first value)`
+  )
+}
+
+function selectThemeCategory(name) {
+  if (!themeEditor.value) return
+  themeEditor.value = { ...themeEditor.value, category: name, bulk: '' }
+  void loadThemeEditorValues()
+}
+
+/** Delete a theme category pool (all values) or a local empty chip. */
+async function deleteThemeCategory(name) {
+  if (!themeEditor.value?.theme) return
+  const cat = String(name || themeEditor.value.category || '').trim()
+  if (!cat) {
+    flashError('No category selected')
+    return
+  }
+  const chip = themeEditorCategoryChips.value.find(
+    (s) => String(s.category).toLowerCase() === cat.toLowerCase()
+  )
+  const count = chip?.count ?? themeEditor.value.values?.length ?? 0
+  const isLocalOnly = !!chip?.local || count === 0
+  const msg = isLocalOnly
+    ? `Remove empty category “${cat}”?`
+    : `Delete category “${cat}” and all ${count} value(s)? This cannot be undone.`
+  if (!confirm(msg)) return
+  try {
+    // Always try API delete so DB pool is cleared when values exist
+    const res = await api.deleteThemeCategory(themeEditor.value.theme.id, cat)
+    const deleted = Number(res?.deleted) || 0
+    // Drop local chip if present
+    const local = (themeEditor.value.localCategories || []).filter(
+      (c) => String(c).toLowerCase() !== cat.toLowerCase()
+    )
+    const remaining = (res?.categories || []).map((s) => s.category)
+    const nextCat =
+      remaining.find((c) => String(c).toLowerCase() !== cat.toLowerCase()) ||
+      local[0] ||
+      ''
+    themeEditor.value = {
+      ...themeEditor.value,
+      category: nextCat,
+      localCategories: local,
+      bulk: '',
+      values: [],
+      stats: res?.categories || []
+    }
+    await refresh()
+    await loadThemeEditorValues()
+    await reloadFieldThemeCategories()
+    flashStatus(
+      deleted
+        ? `Deleted category “${cat}” (${deleted} value(s))`
+        : `Removed category “${cat}”`
+    )
+  } catch (e) {
+    // Local-only empty category (never saved) — just drop the chip
+    if (isLocalOnly) {
+      const local = (themeEditor.value.localCategories || []).filter(
+        (c) => String(c).toLowerCase() !== cat.toLowerCase()
+      )
+      const chips = themeEditorCategoryChips.value.filter(
+        (s) => String(s.category).toLowerCase() !== cat.toLowerCase()
+      )
+      themeEditor.value = {
+        ...themeEditor.value,
+        category: chips[0]?.category || local[0] || '',
+        localCategories: local,
+        values: [],
+        bulk: ''
+      }
+      flashStatus(`Removed category “${cat}”`)
+      return
+    }
+    flashError(e.message)
+  }
 }
 
 async function submitThemeValuesEditor() {
@@ -1485,7 +3106,7 @@ async function submitThemeValuesEditor() {
     .map((s) => s.trim())
     .filter(Boolean)
   if (!category?.trim()) {
-    flashError('Enter a category (maps to schema Theme category)')
+    flashError('Enter a category (e.g. names, ships, lightsabers)')
     return
   }
   if (!values.length) {
@@ -1498,11 +3119,77 @@ async function submitThemeValuesEditor() {
       values
     })
     themeEditor.value = { ...themeEditor.value, bulk: '' }
+    if (res.warning) flashError(res.warning)
+    else
+      flashStatus(
+        `Theme “${theme.name}”: +${res.inserted} in “${category.trim()}” (${res.total}/${res.limit})`
+      )
     await refresh()
-    flashStatus(`Theme “${theme.name}”: +${res.inserted} value(s) in ${category.trim()}`)
+    await loadThemeEditorValues()
+    await reloadFieldThemeCategories()
   } catch (e) {
     flashError(e.message)
   }
+}
+
+async function deleteThemeValueRow(row) {
+  if (!themeEditor.value?.theme || !row?.id) return
+  if (!confirm(`Remove “${row.value}” from ${row.category}?`)) return
+  try {
+    await api.deleteThemeValue(themeEditor.value.theme.id, row.id)
+    await loadThemeEditorValues()
+    await refresh()
+    await reloadFieldThemeCategories()
+    flashStatus('Value removed')
+  } catch (e) {
+    flashError(e.message)
+  }
+}
+
+async function editThemeValueRow(row) {
+  if (!themeEditor.value?.theme || !row?.id) return
+  const next = prompt('Edit value', row.value)
+  if (next == null) return
+  const v = String(next).trim()
+  if (!v || v === row.value) return
+  try {
+    await api.updateThemeValue(themeEditor.value.theme.id, row.id, v)
+    await loadThemeEditorValues()
+    await refresh()
+    await reloadFieldThemeCategories()
+    flashStatus('Value updated')
+  } catch (e) {
+    flashError(e.message)
+  }
+}
+
+function onThemeEditorCategoryChange() {
+  const cat = (themeEditor.value?.category || '').trim()
+  if (cat && themeEditor.value) {
+    const key = cat.toLowerCase()
+    const known = themeEditorCategoryChips.value.some(
+      (s) => String(s.category).toLowerCase() === key
+    )
+    if (!known) {
+      const local = [...(themeEditor.value.localCategories || [])]
+      if (!local.some((c) => c.toLowerCase() === key)) {
+        local.push(cat)
+        themeEditor.value = { ...themeEditor.value, localCategories: local }
+      }
+    }
+  }
+  void loadThemeEditorValues()
+}
+
+function openFieldThemeInDataPacks() {
+  sidebar.value = 'datapacks'
+  dataPackSubTab.value = 'themes'
+  const tid = selected.value?.themeId
+  const cat = selected.value?.themeCategory
+  const pack =
+    (tid && tid !== 'blend' && themes.value.find((t) => t.id === tid)) ||
+    themes.value[0]
+  if (pack) void openThemeValuesEditor(pack, cat || 'names')
 }
 
 async function openRecentSchema(item) {
@@ -1532,15 +3219,206 @@ async function openRecentSchema(item) {
 }
 
 const COMMON_THEME_CATS = [
+  'names',
   'person_name',
   'place',
+  'ships',
   'ship',
+  'lightsabers',
+  'hairstyles',
+  'numbers',
+  'codes',
   'house',
   'creature',
   'weapon',
   'title',
   'general'
 ]
+
+const THEME_CAT_LIMIT = 100
+const THEME_CAT_WARN_AT = 95
+
+/**
+ * Categories actually present in Data packs theme values for the Field settings
+ * dropdown. Re-fetched from API whenever a theme pool is saved (not a stale cache).
+ */
+const fieldPackCategories = ref([])
+let _fieldCatLoadSeq = 0
+
+function _uniqCats(list) {
+  const seen = new Set()
+  const out = []
+  for (const raw of list || []) {
+    const s = String(raw || '').trim()
+    if (!s) continue
+    const k = s.toLowerCase()
+    if (seen.has(k)) continue
+    seen.add(k)
+    out.push(s)
+  }
+  return out
+}
+
+/** Always re-query the API so Category matches the latest pool contents. */
+async function loadFieldPackCategories(themeId) {
+  const seq = ++_fieldCatLoadSeq
+  const tid = (themeId || '').trim()
+  let next = []
+  try {
+    if (tid && tid !== 'blend') {
+      // Specific pack → only categories that pack actually has values for
+      const res = await api.themeCategories(tid)
+      next = _uniqCats(res?.categories)
+    } else {
+      // Blend: union of active blend packs; else all themes with values
+      const activeIds = (themeBlend.value || [])
+        .map((b) => b.themeId)
+        .filter(Boolean)
+      if (activeIds.length) {
+        const results = await Promise.all(
+          activeIds.map((id) =>
+            api.themeCategories(id).catch(() => ({ categories: [] }))
+          )
+        )
+        const merged = []
+        for (const res of results) {
+          for (const c of res?.categories || []) merged.push(c)
+        }
+        next = _uniqCats(merged)
+      } else {
+        const res = await api.themeCategories()
+        next = _uniqCats(res?.categories)
+      }
+    }
+  } catch {
+    next = []
+  }
+  // Drop stale responses if a newer reload started
+  if (seq !== _fieldCatLoadSeq) return
+  fieldPackCategories.value = next
+}
+
+/** Public reload — call after any theme pool save / delete / refresh. */
+async function reloadFieldThemeCategories() {
+  await loadFieldPackCategories(selected.value?.themeId)
+}
+
+watch(
+  () => [
+    selected.value?.themeId,
+    selectedId.value,
+    themeBlend.value.map((b) => b.themeId).join(',')
+  ],
+  () => {
+    void reloadFieldThemeCategories()
+  },
+  { immediate: true }
+)
+
+/** Category options: only what exists in Data packs for the chosen Theme pack. */
+const fieldThemeCategoryOptions = computed(() => {
+  const out = _uniqCats(fieldPackCategories.value)
+  // Keep current selection visible if it was saved but pack no longer has it
+  const cur = (selected.value?.themeCategory || '').trim()
+  if (cur && !out.some((c) => c.toLowerCase() === cur.toLowerCase())) {
+    out.push(cur)
+  }
+  return out
+})
+
+const PACKAGE_SUPPORTED_EXTS = ['.xml', '.csv', '.txt']
+
+function isPackageSupportedMember(m) {
+  if (!m || m.kind !== 'text') return false
+  const fmt = (m.format || '').toLowerCase()
+  if (fmt === 'xml' || fmt === 'csv' || fmt === 'txt') return true
+  const name = (m.name || m.path || '').toLowerCase()
+  return PACKAGE_SUPPORTED_EXTS.some((e) => name.endsWith(e))
+}
+
+/** Build nested tree nodes from flat member paths (explorer). */
+function buildPackagePathTree(members) {
+  const root = { name: '', path: '', kind: 'dir', children: {} }
+  for (const m of members || []) {
+    const p = String(m.path || '')
+      .replace(/\\/g, '/')
+      .replace(/^\/+/, '')
+    if (!p) continue
+    const parts = p.split('/').filter(Boolean)
+    let node = root
+    let acc = []
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i]
+      acc.push(part)
+      const full = acc.join('/')
+      if (!node.children[part]) {
+        node.children[part] = {
+          name: part,
+          path: full,
+          kind: i === parts.length - 1 ? (m.kind === 'nested_archive_folder' ? 'dir' : 'file') : 'dir',
+          member: i === parts.length - 1 ? m : null,
+          children: {}
+        }
+      } else if (i === parts.length - 1) {
+        node.children[part].member = m
+        if (m.kind === 'text') node.children[part].kind = 'file'
+      }
+      node = node.children[part]
+    }
+  }
+  function freeze(n) {
+    const kids = Object.keys(n.children || {})
+      .sort()
+      .map((k) => freeze(n.children[k]))
+    return {
+      name: n.name,
+      path: n.path,
+      kind: n.kind,
+      member: n.member,
+      children: kids
+    }
+  }
+  return Object.keys(root.children)
+    .sort()
+    .map((k) => freeze(root.children[k]))
+}
+
+const packageExplorerTree = computed(() =>
+  buildPackagePathTree(activePackage.value?.members || [])
+)
+
+function togglePackageTreeDir(path) {
+  packageTreeExpanded.value = {
+    ...packageTreeExpanded.value,
+    [path]: !packageTreeExpanded.value[path]
+  }
+}
+
+function isPackageTreeExpanded(path) {
+  // Default expanded for top-level
+  if (packageTreeExpanded.value[path] === undefined) return true
+  return !!packageTreeExpanded.value[path]
+}
+
+/** Flat rows for explorer (depth-aware, respects collapsed folders). */
+const packageExplorerRows = computed(() => {
+  const rows = []
+  function walk(nodes, depth) {
+    for (const n of nodes || []) {
+      const isDir = n.kind === 'dir' || n.member?.kind === 'nested_archive_folder'
+      if (isDir) {
+        rows.push({ ...n, depth, isDir: true })
+        if (isPackageTreeExpanded(n.path)) {
+          walk(n.children || [], depth + 1)
+        }
+      } else {
+        rows.push({ ...n, depth, isDir: false })
+      }
+    }
+  }
+  walk(packageExplorerTree.value, 0)
+  return rows
+})
 
 async function onPackageImport(ev) {
   const files = Array.from(ev.target.files || [])
@@ -1552,17 +3430,18 @@ async function onPackageImport(ev) {
     const res = await api.importPackage(files)
     activePackage.value = res
     packageFieldModes.value = {}
+    packageTreeExpanded.value = {}
     packageMemberPath.value =
-      res.members?.find((m) => m.kind === 'text')?.path || null
-    const m = res.members?.find((x) => x.path === packageMemberPath.value)
-    packagePreview.value = m?.content?.slice(0, 40000) || ''
+      res.members?.find((m) => m.kind === 'text' && isPackageSupportedMember(m))?.path ||
+      res.members?.find((m) => m.kind === 'text')?.path ||
+      null
+    selectPackageMember(packageMemberPath.value)
     sidebar.value = 'packages'
     const multi = res.multifileSchemaId ? ' · Multifile preview schema saved' : ''
     const skipN = res.skipped?.length || 0
     statusMsg.value = `Package “${res.name}” · ${res.members?.filter((x) => x.kind === 'text').length || 0} text · nested ${res.nestedArchives?.length || 0} · skipped ${skipN}${multi}`
     await refresh()
     await refreshPackageEstimate()
-    // Stay on Packages — package generate uses member schemas, not the umbrella preview.
   } catch (e) {
     errorMsg.value = e.message
   } finally {
@@ -1658,8 +3537,12 @@ async function openPackage(id) {
   try {
     activePackage.value = await api.getPackage(id)
     packageFieldModes.value = {}
+    packageTreeExpanded.value = {}
     packageMemberPath.value =
-      activePackage.value.members?.find((m) => m.kind === 'text')?.path || null
+      activePackage.value.members?.find((m) => m.kind === 'text' && isPackageSupportedMember(m))
+        ?.path ||
+      activePackage.value.members?.find((m) => m.kind === 'text')?.path ||
+      null
     selectPackageMember(packageMemberPath.value)
     if (!deliveryForm.value.packageId) {
       deliveryForm.value.packageId = id
@@ -1673,12 +3556,39 @@ async function openPackage(id) {
 function selectPackageMember(path) {
   packageMemberPath.value = path
   const m = activePackage.value?.members?.find((x) => x.path === path)
-  if (m?.kind === 'nested_archive_folder') {
-    packagePreview.value = `// Nested archive folder → re-packs to ${m.nestedArchivePath}\n// format: ${m.nestedArchiveFormat}`
-  } else {
-    packagePreview.value = m?.content?.slice(0, 40000) || ''
+  if (!m) {
+    packagePreview.value = ''
+    packageEditContent.value = ''
+    packageEditName.value = ''
+    return
   }
+  if (m.kind === 'nested_archive_folder') {
+    packagePreview.value = `// Nested archive folder → re-packs to ${m.nestedArchivePath}\n// format: ${m.nestedArchiveFormat}`
+    packageEditContent.value = ''
+    packageEditName.value = m.name || ''
+    return
+  }
+  if (!isPackageSupportedMember(m)) {
+    packagePreview.value = `// Unsupported for edit (${m.format || m.name}). Supported: xml, csv, txt.`
+    packageEditContent.value = ''
+    packageEditName.value = m.name || ''
+    return
+  }
+  packagePreview.value = m.content || ''
+  packageEditContent.value = m.content || ''
+  packageEditName.value = m.name || ''
 }
+
+const selectedPackageMember = computed(() => {
+  if (!activePackage.value || !packageMemberPath.value) return null
+  return (
+    activePackage.value.members?.find((x) => x.path === packageMemberPath.value) || null
+  )
+})
+
+const packageMemberEditable = computed(() =>
+  isPackageSupportedMember(selectedPackageMember.value)
+)
 
 async function verifyPackageMember(verified) {
   if (!activePackage.value || !packageMemberPath.value) return
@@ -1688,6 +3598,86 @@ async function verifyPackageMember(verified) {
     verified
   )
   activePackage.value = await api.getPackage(activePackage.value.id)
+}
+
+async function savePackageMemberContent() {
+  if (!activePackage.value || !packageMemberPath.value || !packageMemberEditable.value) return
+  packageWorking.value = true
+  errorMsg.value = ''
+  try {
+    const body = {
+      memberPath: packageMemberPath.value,
+      content: packageEditContent.value
+    }
+    const name = (packageEditName.value || '').trim()
+    if (name && name !== selectedPackageMember.value?.name) {
+      body.newName = name
+    }
+    // Backend re-infers schema root/sampleValues from content so generate uses edits
+    const res = await api.updatePackageMember(activePackage.value.id, body)
+    activePackage.value = res
+    // path may have changed after rename
+    const nextPath =
+      res.members?.find(
+        (m) => m.name === name || m.path === packageMemberPath.value || m.path.endsWith('/' + name)
+      )?.path || packageMemberPath.value
+    packageMemberPath.value = nextPath
+    selectPackageMember(nextPath)
+    statusMsg.value =
+      'Member + schema saved from content (design sample re-inferred; not bulk generate)'
+    await refresh()
+  } catch (e) {
+    errorMsg.value = e.message
+  } finally {
+    packageWorking.value = false
+  }
+}
+
+async function savePackageMemberSchemaInPlace() {
+  // Schema-from-edited-content: same path as Save member (re-infer on content)
+  if (!packageMemberEditable.value) {
+    errorMsg.value = 'Select a supported member (xml/csv/txt) to save schema from content'
+    return
+  }
+  await savePackageMemberContent()
+}
+
+async function savePackageMemberSchemaAs() {
+  if (!activePackage.value || !packageMemberPath.value) return
+  const m = selectedPackageMember.value
+  if (!m?.schemaId) {
+    errorMsg.value = 'This member has no schema'
+    return
+  }
+  if (!packageMemberEditable.value) {
+    errorMsg.value = 'Only XML, CSV, and TXT members support save-as from content'
+    return
+  }
+  const name = window.prompt(
+    'Save schema as (new name, inferred from current editor content):',
+    `${m.name || 'member'} schema copy`
+  )
+  if (name == null) return
+  packageWorking.value = true
+  errorMsg.value = ''
+  try {
+    const res = await api.savePackageMemberAs(activePackage.value.id, {
+      memberPath: packageMemberPath.value,
+      newSchemaName: name.trim() || undefined,
+      content: packageEditContent.value,
+      reinferFromContent: true,
+      linkToPackage: true
+    })
+    if (res.package) activePackage.value = res.package
+    else activePackage.value = await api.getPackage(activePackage.value.id)
+    selectPackageMember(packageMemberPath.value)
+    statusMsg.value = `Saved as new schema “${res.schema?.name || name}” from edited content (linked)`
+    await refresh()
+  } catch (e) {
+    errorMsg.value = e.message
+  } finally {
+    packageWorking.value = false
+  }
 }
 
 async function runPackageGenerate() {
@@ -1708,6 +3698,7 @@ async function runPackageGenerate() {
       recordHistory: packageRecordHistory.value && !ciMode.value,
       defaultFieldMode: packageDefaultMode.value,
       fieldModes: packageFieldModes.value,
+      outputFormat: packageOutputFormat.value || 'itself',
       useDataThemes: useDataThemes.value,
       themePreferOverHistory: themePrefer.value,
       themeBlend: themeBlend.value.map((b) => ({
@@ -1732,6 +3723,10 @@ async function editPackageMemberSchema() {
   const m = activePackage.value.members?.find((x) => x.path === packageMemberPath.value)
   if (!m?.schemaId) {
     errorMsg.value = 'This member has no editable schema'
+    return
+  }
+  if (!isPackageSupportedMember(m)) {
+    errorMsg.value = 'Only XML, CSV, and TXT members can be edited'
     return
   }
   errorMsg.value = ''
@@ -1846,6 +3841,43 @@ const kindOptions = computed(() => {
   ]
 })
 
+/** Kind is only meaningful for hierarchical XML (CSV/TXT are always value columns). */
+const showFieldKind = computed(() => {
+  const f = (active.value?.sourceFormat || format.value || 'xml').toLowerCase()
+  return f === 'xml' || (f !== 'csv' && f !== 'txt')
+})
+
+const selectedFieldPath = computed(() => {
+  if (!active.value || !selectedId.value) return ''
+  const hit = flatRows.value.find((x) => x.row.id === selectedId.value)
+  if (!hit) return (selected.value?.key || '').trim() || ''
+  const leaf = (hit.row.key || 'field').trim() || 'field'
+  return [...hit.path, leaf].join('.')
+})
+
+/** Secondary Field settings (bounds, null %, primary, XML empty) */
+const fieldHasAdvanced = computed(() => {
+  const s = selected.value
+  if (!s) return false
+  return (
+    s.minLength != null ||
+    s.maxLength != null ||
+    s.min != null ||
+    s.max != null ||
+    !!s.isPrimary ||
+    typeof s.selfClosing === 'boolean'
+  )
+})
+
+const selectedGenerateMode = computed(() => getSelectedGenerateMode())
+
+/** Single “More” disclosure for secondary field options */
+const propsMoreOpen = ref(false)
+
+watch(selectedId, () => {
+  propsMoreOpen.value = fieldHasAdvanced.value
+})
+
 const enumText = computed({
   get: () => (selected.value?.enumValues || []).join('\n'),
   set: (v) => {
@@ -1856,6 +3888,16 @@ const enumText = computed({
     updateSelected({ enumValues: lines.length ? lines : undefined })
   }
 })
+
+/** Hover help tooltips — Settings → Show UI help tips (default on). */
+const showUiHelp = computed(() => settings.value?.showUiHelp !== false)
+
+/** Return title text only when UI help is enabled; otherwise undefined (no browser tooltip). */
+function tip(msg) {
+  if (!showUiHelp.value) return undefined
+  if (msg == null || msg === '') return undefined
+  return String(msg)
+}
 </script>
 
 <template>
@@ -1868,56 +3910,98 @@ const enumText = computed({
         </div>
         <span class="muted brand-tagline">Local ETL test-data generator</span>
       </div>
-      <div class="workspace-chip" :title="workspaceHint">
+      <div class="workspace-chip" :title="tip(workspaceHint)">
         <span class="workspace-chip-title">{{ workspaceTitle }}</span>
         <span v-if="workspaceHint" class="workspace-chip-hint muted tiny">{{ workspaceHint }}</span>
       </div>
-      <div class="layout-tools" title="Adjust workspace panels">
+      <div class="layout-tools" role="group" aria-label="Workspace panels">
+        <span class="layout-tools-label" aria-hidden="true">Panels</span>
         <button
           type="button"
-          class="btn btn-ghost tiny-btn"
+          class="layout-btn"
+          :class="{ on: !layout.sideCollapsed }"
           :aria-pressed="!layout.sideCollapsed"
-          :title="layout.sideCollapsed ? 'Show left panel' : 'Hide left panel'"
+          :title="
+            tip(
+              layout.sideCollapsed
+                ? 'Show the left Library / list panel'
+                : 'Hide the left list panel for more editor space'
+            )
+          "
           @click="toggleSidePanel"
         >
-          {{ layout.sideCollapsed ? '» List' : '« List' }}
+          <span class="layout-btn-icon" aria-hidden="true">{{
+            layout.sideCollapsed ? '»' : '«'
+          }}</span>
+          <span class="layout-btn-text">List</span>
         </button>
         <button
           type="button"
-          class="btn btn-ghost tiny-btn"
+          class="layout-btn"
+          :class="{ on: showRightPanel }"
           :disabled="!workspaceSupportsPreview"
           :aria-pressed="showRightPanel"
           :title="
-            !workspaceSupportsPreview
-              ? 'No tools panel in this workspace'
-              : layout.previewCollapsed
-                ? 'Show tools panel'
-                : 'Hide tools panel'
+            tip(
+              !workspaceSupportsPreview
+                ? 'Generate panel is not used in this workspace'
+                : layout.previewCollapsed
+                  ? 'Show the right Generate panel (run options)'
+                  : 'Hide the right Generate panel for more editor space'
+            )
           "
           @click="togglePreviewPanel"
         >
-          {{ showRightPanel ? 'Tools »' : '« Tools' }}
+          <span class="layout-btn-text">Generate</span>
+          <span class="layout-btn-icon" aria-hidden="true">{{
+            showRightPanel ? '»' : '«'
+          }}</span>
         </button>
         <button
           type="button"
-          class="btn btn-ghost tiny-btn"
-          title="Reset panel sizes for this workspace"
+          class="layout-btn layout-btn-reset"
+          :title="tip('Reset list/Generate panel sizes to defaults for this workspace')"
           @click="resetLayoutToWorkspace"
         >
-          Reset layout
+          <span class="layout-btn-icon layout-btn-spin" aria-hidden="true">↺</span>
+          <span class="layout-btn-text">Reset</span>
         </button>
       </div>
       <div class="top-actions">
-        <select v-if="showFormatSelector" v-model="format" class="input fmt" title="Export format">
+        <select v-if="showFormatSelector" v-model="format" class="input fmt" :title="tip('Export format')">
           <option value="xml">XML</option>
           <option value="csv">CSV</option>
           <option value="txt">TXT</option>
         </select>
-        <button class="btn btn-ghost" @click="settingsOpen = !settingsOpen">Settings</button>
+        <button
+          v-if="workspaceMode === 'schema'"
+          type="button"
+          class="btn btn-ghost"
+          :class="{ on: schemaPreviewOpen }"
+          :aria-pressed="schemaPreviewOpen"
+          :title="tip('Open live schema preview in a separate window (can drag outside this browser window)')"
+          @click="toggleSchemaPreview"
+        >
+          {{
+            schemaPreviewOpen
+              ? schemaPreviewDocked
+                ? 'Preview · docked'
+                : 'Preview · open'
+              : 'Preview'
+          }}
+        </button>
+        <button
+          class="btn btn-ghost"
+          :title="tip('App preferences: theme, defaults, file naming, and UI help tips')"
+          @click="settingsOpen = !settingsOpen"
+        >
+          Settings
+        </button>
         <button
           v-if="showHeaderGenerate"
           class="btn btn-primary"
           :disabled="generating || !active"
+          :title="tip('Generate test records from the current schema and download/export')"
           @click="generate"
         >
           {{ generateButtonLabel }}
@@ -1926,6 +4010,7 @@ const enumText = computed({
           v-else-if="workspaceMode === 'package'"
           class="btn btn-primary"
           :disabled="packageWorking || !activePackage"
+          :title="tip('Generate package variants from the selected package layout')"
           @click="runPackageGenerate"
         >
           {{ packageWorking ? 'Working…' : 'Generate' }}
@@ -1946,7 +4031,15 @@ const enumText = computed({
     <!-- Settings drawer -->
     <div v-if="settingsOpen && settings" class="settings panel">
       <div class="settings-grid">
-        <label>
+        <label class="chk settings-help-toggle" :title="tip('Hover tips on buttons and panels. Turn off when you know the app.')">
+          <input
+            type="checkbox"
+            :checked="settings.showUiHelp !== false"
+            @change="saveSettingsPatch({ showUiHelp: $event.target.checked })"
+          />
+          Show UI help tips (hover)
+        </label>
+        <label :title="tip('Color theme for the DataForge window')">
           Theme
           <select
             class="input"
@@ -1958,7 +4051,7 @@ const enumText = computed({
             <option value="system">System</option>
           </select>
         </label>
-        <label>
+        <label :title="tip('Default export format for new work and Generate')">
           Default format
           <select
             class="input"
@@ -2039,17 +4132,6 @@ const enumText = computed({
             @change="
               saveSettingsPatch({ xmlRootTag: $event.target.value || 'root' });
               xmlRootTag = $event.target.value || 'root'
-            "
-          />
-        </label>
-        <label>
-          XML record tag
-          <input
-            class="input mono"
-            :value="settings.xmlRecordTag || 'record'"
-            @change="
-              saveSettingsPatch({ xmlRecordTag: $event.target.value || 'record' });
-              xmlRecordTag = $event.target.value || 'record'
             "
           />
         </label>
@@ -2145,7 +4227,7 @@ const enumText = computed({
           <button
             type="button"
             class="btn btn-ghost full"
-            title="Expand library panel"
+            :title="tip('Expand library panel')"
             @click="toggleSidePanel"
           >
             »
@@ -2154,7 +4236,7 @@ const enumText = computed({
             type="button"
             class="rail-nav"
             :class="{ on: sidebar === 'schemas' || sidebar === 'packages' }"
-            title="Library"
+            :title="tip('Library')"
             @click="sidebar = 'schemas'; layout.sideCollapsed = false; saveLayoutPrefs()"
           >
             Ly
@@ -2163,7 +4245,7 @@ const enumText = computed({
             type="button"
             class="rail-nav"
             :class="{ on: sidebar === 'history' }"
-            title="Recent"
+            :title="tip('Recent')"
             @click="sidebar = 'history'; layout.sideCollapsed = false; saveLayoutPrefs(); loadRecentActivity(); loadHistory()"
           >
             Re
@@ -2172,7 +4254,7 @@ const enumText = computed({
             type="button"
             class="rail-nav"
             :class="{ on: sidebar === 'datapacks' || sidebar === 'themes' || sidebar === 'custom' }"
-            title="Data packs"
+            :title="tip('Data packs')"
             @click="sidebar = 'datapacks'; layout.sideCollapsed = false; saveLayoutPrefs()"
           >
             Dp
@@ -2181,7 +4263,7 @@ const enumText = computed({
             type="button"
             class="rail-nav"
             :class="{ on: sidebar === 'templates' }"
-            title="Templates"
+            :title="tip('Templates')"
             @click="sidebar = 'templates'; layout.sideCollapsed = false; saveLayoutPrefs()"
           >
             Tm
@@ -2190,7 +4272,7 @@ const enumText = computed({
             type="button"
             class="rail-nav"
             :class="{ on: sidebar === 'delivery' }"
-            title="Delivery"
+            :title="tip('Delivery — plan chunked package dumps to disk')"
             @click="sidebar = 'delivery'; layout.sideCollapsed = false; saveLayoutPrefs(); refreshDeliveryJobs()"
           >
             Dv
@@ -2199,7 +4281,7 @@ const enumText = computed({
             type="button"
             class="rail-nav"
             :class="{ on: sidebar === 'archive' }"
-            title="Archive"
+            :title="tip('Archive — browse an existing ZIP/TAR without importing')"
             @click="sidebar = 'archive'; layout.sideCollapsed = false; saveLayoutPrefs()"
           >
             Ar
@@ -2211,7 +4293,7 @@ const enumText = computed({
             type="button"
             :class="{ on: sidebar === 'schemas' || sidebar === 'packages' }"
             :aria-current="sidebar === 'schemas' || sidebar === 'packages' ? 'page' : undefined"
-            title="Schemas and multifile packages"
+            :title="tip('Schemas and multifile packages')"
             @click="sidebar = 'schemas'"
           >
             <span class="tab-code" aria-hidden="true">Ly</span>
@@ -2221,7 +4303,7 @@ const enumText = computed({
           <button
             type="button"
             :class="{ on: sidebar === 'history' }"
-            title="Recently used schemas and generate runs"
+            :title="tip('Recently used schemas and generate runs')"
             @click="
               sidebar = 'history';
               loadRecentActivity();
@@ -2235,7 +4317,7 @@ const enumText = computed({
           <button
             type="button"
             :class="{ on: sidebar === 'datapacks' || sidebar === 'themes' || sidebar === 'custom' }"
-            title="Themes (genres) and custom field values"
+            :title="tip('Themes (genres) and custom field values')"
             @click="sidebar = 'datapacks'"
           >
             <span class="tab-code" aria-hidden="true">Dp</span>
@@ -2245,7 +4327,7 @@ const enumText = computed({
           <button
             type="button"
             :class="{ on: sidebar === 'templates' }"
-            title="Schema templates"
+            :title="tip('Schema templates')"
             @click="sidebar = 'templates'"
           >
             <span class="tab-code" aria-hidden="true">Tm</span>
@@ -2255,7 +4337,7 @@ const enumText = computed({
           <button
             type="button"
             :class="{ on: sidebar === 'delivery' }"
-            title="Bulk delivery later"
+            :title="tip('Bulk delivery later')"
             @click="
               sidebar = 'delivery';
               refreshDeliveryJobs()
@@ -2268,7 +4350,7 @@ const enumText = computed({
           <button
             type="button"
             :class="{ on: sidebar === 'archive' }"
-            title="Browse an existing archive"
+            :title="tip('Browse an existing archive')"
             @click="sidebar = 'archive'"
           >
             <span class="tab-code" aria-hidden="true">Ar</span>
@@ -2278,9 +4360,19 @@ const enumText = computed({
         </nav>
 
         <div v-if="sidebar === 'schemas' || sidebar === 'packages'" class="side-body">
-          <button class="btn btn-primary full" type="button" @click="newSchema">+ New schema</button>
-          <label class="drop">
-            Import sample (XML / CSV / TXT)
+          <button
+            class="btn btn-primary full"
+            type="button"
+            :title="tip('Create a blank schema in the Library')"
+            @click="newSchema"
+          >
+            + New schema
+          </button>
+          <label
+            class="drop"
+            :title="tip('Import one XML, CSV, or TXT sample file and infer a field schema')"
+          >
+            Import sample file → schema
             <input
               type="file"
               accept=".csv,.xml,.txt"
@@ -2288,17 +4380,44 @@ const enumText = computed({
               @change="onImport"
             />
           </label>
-          <label class="drop">
-            {{ packageWorking ? 'Working…' : 'Import package (archive / multi-file)' }}
-            <input
-              type="file"
-              multiple
-              accept=".zip,.tar,.tgz,.gz,.xml,.csv,.txt"
-              hidden
-              :disabled="packageWorking"
-              @change="onPackageImport"
-            />
-          </label>
+          <div class="import-pkg-block">
+            <div class="side-section-label import-pkg-label">
+              {{ packageWorking ? 'Import package · Working…' : 'Import package' }}
+            </div>
+            <div class="import-pkg-row">
+              <label
+                class="drop drop-split"
+                :title="tip('Import a package from .tar / .tar.gz / .zip or multi-select XML, CSV, TXT files')"
+                :class="{ disabled: packageWorking }"
+              >
+                Archive or files
+                <input
+                  type="file"
+                  multiple
+                  accept=".zip,.tar,.tgz,.gz,.xml,.csv,.txt"
+                  hidden
+                  :disabled="packageWorking"
+                  @change="onPackageImport"
+                />
+              </label>
+              <label
+                class="drop drop-split"
+                :title="tip('Import a whole folder as a package; nested paths are kept')"
+                :class="{ disabled: packageWorking }"
+              >
+                Folder
+                <input
+                  type="file"
+                  multiple
+                  webkitdirectory
+                  directory
+                  hidden
+                  :disabled="packageWorking"
+                  @change="onPackageImport"
+                />
+              </label>
+            </div>
+          </div>
 
           <div class="side-section-label">Schemas</div>
           <ul class="schema-list">
@@ -2375,7 +4494,7 @@ const enumText = computed({
               </div>
             </li>
             <li v-if="!packages.length" class="muted tiny" style="padding: 0.5rem">
-              Import a ZIP/TAR of XML/CSV/TXT files to edit as a package.
+              Use Import package (archive/files or folder) above.
             </li>
           </ul>
           <p v-if="status" class="muted tiny">
@@ -2509,15 +4628,15 @@ const enumText = computed({
 
         <div
           v-else-if="sidebar === 'datapacks' || sidebar === 'themes' || sidebar === 'custom'"
-          class="side-body"
+          class="side-body datapacks-side"
         >
           <input
             v-model="dataPackSearch"
             class="input"
-            placeholder="Search themes & custom lists…"
+            placeholder="Search themes & field lists…"
             aria-label="Search data packs"
           />
-          <div class="subtabs">
+          <div class="subtabs pack-subtabs">
             <button
               type="button"
               :class="{ on: dataPackSubTab === 'themes' }"
@@ -2535,29 +4654,33 @@ const enumText = computed({
           </div>
 
           <template v-if="dataPackSubTab === 'themes'">
-            <p class="muted tiny">
-              <strong>Theme</strong> = genre / dataset flavor (Star Wars, banking, …). Map schema
-              fields with <em>Theme category</em>. Stored in SQLite.
+            <p class="muted tiny pack-lead">
+              Genre packs (Star Wars, …). Map fields in Field settings → Theme pack + Category.
             </p>
-            <label class="chk">
-              <input v-model="useDataThemes" type="checkbox" @change="persistDataThemes" />
-              Enable themes on generate
-            </label>
-            <button type="button" class="btn btn-primary full" @click="createTheme">
-              + New theme
-            </button>
-            <ul class="schema-list">
-              <li v-for="t in filteredThemes" :key="t.id">
-                <label class="chk">
-                  <input
-                    type="checkbox"
-                    :checked="isThemeActive(t.id)"
-                    @change="toggleThemeInBlend(t)"
-                  />
-                  <span class="name">{{ t.name }}</span>
-                </label>
-                <div class="meta">{{ t.valueCount }} values · {{ t.slug }}</div>
-                <label v-if="isThemeActive(t.id)" class="muted tiny">
+            <div class="pack-toolbar">
+              <label class="chk pack-enable">
+                <input v-model="useDataThemes" type="checkbox" @change="persistDataThemes" />
+                Enable on generate
+              </label>
+              <button type="button" class="btn btn-primary pack-cta" @click="createTheme">
+                + New theme
+              </button>
+            </div>
+            <ul class="pack-card-list">
+              <li v-for="t in filteredThemes" :key="t.id" class="pack-card">
+                <div class="pack-card-top">
+                  <label class="chk pack-card-title">
+                    <input
+                      type="checkbox"
+                      :checked="isThemeActive(t.id)"
+                      @change="toggleThemeInBlend(t)"
+                    />
+                    <span class="name">{{ t.name }}</span>
+                  </label>
+                  <span class="pack-badge">{{ t.valueCount ?? 0 }} values</span>
+                </div>
+                <div class="meta pack-card-meta">{{ t.slug }}</div>
+                <label v-if="isThemeActive(t.id)" class="pack-weight muted tiny">
                   Blend weight
                   <input
                     type="number"
@@ -2569,87 +4692,110 @@ const enumText = computed({
                     @change="setThemeWeight(t.id, $event.target.value)"
                   />
                 </label>
-                <div class="meta">
+                <div class="pack-card-actions">
                   <button
                     type="button"
-                    class="btn btn-ghost tiny-btn"
+                    class="btn btn-accent pack-action"
                     @click.stop="openThemeValuesEditor(t)"
                   >
-                    + Values
+                    Browse / edit
                   </button>
                   <button
                     type="button"
-                    class="btn btn-ghost tiny-btn danger"
-                    @click.stop="api.deleteTheme(t.id).then(refresh)"
+                    class="btn btn-outline-danger pack-action"
+                    @click.stop="
+                      api
+                        .deleteTheme(t.id)
+                        .then(() => refresh())
+                        .then(() => reloadFieldThemeCategories())
+                    "
                   >
                     Delete
                   </button>
                 </div>
               </li>
+              <li v-if="!filteredThemes.length" class="muted tiny pack-empty">No themes yet.</li>
             </ul>
-            <p v-if="themeCategories.length" class="muted tiny">
+            <p v-if="themeCategories.length" class="muted tiny pack-cats">
               Categories: {{ themeCategories.join(', ') }}
             </p>
           </template>
 
           <template v-else>
-            <p class="muted tiny">
-              <strong>Field values</strong> = curated lists mapped to schema paths
-              (<span class="mono">name</span>, <span class="mono">person.city</span>. Used after
-              theme, before fill history.
+            <p class="muted tiny pack-lead">
+              Lists tied to schema tags/columns. Used after theme, before history.
             </p>
-            <button type="button" class="btn btn-primary full" @click="createCustomList">
-              + New field list
-            </button>
-            <ul class="schema-list">
+            <div class="pack-toolbar">
+              <button type="button" class="btn btn-primary pack-cta full" @click="createCustomList">
+                + New field list
+              </button>
+            </div>
+            <ul class="pack-card-list">
               <li
                 v-for="c in filteredCustomLists"
                 :key="c.id"
+                class="pack-card"
                 :class="{ active: activeCustomList?.id === c.id }"
                 role="button"
                 tabindex="0"
                 @click="openCustomList(c.id)"
                 @keydown.enter="openCustomList(c.id)"
               >
-                <div class="name">{{ c.name }}</div>
-                <div class="meta">
-                  {{ c.valueCount }} values · keys: {{ (c.keys || []).join(', ') || '—' }}
+                <div class="pack-card-top">
+                  <span class="name">{{ c.name }}</span>
+                  <span class="pack-badge">{{ c.valueCount ?? 0 }} values</span>
+                </div>
+                <div class="meta pack-card-meta">
+                  keys: {{ (c.keys || []).join(', ') || '—' }}
+                </div>
+                <div class="pack-card-actions" @click.stop>
+                  <button
+                    type="button"
+                    class="btn btn-accent pack-action"
+                    @click="openCustomList(c.id)"
+                  >
+                    Open
+                  </button>
                 </div>
               </li>
+              <li v-if="!filteredCustomLists.length" class="muted tiny pack-empty">
+                No field lists yet — save a schema or create one.
+              </li>
             </ul>
-            <div v-if="activeCustomList" class="custom-editor">
-              <label class="muted tiny">
-                Name
+            <div v-if="activeCustomList" class="custom-editor pack-editor">
+              <div class="pack-editor-title">Edit list</div>
+              <label class="gen-field">
+                <span class="gen-field-label">Name</span>
                 <input v-model="customListName" class="input" />
               </label>
-              <label class="muted tiny">
-                Field keys (comma-separated)
+              <label class="gen-field">
+                <span class="gen-field-label">Field keys (comma-separated)</span>
                 <input
                   v-model="customListKeys"
                   class="input mono"
                   placeholder="name, person.name, city"
                 />
               </label>
-              <button type="button" class="btn btn-ghost full" @click="saveActiveCustomList">
+              <button type="button" class="btn btn-accent full pack-action" @click="saveActiveCustomList">
                 Save list
               </button>
-              <label class="muted tiny">
-                Add values (one per line)
+              <label class="gen-field">
+                <span class="gen-field-label">Add values (one per line)</span>
                 <textarea v-model="customBulkValues" class="input mono" rows="4" />
               </label>
-              <button type="button" class="btn btn-primary full" @click="addBulkCustomValues">
+              <button type="button" class="btn btn-primary full pack-cta" @click="addBulkCustomValues">
                 Add values
               </button>
-              <ul class="hist-list">
-                <li v-for="v in activeCustomList.values || []" :key="v.id">
-                  <span class="v">{{ v.value }}</span>
-                  <div class="hist-row-actions">
-                    <button type="button" class="btn btn-ghost tiny-btn" @click="editCustomValue(v)">
+              <ul class="pack-value-list">
+                <li v-for="v in activeCustomList.values || []" :key="v.id" class="pack-value-row">
+                  <span class="v mono">{{ v.value }}</span>
+                  <div class="pack-value-actions">
+                    <button type="button" class="btn btn-outline pack-action-sm" @click="editCustomValue(v)">
                       Edit
                     </button>
                     <button
                       type="button"
-                      class="btn btn-ghost tiny-btn danger"
+                      class="btn btn-outline-danger pack-action-sm"
                       @click="removeCustomValue(v.id)"
                     >
                       Del
@@ -2657,7 +4803,7 @@ const enumText = computed({
                   </div>
                 </li>
               </ul>
-              <button type="button" class="btn btn-ghost full danger" @click="removeCustomList">
+              <button type="button" class="btn btn-outline-danger full pack-action" @click="removeCustomList">
                 Delete list
               </button>
             </div>
@@ -2715,138 +4861,194 @@ const enumText = computed({
         role="separator"
         aria-orientation="vertical"
         aria-label="Resize left panel"
-        title="Drag to resize list"
+        :title="tip('Drag to resize list')"
         @pointerdown="onResizePointerDown('side', $event)"
       />
 
       <section v-if="workspaceMode === 'schema'" class="center panel">
         <div class="center-head schema-head">
-          <input
-            v-if="active"
-            v-model="active.name"
-            class="input title"
-            title="Schema / file name"
-            @change="saveSchema"
-          />
-          <span v-else class="muted">Select or create a schema</span>
-          <label
-            v-if="active && format === 'xml'"
-            class="xml-tag-inline muted tiny"
-            title="XML document root element for this schema"
-          >
-            Root tag
-            <input
-              v-model="xmlRootTag"
-              class="input mono tag-input"
-              placeholder="root"
-              @change="
-                active.xmlRootTag = xmlRootTag || 'root';
-                persistXmlSettings()
-              "
-            />
-          </label>
-          <label
-            v-if="active && format === 'xml'"
-            class="xml-tag-inline muted tiny"
-            title="Wrapper tag when exporting multiple records"
-          >
-            Record tag
-            <input
-              v-model="xmlRecordTag"
-              class="input mono tag-input"
-              placeholder="record"
-              @change="
-                active.xmlRecordTag = xmlRecordTag || 'record';
-                persistXmlSettings()
-              "
-            />
-          </label>
-          <button type="button" class="btn btn-ghost" :disabled="!active" @click="saveSchema">
-            Save
-          </button>
-          <button
-            type="button"
-            class="btn btn-ghost"
-            :disabled="!active"
-            @click="isTabularFormat ? addColumn() : addRoot()"
-          >
-            {{ isTabularFormat ? '+ Column' : '+ Field' }}
-          </button>
-          <button
-            v-if="!isTabularFormat"
-            type="button"
-            class="btn btn-ghost"
-            :disabled="!selectedId"
-            @click="addChild"
-          >
-            + Child
-          </button>
-          <button
-            type="button"
-            class="btn btn-ghost"
-            :disabled="!selectedId"
-            title="Copy field (Ctrl+C)"
-            @click="copyField()"
-          >
-            Copy
-          </button>
-          <button
-            type="button"
-            class="btn btn-ghost"
-            :disabled="!active"
-            title="Paste field after selection (Ctrl+V)"
-            @click="pasteField()"
-          >
-            Paste
-          </button>
-          <button
-            type="button"
-            class="btn btn-ghost"
-            :disabled="!canUndoSchema"
-            title="Undo last field edit (Ctrl+Z)"
-            @click="undoSchemaEdit"
-          >
-            Undo
-          </button>
-          <button
-            type="button"
-            class="btn btn-ghost"
-            :disabled="!selectedId"
-            @click="deleteSelected"
-          >
-            Delete
-          </button>
-          <button
-            v-if="active?.id && schemas.some((s) => s.id === active.id)"
-            type="button"
-            class="btn btn-ghost danger"
-            @click="deleteSchema"
-          >
-            Delete schema
-          </button>
+          <!-- Row 1: identity + schema-level danger -->
+          <div class="schema-head-row schema-head-identity">
+            <div class="schema-title-block">
+              <span class="schema-head-kicker muted tiny">Title</span>
+              <input
+                v-if="active"
+                v-model="active.name"
+                class="input title schema-title-input"
+                :title="tip('Schema / file name')"
+                @change="saveSchema"
+              />
+              <span v-else class="muted schema-title-placeholder">Select or create a schema</span>
+            </div>
+            <label
+              v-if="active && format === 'xml'"
+              class="xml-tag-inline muted tiny"
+              :title="tip('XML document root element for this schema')"
+            >
+              Root tag
+              <input
+                v-model="xmlRootTag"
+                class="input mono tag-input"
+                placeholder="root"
+                @change="
+                  active.xmlRootTag = xmlRootTag || 'root';
+                  persistXmlSettings()
+                "
+              />
+            </label>
+            <div class="schema-head-grow" />
+            <button
+              v-if="active?.id && schemas.some((s) => s.id === active.id)"
+              type="button"
+              class="btn btn-ghost danger schema-delete-btn"
+              :title="tip('Remove this schema from the library (not package members)')"
+              @click="deleteSchema"
+            >
+              Delete schema
+            </button>
+          </div>
+
+          <!-- Row 2: grouped actions -->
+          <div v-if="active" class="schema-head-row schema-head-tools">
+            <div class="schema-btn-group" role="group" aria-label="File">
+              <span class="schema-group-label muted tiny">File</span>
+              <button
+                type="button"
+                class="btn btn-ghost"
+                :title="tip('Save this schema design to the local SQLite library')"
+                @click="saveSchema"
+              >
+                Save
+              </button>
+              <button
+                type="button"
+                class="btn btn-primary schema-map-btn"
+                :title="
+                  tip(
+                    'Save design and map all non-theme sample values into Field values pools by tag/column (max 1000 per tag). Use Field settings for per-field control on Save.'
+                  )
+                "
+                @click="mapSchemaFields"
+              >
+                Map fields
+              </button>
+            </div>
+
+            <div class="schema-btn-group" role="group" aria-label="Structure">
+              <span class="schema-group-label muted tiny">Structure</span>
+              <button
+                type="button"
+                class="btn btn-ghost"
+                :title="
+                  tip(
+                    isTabularFormat
+                      ? 'Add a CSV/TXT column (header field)'
+                      : 'Add a top-level field / XML element'
+                  )
+                "
+                @click="isTabularFormat ? addColumn() : addRoot()"
+              >
+                {{ isTabularFormat ? '+ Column' : '+ Field' }}
+              </button>
+              <button
+                v-if="isTabularFormat"
+                type="button"
+                class="btn btn-ghost"
+                :disabled="!tabularColumns.length"
+                :title="tip('Add another sample data row used as a generation template')"
+                @click="addTabularRow"
+              >
+                + Row
+              </button>
+              <button
+                v-if="!isTabularFormat"
+                type="button"
+                class="btn btn-ghost"
+                :disabled="!selectedId"
+                :title="tip('Add a nested child field under the selected element')"
+                @click="addChild"
+              >
+                + Child
+              </button>
+            </div>
+
+            <div class="schema-btn-group" role="group" aria-label="Edit">
+              <span class="schema-group-label muted tiny">Edit</span>
+              <button
+                type="button"
+                class="btn btn-ghost"
+                :disabled="!selectedId"
+                :title="tip('Copy selected field subtree (Ctrl+C)')"
+                @click="copyField()"
+              >
+                Copy
+              </button>
+              <button
+                type="button"
+                class="btn btn-ghost"
+                :title="tip('Paste field after the selection (Ctrl+V)')"
+                @click="pasteField()"
+              >
+                Paste
+              </button>
+              <button
+                type="button"
+                class="btn btn-ghost"
+                :disabled="!canUndoSchema"
+                :title="tip('Undo last field edit (Ctrl+Z)')"
+                @click="undoSchemaEdit"
+              >
+                Undo
+              </button>
+              <button
+                type="button"
+                class="btn btn-ghost"
+                :disabled="!selectedId"
+                :title="tip('Remove the selected field from the schema')"
+                @click="deleteSelected"
+              >
+                Delete field
+              </button>
+            </div>
+          </div>
         </div>
 
-        <!-- CSV / TXT: header row = columns, value row = samples -->
+        <!-- CSV / TXT: header = columns, body = sample data rows -->
         <div
           v-if="isTabularFormat"
           class="rows tabular-schema"
           :class="{ 'with-props': selected }"
         >
           <p class="muted tiny tabular-hint">
-            <strong>{{ format === 'csv' ? 'CSV' : 'TXT' }} columns:</strong>
-            first row = column names (headers); value row = sample/templates used when
-            generating. Export writes header line then data rows.
+            <strong>{{ format === 'csv' ? 'CSV' : 'TXT' }}:</strong>
+            header = column names; data rows = sample templates. Drag the
+            <strong>⋮⋮</strong> handle to reorder rows; drag a column’s
+            <strong>right edge</strong> to resize width.
           </p>
           <div class="table-scroll">
             <table class="schema-table" role="grid" aria-label="Column and value editor">
+              <colgroup>
+                <col class="col-gutter" />
+                <col
+                  v-for="col in tabularColumns"
+                  :key="'cg-' + col.id"
+                  :style="{ width: getTabColWidth(col.id) + 'px' }"
+                />
+                <col class="col-add" />
+              </colgroup>
               <thead>
                 <tr class="header-row">
+                  <th class="row-gutter" scope="col">
+                    <span class="col-label muted tiny">Row</span>
+                  </th>
                   <th
                     v-for="col in tabularColumns"
                     :key="'h-' + col.id"
+                    class="tab-col"
                     :class="{ sel: selectedId === col.id }"
+                    :style="tabularColStyle(col.id)"
                     scope="col"
-                    @click="selectedId = col.id"
+                    @pointerdown="selectField(col.id)"
                   >
                     <label class="col-label muted tiny">Column</label>
                     <input
@@ -2854,16 +5056,20 @@ const enumText = computed({
                       :value="col.key"
                       :aria-label="`Column name for ${col.key || 'field'}`"
                       placeholder="column"
-                      @click.stop="selectedId = col.id"
-                      @change="
-                        (e) => updateColumnField(col.id, { key: e.target.value })
+                      @focus="beginFieldEdit(col.id, col.id)"
+                      @blur="endFieldEdit"
+                      @pointerdown="selectField(col.id)"
+                      @input="
+                        (e) =>
+                          updateColumnField(col.id, { key: e.target.value }, { undo: false })
                       "
                     />
                     <div class="col-actions">
                       <button
                         type="button"
                         class="btn btn-ghost tiny-btn"
-                        title="Copy column"
+                        :title="tip('Copy column')"
+                        @pointerdown="selectField(col.id)"
                         @click.stop="copyField(col.id)"
                       >
                         Copy
@@ -2871,19 +5077,28 @@ const enumText = computed({
                       <button
                         type="button"
                         class="btn btn-ghost tiny-btn danger"
-                        title="Remove column"
+                        :title="tip('Remove column')"
+                        @pointerdown="selectField(col.id)"
                         @click.stop="removeColumn(col.id)"
                       >
                         Del
                       </button>
                     </div>
+                    <span
+                      class="tab-col-resizer"
+                      role="separator"
+                      aria-orientation="vertical"
+                      :aria-label="`Resize column ${col.key || 'field'}`"
+                      :title="tip('Drag to resize column')"
+                      @pointerdown.stop="onTabColResizeDown($event, col.id)"
+                    />
                   </th>
                   <th class="add-col-cell" scope="col">
                     <button
                       type="button"
                       class="btn btn-ghost tiny-btn"
                       :disabled="!active"
-                      title="Add column"
+                      :title="tip('Add column')"
                       @click="addColumn"
                     >
                       + Col
@@ -2892,36 +5107,96 @@ const enumText = computed({
                 </tr>
               </thead>
               <tbody>
-                <tr class="value-row">
+                <tr
+                  v-for="ri in tabularRowIndexes"
+                  :key="'r-' + ri"
+                  class="value-row"
+                  :class="{
+                    'tab-row-dragging': tabRowDragFrom === ri,
+                    'tab-drop-before':
+                      tabRowDropHint &&
+                      tabRowDropHint.index === ri &&
+                      tabRowDropHint.mode === 'before',
+                    'tab-drop-after':
+                      tabRowDropHint &&
+                      tabRowDropHint.index === ri &&
+                      tabRowDropHint.mode === 'after'
+                  }"
+                  @dragover="onTabRowDragOver($event, ri)"
+                  @drop="onTabRowDrop($event, ri)"
+                >
+                  <td class="row-gutter">
+                    <span
+                      class="tab-row-drag"
+                      draggable="true"
+                      :title="tip('Drag to reorder row')"
+                      aria-label="Drag to reorder row"
+                      @dragstart="onTabRowDragStart($event, ri)"
+                      @dragend="onTabRowDragEnd"
+                    >⋮⋮</span>
+                    <span class="row-num muted tiny">{{ ri + 1 }}</span>
+                    <button
+                      type="button"
+                      class="btn btn-ghost tiny-btn danger"
+                      :disabled="tabularRowCount <= 1"
+                      :title="tip('Remove this sample row')"
+                      @click="removeTabularRow(ri)"
+                    >
+                      Del
+                    </button>
+                  </td>
                   <td
                     v-for="col in tabularColumns"
-                    :key="'v-' + col.id"
+                    :key="'v-' + col.id + '-' + ri"
+                    class="tab-col"
                     :class="{ sel: selectedId === col.id }"
-                    @click="selectedId = col.id"
+                    :style="tabularColStyle(col.id)"
+                    @pointerdown="selectField(col.id)"
                   >
-                    <label class="col-label muted tiny">Value</label>
+                    <label class="col-label muted tiny">
+                      {{ ri === 0 ? 'Value' : 'Sample' }}
+                    </label>
                     <input
                       class="input sample mono"
-                      :value="col.sampleValue || ''"
-                      :aria-label="`Sample value for ${col.key || 'field'}`"
+                      :value="getTabularCell(col, ri)"
+                      :aria-label="`Sample row ${ri + 1} for ${col.key || 'field'}`"
                       placeholder="sample value"
-                      @click.stop="selectedId = col.id"
-                      @change="
-                        (e) =>
-                          updateColumnField(col.id, {
-                            sampleValue: e.target.value,
-                            kind: 'value'
-                          })
-                      "
+                      @focus="beginFieldEdit(`${col.id}:r${ri}`, col.id)"
+                      @blur="endFieldEdit"
+                      @pointerdown="selectField(col.id)"
+                      @input="(e) => setTabularCellLive(col.id, ri, e.target.value)"
+                    />
+                    <span
+                      class="tab-col-resizer"
+                      role="separator"
+                      aria-orientation="vertical"
+                      :aria-label="`Resize column ${col.key || 'field'}`"
+                      :title="tip('Drag to resize column')"
+                      @pointerdown.stop="onTabColResizeDown($event, col.id)"
                     />
                   </td>
                   <td class="add-col-cell" />
+                </tr>
+                <tr class="add-row-tr">
+                  <td class="row-gutter" />
+                  <td :colspan="Math.max(tabularColumns.length, 1) + 1">
+                    <button
+                      type="button"
+                      class="btn btn-ghost tiny-btn"
+                      :disabled="!active || !tabularColumns.length"
+                      :title="tip('Add sample data row')"
+                      @click="addTabularRow"
+                    >
+                      + Row
+                    </button>
+                  </td>
                 </tr>
               </tbody>
             </table>
           </div>
           <p v-if="!tabularColumns.length" class="muted tiny" style="padding: 0.5rem">
-            No columns yet — click <strong>+ Column</strong> to define headers.
+            No columns yet — click <strong>+ Column</strong> to define headers, then
+            <strong>+ Row</strong> for more sample data.
           </p>
         </div>
 
@@ -2936,7 +5211,7 @@ const enumText = computed({
             :key="item.type === 'close' ? 'c-' + item.row.id + '-' + idx : item.row.id"
             class="row"
             :class="{
-              sel: item.type === 'node' && selectedId === item.row.id,
+              sel: selectedId === item.row.id,
               'row-close': item.type === 'close',
               'row-container':
                 item.type === 'node' &&
@@ -2962,11 +5237,7 @@ const enumText = computed({
             }"
             :style="{ marginLeft: item.depth * 14 + 'px' }"
             :draggable="item.type === 'node'"
-            @click="
-              item.type === 'close'
-                ? (selectedId = item.row.id)
-                : (selectedId = item.row.id)
-            "
+            @pointerdown="selectField(item.row.id)"
             @dragstart="item.type === 'node' && onRowDragStart($event, item.row)"
             @dragend="onRowDragEnd"
             @dragover="
@@ -3005,17 +5276,9 @@ const enumText = computed({
             <template v-else>
               <span
                 class="drag-handle"
-                title="Drag to reorder · drop on a group to nest"
-                @click.stop
+                :title="tip('Drag to reorder · drop on a group to nest')"
+                @pointerdown="selectField(item.row.id)"
               >⋮⋮</span>
-              <input
-                v-if="csvTieOn && item.row.kind === 'value'"
-                type="checkbox"
-                :checked="isTied(item.path.slice(0, -1), item.row)"
-                title="Tie sample value across rows"
-                @click.stop
-                @change="toggleTie(item.path.slice(0, -1), item.row)"
-              />
               <span class="kind">{{
                 item.row.kind === 'object'
                   ? '{}'
@@ -3027,14 +5290,16 @@ const enumText = computed({
               <input
                 class="input key"
                 :value="item.row.key"
-                @click.stop
-                @change="
-                  (e) => {
-                    selectedId = item.row.id
-                    updateSelected({ key: e.target.value })
-                  }
-                "
+                @focus="beginFieldEdit(item.row.id, item.row.id)"
+                @blur="endFieldEdit"
+                @pointerdown="selectField(item.row.id)"
+                @input="(e) => patchSelectedField(item.row.id, { key: e.target.value })"
               />
+              <span
+                v-if="item.row.isRecordTag"
+                class="badge-record"
+                :title="tip('Record tag — wraps each record in multi-record one-file XML')"
+              >rec</span>
               <span
                 v-if="item.row.kind === 'value'"
                 class="tag-open mono muted"
@@ -3055,18 +5320,19 @@ const enumText = computed({
                 class="input sample"
                 :value="item.row.sampleValue || ''"
                 placeholder="sample"
-                @click.stop
-                @change="
-                  (e) => {
-                    selectedId = item.row.id
-                    updateSelected({ sampleValue: e.target.value })
-                  }
+                @focus="beginFieldEdit(item.row.id, item.row.id)"
+                @blur="endFieldEdit"
+                @pointerdown="selectField(item.row.id)"
+                @input="
+                  (e) =>
+                    patchSelectedField(item.row.id, { sampleValue: e.target.value })
                 "
               />
               <button
                 type="button"
                 class="btn btn-ghost tiny-btn row-copy-btn"
-                title="Copy field"
+                :title="tip('Copy field')"
+                @pointerdown="selectField(item.row.id)"
                 @click.stop="copyField(item.row.id)"
               >
                 Copy
@@ -3081,7 +5347,7 @@ const enumText = computed({
           role="separator"
           aria-orientation="horizontal"
           aria-label="Resize field settings"
-          title="Drag to resize Field settings"
+          :title="tip('Drag to resize Field settings')"
           @pointerdown="onPropsResizeDown"
         />
         <div
@@ -3091,196 +5357,382 @@ const enumText = computed({
           :style="propsPanelStyle"
         >
           <div class="props-head">
-            <div class="label">Field settings</div>
+            <div class="props-head-text">
+              <div class="label">Field settings</div>
+              <span
+                v-if="selectedFieldPath"
+                class="props-path mono muted tiny"
+                :title="tip(selectedFieldPath)"
+              >
+                {{ selectedFieldPath }}
+              </span>
+            </div>
             <button
               type="button"
               class="btn btn-ghost tiny-btn"
-              :title="layout.propsCollapsed ? 'Expand field settings' : 'Collapse field settings'"
+              :title="tip(layout.propsCollapsed ? 'Expand field settings' : 'Collapse field settings')"
               @click="togglePropsCollapsed"
             >
               {{ layout.propsCollapsed ? 'Expand' : 'Collapse' }}
             </button>
           </div>
           <template v-if="!layout.propsCollapsed">
-          <p class="muted tiny props-hint">
-            Controls how this field is randomized. Sample value on the row is the primary template.
-            Drag the bar above to resize.
-          </p>
-          <div class="props-grid">
-            <label>
-              Kind
-              <select
-                class="input"
-                :value="selected.kind"
-                @change="updateSelected({ kind: $event.target.value })"
-              >
-                <option v-for="o in kindOptions" :key="o.v" :value="o.v">{{ o.l }}</option>
-              </select>
-            </label>
-            <label class="chk">
-              <input
-                type="checkbox"
-                :checked="selected.isPrimary"
-                @change="
-                  updateSelected({
-                    isPrimary: $event.target.checked,
-                    isUnique: $event.target.checked ? true : selected.isUnique
-                  })
-                "
-              />
-              Primary key
-            </label>
-            <label class="chk">
-              <input
-                type="checkbox"
-                :checked="selected.isUnique || selected.isPrimary"
-                :disabled="selected.isPrimary"
-                @change="updateSelected({ isUnique: $event.target.checked })"
-              />
-              Unique in run
-            </label>
-            <label v-if="selected.kind === 'value'">
-              Null %
-              <input
-                type="number"
-                min="0"
-                max="100"
-                class="input"
-                :value="selected.nullRate ?? 0"
-                @change="
-                  updateSelected({ nullRate: Number($event.target.value) || 0 })
-                "
-              />
-            </label>
-            <label v-if="selected.kind === 'value'">
-              Min length
-              <input
-                type="number"
-                class="input"
-                :value="selected.minLength ?? ''"
-                @change="
-                  updateSelected({
-                    minLength:
-                      $event.target.value === ''
-                        ? undefined
-                        : Math.max(0, Number($event.target.value) || 0)
-                  })
-                "
-              />
-            </label>
-            <label v-if="selected.kind === 'value'">
-              Max length
-              <input
-                type="number"
-                class="input"
-                :value="selected.maxLength ?? ''"
-                @change="
-                  updateSelected({
-                    maxLength:
-                      $event.target.value === ''
-                        ? undefined
-                        : Math.max(0, Number($event.target.value) || 0)
-                  })
-                "
-              />
-            </label>
-            <label v-if="selected.kind === 'value'">
-              Min (number)
-              <input
-                type="number"
-                class="input"
-                :value="selected.min ?? ''"
-                @change="
-                  updateSelected({
-                    min:
-                      $event.target.value === ''
-                        ? undefined
-                        : Number($event.target.value)
-                  })
-                "
-              />
-            </label>
-            <label v-if="selected.kind === 'value'">
-              Max (number)
-              <input
-                type="number"
-                class="input"
-                :value="selected.max ?? ''"
-                @change="
-                  updateSelected({
-                    max:
-                      $event.target.value === ''
-                        ? undefined
-                        : Number($event.target.value)
-                  })
-                "
-              />
-            </label>
-            <label v-if="selected.kind === 'value' && format === 'xml'" class="wide">
-              Empty tag style
-              <select
-                class="input"
-                :value="selfClosingSelectValue(selected)"
-                @change="setSelfClosingMode($event.target.value)"
-              >
-                <option value="default">
-                  Schema default ({{ xmlSelfClosing ? 'self-closing' : 'open pair' }})
-                </option>
-                <option value="self">Self-closing when empty (&lt;tag/&gt;)</option>
-                <option value="pair">Open pair when empty (&lt;tag&gt;&lt;/tag&gt;)</option>
-              </select>
-              <span class="muted tiny"
-                >Only affects empty/null values. Nesting is controlled by parent/child structure —
-                closing tags in the list are visual only.</span
-              >
-            </label>
-            <label v-if="selected.kind === 'value'" class="wide">
-              Allowed values (enum, one per line)
-              <textarea
-                class="input mono"
-                rows="3"
-                :value="enumText"
-                @change="
-                  (e) => {
-                    const lines = e.target.value
-                      .split('\n')
-                      .map((s) => s.trim())
-                      .filter(Boolean)
-                    updateSelected({
-                      enumValues: lines.length ? lines : undefined
-                    })
-                  }
-                "
-              />
-            </label>
-            <label v-if="selected.kind === 'value'" class="wide">
-              Theme category
-              <input
-                class="input mono"
-                list="field-theme-cat-list"
-                :value="selected.themeCategory || ''"
-                placeholder="person_name, place, ship…"
-                @change="
-                  updateSelected({
-                    themeCategory: $event.target.value.trim() || undefined
-                  })
-                "
-              />
-              <datalist id="field-theme-cat-list">
-                <option v-for="c in COMMON_THEME_CATS" :key="'fc-' + c" :value="c" />
-                <option v-for="c in themeCategories" :key="'ft-' + c" :value="c" />
-              </datalist>
-              <span class="muted tiny"
-                >Optional — maps field to Data packs theme values</span
-              >
-            </label>
-          </div>
+            <div class="props-body">
+              <!-- 1. Structure -->
+              <section class="props-section">
+                <header class="props-section-head">
+                  <span class="props-section-title">Structure</span>
+                  <span class="props-section-sub muted tiny">How this node sits in the tree</span>
+                </header>
+                <div class="props-section-body props-row-2">
+                  <label v-if="showFieldKind" class="props-field">
+                    <span class="props-field-label">Kind</span>
+                    <select
+                      class="input"
+                      :value="selected.kind"
+                      @change="updateSelected({ kind: $event.target.value })"
+                    >
+                      <option v-for="o in kindOptions" :key="o.v" :value="o.v">{{ o.l }}</option>
+                    </select>
+                  </label>
+                  <label
+                    v-if="format === 'xml'"
+                    class="chk props-field props-field-check"
+                    :title="tip('This tag wraps each generated record when using All records in one file (XML). Only one field can be the record tag.')"
+                  >
+                    <input
+                      type="checkbox"
+                      :checked="!!selected.isRecordTag"
+                      @change="setSelectedAsRecordTag($event.target.checked)"
+                    />
+                    <span>
+                      <span class="props-field-label">Record tag</span>
+                      <span class="muted tiny block">Wraps each multi-record unit</span>
+                    </span>
+                  </label>
+                </div>
+                <p
+                  v-if="selected.kind !== 'value' && format !== 'xml'"
+                  class="muted tiny props-hint"
+                >
+                  Container — add children in the tree. Fill options apply to value fields only.
+                </p>
+                <p
+                  v-else-if="selected.kind !== 'value' && format === 'xml' && selected.isRecordTag"
+                  class="muted tiny props-hint"
+                >
+                  Record unit for multi-record one-file XML — children are fields of each record.
+                </p>
+                <p
+                  v-else-if="selected.kind !== 'value'"
+                  class="muted tiny props-hint"
+                >
+                  Container — add children in the tree. Enable <strong>Record tag</strong> if this
+                  element repeats once per record.
+                </p>
+              </section>
+
+              <!-- 2. Generate -->
+              <section v-if="selected.kind === 'value'" class="props-section">
+                <header class="props-section-head">
+                  <span class="props-section-title">Generate</span>
+                  <span class="props-section-sub muted tiny">How values vary across records</span>
+                </header>
+                <div class="props-section-body props-row-2">
+                  <label
+                    class="props-field"
+                    :title="tip('How this field is filled across generated records (all formats)')"
+                  >
+                    <span class="props-field-label">Mode</span>
+                    <select
+                      class="input"
+                      :value="selectedGenerateMode"
+                      @change="setSelectedGenerateMode($event.target.value)"
+                    >
+                      <option value="random">Random — new each record</option>
+                      <option value="same">Same — identical every record</option>
+                      <option value="unique">Unique — no duplicates</option>
+                    </select>
+                  </label>
+                  <label
+                    class="props-field"
+                    :title="tip('Percent of records where this field is empty (0 = always present)')"
+                  >
+                    <span class="props-field-label">Empty chance %</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max="100"
+                      class="input"
+                      :value="selected.nullRate ?? 0"
+                      @change="
+                        updateSelected({ nullRate: Number($event.target.value) || 0 })
+                      "
+                    />
+                  </label>
+                  <label
+                    class="chk props-field props-field-check"
+                    :title="tip('Marks field as primary key and forces Unique generate mode')"
+                  >
+                    <input
+                      type="checkbox"
+                      :checked="selected.isPrimary"
+                      @change="
+                        (e) =>
+                          setSelectedGenerateMode('unique', {
+                            primary: e.target.checked
+                          })
+                      "
+                    />
+                    <span class="props-field-label">Primary key</span>
+                  </label>
+                </div>
+              </section>
+
+              <!-- 3. Value sources -->
+              <section v-if="selected.kind === 'value'" class="props-section">
+                <header class="props-section-head">
+                  <span class="props-section-title">Value sources</span>
+                  <span class="props-section-sub muted tiny"
+                    >Priority: fixed → theme → custom → history → synth</span
+                  >
+                </header>
+                <div class="props-section-body props-stack">
+                  <label class="props-field">
+                    <span class="props-field-label">
+                      1 · Fixed values
+                      <span class="muted tiny">optional · one per line · highest priority</span>
+                    </span>
+                    <textarea
+                      class="input mono"
+                      rows="2"
+                      :value="enumText"
+                      placeholder="Leave empty to use theme / lists / history / sample"
+                      @change="
+                        (e) => {
+                          const lines = e.target.value
+                            .split('\n')
+                            .map((s) => s.trim())
+                            .filter(Boolean)
+                          updateSelected({
+                            enumValues: lines.length ? lines : undefined
+                          })
+                        }
+                      "
+                    />
+                  </label>
+
+                  <div class="props-subcard">
+                    <div class="props-subcard-head">
+                      <span class="props-field-label">2 · Field values pool (tag / column)</span>
+                    </div>
+                    <label
+                      class="chk props-field props-field-check"
+                      :title="tip('Finer control: when Save is pressed, only this field’s samples join the tag pool. Use toolbar Map fields to store all tags at once.')"
+                    >
+                      <input
+                        type="checkbox"
+                        :checked="!!selected.saveToFieldPool"
+                        @change="
+                          updateSelected({
+                            saveToFieldPool: $event.target.checked ? true : undefined
+                          })
+                        "
+                      />
+                      <span>
+                        <span class="props-field-label">Include this field on Save</span>
+                        <span class="muted tiny block">
+                          Pool key =
+                          <strong class="mono">{{
+                            (selected.key || 'tag').trim() || 'tag'
+                          }}</strong>
+                          · max 1000 values shared by this tag
+                        </span>
+                      </span>
+                    </label>
+                    <p class="muted tiny props-hint">
+                      <strong>Map fields</strong> (toolbar) stores samples for
+                      <em>all</em> non-theme tags now. This checkbox only narrows what
+                      ordinary <strong>Save</strong> appends. Theme fields use Theme pool
+                      below. Manage lists in <strong>Data packs → Field values</strong>.
+                    </p>
+                  </div>
+
+                  <div class="props-subcard">
+                    <div class="props-subcard-head">
+                      <span class="props-field-label">3 · Theme pool</span>
+                      <button
+                        type="button"
+                        class="btn btn-ghost tiny-btn"
+                        @click="openFieldThemeInDataPacks"
+                      >
+                        Manage pools
+                      </button>
+                    </div>
+                    <div class="props-row-2">
+                      <label class="props-field">
+                        <span class="props-field-label">Theme pack</span>
+                        <select
+                          class="input"
+                          :value="selected.themeId || 'blend'"
+                          @change="
+                            updateSelected({
+                              themeId:
+                                $event.target.value === 'blend'
+                                  ? undefined
+                                  : $event.target.value || undefined
+                            })
+                          "
+                        >
+                          <option value="blend">All active themes (blend)</option>
+                          <option v-for="t in themes" :key="'th-' + t.id" :value="t.id">
+                            {{ t.name }}
+                          </option>
+                        </select>
+                      </label>
+                      <label class="props-field">
+                        <span class="props-field-label">Category</span>
+                        <select
+                          class="input"
+                          :value="selected.themeCategory || ''"
+                          :title="
+                            tip(
+                              'Only categories that exist under Data packs → Themes for the selected Theme pack (or active blend). None skips theme fill.'
+                            )
+                          "
+                          @change="
+                            updateSelected({
+                              themeCategory: $event.target.value.trim() || undefined
+                            })
+                          "
+                        >
+                          <option value="">None (skip theme fill)</option>
+                          <option
+                            v-for="c in fieldThemeCategoryOptions"
+                            :key="'ftc-' + c"
+                            :value="c"
+                          >
+                            {{ c }}
+                          </option>
+                        </select>
+                      </label>
+                    </div>
+                    <p class="muted tiny props-hint">
+                      Categories list only what the selected pack (or active blend)
+                      actually has in <strong>Data packs → Themes</strong>. Add values
+                      there to appear here. None skips theme fill.
+                    </p>
+                  </div>
+                </div>
+              </section>
+
+              <!-- 4. Constraints -->
+              <section v-if="selected.kind === 'value'" class="props-section props-section-muted">
+                <button
+                  type="button"
+                  class="props-section-toggle"
+                  :aria-expanded="propsMoreOpen"
+                  @click="propsMoreOpen = !propsMoreOpen"
+                >
+                  <span class="props-chevron" aria-hidden="true">{{
+                    propsMoreOpen ? '▾' : '▸'
+                  }}</span>
+                  <span class="props-section-title">Constraints</span>
+                  <span class="muted tiny"
+                    >length · numeric bounds<span v-if="format === 'xml'"> · empty tags</span
+                    ><span v-if="fieldHasAdvanced"> · customized</span></span
+                  >
+                </button>
+                <div v-if="propsMoreOpen" class="props-section-body">
+                  <div class="props-row-4">
+                    <label class="props-field">
+                      <span class="props-field-label">Min length</span>
+                      <input
+                        type="number"
+                        class="input"
+                        :value="selected.minLength ?? ''"
+                        @change="
+                          updateSelected({
+                            minLength:
+                              $event.target.value === ''
+                                ? undefined
+                                : Math.max(0, Number($event.target.value) || 0)
+                          })
+                        "
+                      />
+                    </label>
+                    <label class="props-field">
+                      <span class="props-field-label">Max length</span>
+                      <input
+                        type="number"
+                        class="input"
+                        :value="selected.maxLength ?? ''"
+                        @change="
+                          updateSelected({
+                            maxLength:
+                              $event.target.value === ''
+                                ? undefined
+                                : Math.max(0, Number($event.target.value) || 0)
+                          })
+                        "
+                      />
+                    </label>
+                    <label class="props-field">
+                      <span class="props-field-label">Min (number)</span>
+                      <input
+                        type="number"
+                        class="input"
+                        :value="selected.min ?? ''"
+                        @change="
+                          updateSelected({
+                            min:
+                              $event.target.value === ''
+                                ? undefined
+                                : Number($event.target.value)
+                          })
+                        "
+                      />
+                    </label>
+                    <label class="props-field">
+                      <span class="props-field-label">Max (number)</span>
+                      <input
+                        type="number"
+                        class="input"
+                        :value="selected.max ?? ''"
+                        @change="
+                          updateSelected({
+                            max:
+                              $event.target.value === ''
+                                ? undefined
+                                : Number($event.target.value)
+                          })
+                        "
+                      />
+                    </label>
+                  </div>
+                  <label v-if="format === 'xml'" class="props-field props-field-wide">
+                    <span class="props-field-label">Empty tag style</span>
+                    <select
+                      class="input"
+                      :value="selfClosingSelectValue(selected)"
+                      @change="setSelfClosingMode($event.target.value)"
+                    >
+                      <option value="default">
+                        Schema default ({{ xmlSelfClosing ? 'self-closing' : 'open pair' }})
+                      </option>
+                      <option value="self">Self-closing (&lt;tag/&gt;)</option>
+                      <option value="pair">Open pair (&lt;tag&gt;&lt;/tag&gt;)</option>
+                    </select>
+                  </label>
+                </div>
+              </section>
+            </div>
           </template>
         </div>
       </section>
 
 
-      <!-- Package workspace (dynamic) -->
+      <!-- Package workspace (dynamic): explorer + center editor -->
       <section v-else-if="workspaceMode === 'package'" class="center panel workspace-panel">
         <div class="center-head">
           <strong v-if="activePackage">{{ activePackage.name }}</strong>
@@ -3300,88 +5752,152 @@ const enumText = computed({
         <div v-if="!activePackage" class="empty-workspace">
           <p>Import or select a package from the list.</p>
           <p class="muted tiny">
-            Nested ZIP/TAR/TAR.GZ expand to named folders. Variants download only — not stored in
+            Library → <strong>Import package</strong>: archive/files or folder. Nested paths show in
+            the explorer. Editable members: XML, CSV, TXT. Variants download only — not stored in
             SQLite.
           </p>
         </div>
-        <div v-else class="workspace-scroll">
-          <div class="muted tiny">Members</div>
-          <ul class="hist-list">
-            <li
-              v-for="m in activePackage.members"
-              :key="m.id"
-              class="clickable"
-              :class="{ active: packageMemberPath === m.path }"
-              @click="selectPackageMember(m.path)"
-            >
-              <span class="k">{{ m.path }}</span>
-              <span class="v">
-                {{ m.kind === 'text' ? m.format : m.nestedArchiveFormat }}
-                <template v-if="m.kind === 'text'">
-                  · {{ m.verified ? 'verified' : 'review' }}
-                </template>
-              </span>
-            </li>
-          </ul>
-          <div
-            v-if="activePackage.members?.find((m) => m.path === packageMemberPath)?.kind === 'text'"
-            class="row-actions"
-            style="margin: 0.5rem 0.75rem; display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center"
-          >
-            <label class="chk">
-              <input
-                type="checkbox"
-                :checked="
-                  !!activePackage.members?.find((m) => m.path === packageMemberPath)?.verified
-                "
-                @change="verifyPackageMember($event.target.checked)"
-              />
-              Member verified
-            </label>
-            <button class="btn btn-ghost" type="button" @click="editPackageMemberSchema">
-              Edit member schema
-            </button>
-          </div>
-          <div
-            v-if="(activePackage.skipped || []).length"
-            class="muted tiny"
-            style="margin: 0.25rem 0.75rem"
-          >
-            Skipped on import ({{ activePackage.skipped.length }}):
-            {{ activePackage.skipped.slice(0, 8).join(', ')
-            }}{{ activePackage.skipped.length > 8 ? '…' : '' }}
-          </div>
-          <pre class="code-mini" style="margin: 0.5rem 0.75rem; flex: 1">{{
-            packagePreview || '// select a member'
-          }}</pre>
-          <div
-            v-if="
-              packageMemberPath &&
-              activePackage.members?.find((m) => m.path === packageMemberPath)?.kind === 'text'
-            "
-            class="field-modes"
-            style="padding: 0.5rem 0.75rem"
-          >
-            <div class="muted tiny">
-              Per-field modes for <span class="mono">{{ packageMemberPath }}</span>
-            </div>
+        <div v-else class="pkg-layout">
+          <!-- Nested explorer (left of center) -->
+          <aside class="pkg-explorer" aria-label="Package file explorer">
+            <div class="muted tiny pkg-explorer-title">Explorer</div>
+            <ul class="pkg-tree">
+              <li v-for="row in packageExplorerRows" :key="'r-' + row.path">
+                <button
+                  v-if="row.isDir"
+                  type="button"
+                  class="pkg-tree-row dir"
+                  :style="{ paddingLeft: 0.35 + row.depth * 0.85 + 'rem' }"
+                  @click="togglePackageTreeDir(row.path)"
+                >
+                  <span class="pkg-chevron">{{
+                    isPackageTreeExpanded(row.path) ? '▾' : '▸'
+                  }}</span>
+                  <span class="pkg-icon" aria-hidden="true">📁</span>
+                  <span class="pkg-name">{{ row.name }}</span>
+                </button>
+                <button
+                  v-else
+                  type="button"
+                  class="pkg-tree-row file"
+                  :class="{
+                    active: packageMemberPath === row.path,
+                    unsupported: row.member && !isPackageSupportedMember(row.member)
+                  }"
+                  :style="{ paddingLeft: 0.35 + row.depth * 0.85 + 'rem' }"
+                  :title="tip(row.path)"
+                  @click="selectPackageMember(row.path)"
+                >
+                  <span class="pkg-icon" aria-hidden="true">{{
+                    isPackageSupportedMember(row.member) ? '📄' : '📎'
+                  }}</span>
+                  <span class="pkg-name">{{ row.name }}</span>
+                </button>
+              </li>
+            </ul>
             <div
-              v-for="fp in packageMemberLeaves(packageMemberPath)"
-              :key="fp"
-              class="field-mode-row"
+              v-if="(activePackage.skipped || []).length"
+              class="muted tiny pkg-skipped"
             >
-              <span class="mono tiny">{{ fp }}</span>
-              <select
-                class="input mode-sel"
-                :aria-label="`Mode for ${fp}`"
-                :value="getPackageFieldMode(packageMemberPath, fp)"
-                @change="setPackageFieldMode(packageMemberPath, fp, $event.target.value)"
-              >
-                <option value="random">random</option>
-                <option value="same">same</option>
-                <option value="unique">unique</option>
-              </select>
+              Skipped ({{ activePackage.skipped.length }}):
+              {{ activePackage.skipped.slice(0, 6).join(', ')
+              }}{{ activePackage.skipped.length > 6 ? '…' : '' }}
             </div>
+          </aside>
+
+          <!-- Center editor -->
+          <div class="pkg-editor">
+            <template v-if="packageMemberEditable">
+              <div class="row-actions pkg-editor-toolbar">
+                <label class="muted tiny pkg-name-edit">
+                  File name
+                  <input
+                    v-model="packageEditName"
+                    class="input mono"
+                    aria-label="Member file name"
+                  />
+                </label>
+                <label class="chk">
+                  <input
+                    type="checkbox"
+                    :checked="!!selectedPackageMember?.verified"
+                    @change="verifyPackageMember($event.target.checked)"
+                  />
+                  Verified
+                </label>
+                <button
+                  class="btn btn-ghost"
+                  type="button"
+                  :disabled="packageWorking"
+                  @click="savePackageMemberContent"
+                >
+                  Save (content → schema)
+                </button>
+                <button
+                  class="btn btn-ghost"
+                  type="button"
+                  :disabled="packageWorking"
+                  @click="savePackageMemberSchemaInPlace"
+                >
+                  Save schema
+                </button>
+                <button class="btn btn-ghost" type="button" @click="editPackageMemberSchema">
+                  Edit schema tags
+                </button>
+                <button
+                  class="btn btn-ghost"
+                  type="button"
+                  :disabled="packageWorking"
+                  @click="savePackageMemberSchemaAs"
+                >
+                  Save schema as…
+                </button>
+              </div>
+              <label class="muted tiny" style="display: block; margin: 0 0.5rem">
+                Content (design sample — xml / csv / txt)
+                <textarea
+                  v-model="packageEditContent"
+                  class="input pkg-content-editor mono"
+                  rows="16"
+                  spellcheck="false"
+                  aria-label="Member file content"
+                />
+              </label>
+              <div class="field-modes" style="padding: 0.5rem 0.75rem">
+                <div class="muted tiny">
+                  Field modes (immutable = <strong>same</strong>) ·
+                  <span class="mono">{{ packageMemberPath }}</span>
+                </div>
+                <div
+                  v-for="fp in packageMemberLeaves(packageMemberPath)"
+                  :key="fp"
+                  class="field-mode-row"
+                >
+                  <span class="mono tiny">{{ fp }}</span>
+                  <select
+                    class="input mode-sel"
+                    :aria-label="`Mode for ${fp}`"
+                    :value="getPackageFieldMode(packageMemberPath, fp)"
+                    @change="setPackageFieldMode(packageMemberPath, fp, $event.target.value)"
+                  >
+                    <option value="random">random</option>
+                    <option value="same">same (immutable)</option>
+                    <option value="unique">unique</option>
+                  </select>
+                </div>
+              </div>
+            </template>
+            <template v-else-if="selectedPackageMember">
+              <pre class="code-mini" style="margin: 0.5rem 0.75rem">{{
+                packagePreview || '// not editable'
+              }}</pre>
+              <p class="muted tiny" style="margin: 0.5rem 0.75rem">
+                Only XML, CSV, and TXT members open in the editor.
+              </p>
+            </template>
+            <template v-else>
+              <p class="muted" style="margin: 1rem">Select a file in the explorer.</p>
+            </template>
           </div>
         </div>
       </section>
@@ -3501,43 +6017,190 @@ const enumText = computed({
             </div>
           </template>
           <template v-else-if="workspaceMode === 'datapacks'">
-            <div class="empty-workspace" style="padding: 1rem; max-width: 560px">
+            <div class="empty-workspace theme-pack-workspace" style="padding: 1rem; max-width: 640px">
               <template v-if="themeEditor">
-                <h3 style="margin-top: 0">Add values · {{ themeEditor.theme?.name }}</h3>
+                <h3 style="margin-top: 0">
+                  {{ themeEditor.theme?.name }}
+                  <span class="muted tiny">· theme values</span>
+                </h3>
                 <p class="muted tiny">
-                  Category must match the schema field’s <strong>Theme category</strong>.
+                  Categories are your buckets (names, ships, lightsabers…). Map a schema field’s
+                  <strong>Theme pack</strong> + <strong>Category</strong> to pull random values
+                  from this pool. Cap: <strong>{{ THEME_CAT_LIMIT }}</strong> values per category.
                 </p>
-                <label class="muted tiny">
-                  Category
-                  <input v-model="themeEditor.category" class="input mono" list="theme-cat-list" />
-                  <datalist id="theme-cat-list">
-                    <option v-for="c in COMMON_THEME_CATS" :key="c" :value="c" />
-                    <option v-for="c in themeCategories" :key="'t-' + c" :value="c" />
-                  </datalist>
-                </label>
-                <label class="muted tiny">
-                  Values (one per line or comma-separated)
-                  <textarea v-model="themeEditor.bulk" class="input mono" rows="8" />
-                </label>
-                <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem">
-                  <button type="button" class="btn btn-primary" @click="submitThemeValuesEditor">
-                    Save values
+
+                <div class="theme-cat-bar">
+                  <div class="theme-cat-chips">
+                    <div
+                      v-for="s in themeEditorCategoryChips"
+                      :key="'chip-' + s.category"
+                      class="theme-cat-chip-wrap"
+                    >
+                      <button
+                        type="button"
+                        class="btn btn-ghost tiny-btn"
+                        :class="{
+                          on:
+                            String(themeEditor.category || '').toLowerCase() ===
+                            String(s.category).toLowerCase(),
+                          warn: s.nearLimit,
+                          full: s.full
+                        }"
+                        :title="tip('Select category “' + s.category + '”')"
+                        @click="selectThemeCategory(s.category)"
+                      >
+                        {{ s.category }}
+                        <span class="muted">{{ s.count }}/{{ s.limit ?? THEME_CAT_LIMIT }}</span>
+                      </button>
+                      <button
+                        type="button"
+                        class="btn btn-outline-danger pack-action-sm theme-cat-del"
+                        :title="tip('Delete category “' + s.category + '” and all its values')"
+                        @click.stop="deleteThemeCategory(s.category)"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="theme-cat-create">
+                  <label class="muted tiny gen-field" style="flex: 1; min-width: 0">
+                    <span class="gen-field-label">Active category</span>
+                    <input
+                      v-model="themeEditor.category"
+                      class="input mono"
+                      list="theme-cat-list"
+                      placeholder="names, ships, lightsabers…"
+                      @change="onThemeEditorCategoryChange"
+                      @keydown.enter.prevent="onThemeEditorCategoryChange"
+                    />
+                    <datalist id="theme-cat-list">
+                      <option v-for="c in COMMON_THEME_CATS" :key="c" :value="c" />
+                      <option v-for="c in themeCategories" :key="'t-' + c" :value="c" />
+                      <option
+                        v-for="s in themeEditorCategoryChips"
+                        :key="'chip-dl-' + s.category"
+                        :value="s.category"
+                      />
+                    </datalist>
+                  </label>
+                  <button
+                    type="button"
+                    class="btn btn-primary"
+                    style="align-self: flex-end"
+                    :title="tip('Create a new value category under this theme (names, ships, …)')"
+                    @click="addThemeCategory"
+                  >
+                    + Add category
                   </button>
-                  <button type="button" class="btn btn-ghost" @click="themeEditor = null">
-                    Cancel
+                  <button
+                    type="button"
+                    class="btn btn-outline-danger"
+                    style="align-self: flex-end"
+                    :disabled="!themeEditor.category"
+                    :title="
+                      tip(
+                        'Delete the active category and all of its values from this theme pack'
+                      )
+                    "
+                    @click="deleteThemeCategory(themeEditor.category)"
+                  >
+                    Delete category
+                  </button>
+                </div>
+
+                <p
+                  v-if="themeEditorCatStat.nearLimit || themeEditorCatStat.full"
+                  class="banner err"
+                  style="margin: 0.5rem 0"
+                  role="status"
+                >
+                  <template v-if="themeEditorCatStat.full">
+                    Category “{{ themeEditor.category }}” is full
+                    ({{ themeEditorCatStat.count }}/{{ THEME_CAT_LIMIT }}). Remove values before
+                    adding more.
+                  </template>
+                  <template v-else>
+                    Category “{{ themeEditor.category }}” is nearly full
+                    ({{ themeEditorCatStat.count }}/{{ THEME_CAT_LIMIT }} — warn at
+                    {{ THEME_CAT_WARN_AT }}+).
+                  </template>
+                </p>
+                <p v-else class="muted tiny">
+                  Pool size:
+                  <strong
+                    >{{ themeEditorCatStat.count }}/{{ THEME_CAT_LIMIT }}</strong
+                  >
+                  in “{{ themeEditor.category || '…' }}”
+                </p>
+
+                <div class="theme-value-list">
+                  <div class="label muted tiny">
+                    Values
+                    <span v-if="themeEditor.loading">· loading…</span>
+                  </div>
+                  <ul v-if="themeEditor.values?.length" class="pack-value-list theme-values-ul">
+                    <li v-for="row in themeEditor.values" :key="row.id" class="pack-value-row">
+                      <span class="v mono">{{ row.value }}</span>
+                      <div class="pack-value-actions">
+                        <button
+                          type="button"
+                          class="btn btn-outline pack-action-sm"
+                          @click="editThemeValueRow(row)"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          class="btn btn-outline-danger pack-action-sm"
+                          @click="deleteThemeValueRow(row)"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </li>
+                  </ul>
+                  <p v-else-if="!themeEditor.loading" class="muted tiny">
+                    No values in this category yet — add some below.
+                  </p>
+                </div>
+
+                <label class="muted tiny">
+                  Add values (one per line or comma-separated)
+                  <textarea
+                    v-model="themeEditor.bulk"
+                    class="input mono"
+                    rows="5"
+                    placeholder="Luke Skywalker&#10;Leia Organa&#10;Han Solo"
+                  />
+                </label>
+                <div class="pack-editor-actions">
+                  <button
+                    type="button"
+                    class="btn btn-primary pack-cta"
+                    :disabled="themeEditorCatStat.full"
+                    @click="submitThemeValuesEditor"
+                  >
+                    Add to pool
+                  </button>
+                  <button type="button" class="btn btn-outline pack-action" @click="themeEditor = null">
+                    Done
                   </button>
                 </div>
               </template>
               <template v-else>
                 <h3 style="margin-top: 0">Data packs</h3>
                 <p>
-                  <strong>Themes</strong> = genre of data.
-                  <strong>Field values</strong> = curated lists on schema paths. Both in SQLite.
-                  Fill order: enums → theme → custom → history → synth.
+                  <strong>Themes</strong> = genre packs (Star Wars, …) with categories you invent
+                  (names, ships, lightsabers). Map fields in Field settings → Theme pack + Category.
+                  <strong>Field values</strong> = curated lists on schema paths. Fill order: enums →
+                  theme → custom → history → synth.
                 </p>
                 <p class="muted tiny">
-                  Local search on the left is enough — Elastic is overkill here. Keep lists per
-                  field key when they grow large.
+                  Each category holds up to {{ THEME_CAT_LIMIT }} values (warning at
+                  {{ THEME_CAT_WARN_AT }}+). Open a theme with
+                  <em>Browse / edit values</em> on the left.
                 </p>
                 <p class="muted tiny">
                   Active blend:
@@ -3571,18 +6234,18 @@ const enumText = computed({
         class="col-resizer"
         role="separator"
         aria-orientation="vertical"
-        aria-label="Resize tools panel"
-        title="Drag to resize tools"
+        aria-label="Resize Generate panel"
+        :title="tip('Drag to resize the Generate panel')"
         @pointerdown="onResizePointerDown('preview', $event)"
       />
 
       <aside v-if="showRightPanel" class="preview panel">
         <div class="preview-bar">
-          <span class="muted tiny">Tools</span>
+          <span class="muted tiny">Generate</span>
           <button
             type="button"
             class="btn btn-ghost tiny-btn"
-            title="Hide tools panel"
+            :title="tip('Hide the Generate panel')"
             @click="togglePreviewPanel"
           >
             Hide
@@ -3590,164 +6253,295 @@ const enumText = computed({
         </div>
         <template v-if="workspaceMode === 'schema'">
         <div class="ptabs">
-          <button :class="{ on: tab === 'schema' }" @click="tab = 'schema'">Schema</button>
-          <button :class="{ on: tab === 'generated' }" @click="tab = 'generated'">
-            Auto-Gen
-          </button>
-          <button :class="{ on: tab === 'generate' }" @click="tab = 'generate'">
+          <button
+            type="button"
+            class="on"
+            :title="tip('Configure and run generation for the active schema')"
+          >
             Generate
           </button>
         </div>
 
-        <div v-if="tab === 'generate'" class="gen">
-          <label>
-            Records
-            <input
-              v-model.number="recordCount"
-              type="number"
-              min="1"
-              max="1000000"
-              class="input"
-            />
-          </label>
-          <label>
-            Seed (empty = random)
-            <input v-model="seed" class="input" placeholder="random" />
-          </label>
+        <div class="gen">
+          <!-- 1. Run size -->
+          <section class="gen-section">
+            <header class="gen-section-head">
+              <span class="gen-section-title">Run</span>
+              <span class="gen-section-sub muted tiny">How much to produce</span>
+            </header>
+            <div class="gen-section-body gen-row-2">
+              <label
+                class="gen-field"
+                :title="tip('How many records (rows / XML record units) to produce in this run')"
+              >
+                <span class="gen-field-label">Records</span>
+                <input
+                  v-model.number="recordCount"
+                  type="number"
+                  min="1"
+                  max="1000000"
+                  class="input"
+                />
+              </label>
+              <label
+                class="gen-field"
+                :title="tip('Optional number for repeatable output. Leave empty for a random seed each run.')"
+              >
+                <span class="gen-field-label">Seed</span>
+                <input v-model="seed" class="input" placeholder="empty = random" />
+              </label>
+            </div>
+          </section>
 
-          <div class="output-mode">
-            <div class="label">Output mode</div>
-            <label class="chk radio">
-              <input v-model="outputMode" type="radio" value="one-file" />
-              <span>
-                <strong>All records in one file</strong>
-                <span class="muted tiny block">
-                  One export (XML / CSV / TXT). Use stream for large CSV/TXT counts.
-                </span>
-              </span>
-            </label>
-            <label class="chk radio">
-              <input v-model="outputMode" type="radio" value="per-file" />
-              <span>
-                <strong>One file per record</strong>
-                <span class="muted tiny block">
-                  Each record becomes its own file. Multi-file bundles download as
-                  <strong>tar.gz</strong> (space-optimized); a single file uses ZIP. Names use
-                  Settings → File name pattern.
-                </span>
-              </span>
-            </label>
-            <p v-if="outputMode === 'per-file'" class="pattern-hint mono muted tiny">
-              Pattern: {{ fileNamePattern }}
-            </p>
-          </div>
+          <!-- 2. Output shape -->
+          <section class="gen-section">
+            <header class="gen-section-head">
+              <span class="gen-section-title">Output</span>
+              <span class="gen-section-sub muted tiny">File layout for this run</span>
+            </header>
+            <div class="gen-section-body">
+              <div class="gen-choice-list">
+                <label
+                  class="gen-choice"
+                  :class="{ on: outputMode === 'one-file' }"
+                  :title="tip('Write every generated record into a single XML, CSV, or TXT file')"
+                >
+                  <input v-model="outputMode" type="radio" value="one-file" />
+                  <span class="gen-choice-text">
+                    <strong>All records in one file</strong>
+                    <span class="muted tiny">
+                      Single {{ format.toUpperCase() }} download
+                      <template v-if="format === 'xml'">
+                        · record tag
+                        <span class="mono">{{ resolveXmlRecordTag() }}</span>
+                      </template>
+                    </span>
+                  </span>
+                </label>
+                <label
+                  class="gen-choice"
+                  :class="{ on: outputMode === 'per-file' }"
+                  :title="tip('Each record becomes its own file; multi-file bundles download as tar.gz')"
+                >
+                  <input v-model="outputMode" type="radio" value="per-file" />
+                  <span class="gen-choice-text">
+                    <strong>One file per record</strong>
+                    <span class="muted tiny">
+                      Multi-file → tar.gz · single → ZIP
+                    </span>
+                  </span>
+                </label>
+              </div>
+              <p v-if="outputMode === 'per-file'" class="muted tiny mono gen-hint">
+                Name pattern: {{ fileNamePattern }}
+              </p>
 
-          <label class="chk">
-            <input v-model="ciMode" type="checkbox" />
-            CI mode (ignore live history)
-          </label>
-          <label class="chk">
-            <input v-model="useDataThemes" type="checkbox" @change="persistDataThemes" />
-            Use data themes
-            <span v-if="themeBlend.length" class="muted tiny">
-              ({{ themeBlend.map((b) => b.name || b.themeId.slice(0, 6)).join(' + ') }})
-            </span>
-          </label>
-          <label v-if="outputMode === 'one-file' && streamSupported" class="chk">
-            <input v-model="streamMode" type="checkbox" />
-            Stream generate (large counts → one file)
-          </label>
-          <label
-            v-if="isTabularFormat && outputMode === 'one-file'"
-            class="chk"
-          >
-            <input v-model="csvMultiRow" type="checkbox" />
-            Multiple data rows ({{ format === 'csv' ? 'CSV' : 'TXT' }})
-          </label>
-          <label
-            v-if="format === 'csv' && outputMode === 'one-file' && csvMultiRow"
-            class="chk gold"
-          >
-            <input v-model="csvTieOn" type="checkbox" />
-            Tie keys across rows (lock schema samples)
-          </label>
-          <label v-if="format === 'csv'">
-            CSV layout
-            <select v-model="csvLayoutMode" class="input">
-              <option value="single-header">Single header</option>
-              <option value="entity-sections">Entity sections</option>
-              <option value="per-key-sections">Per-key sections</option>
-            </select>
-          </label>
-          <label v-if="isTabularFormat">
-            Flatten delimiter
-            <input v-model="csvDelim" class="input" />
-          </label>
-          <label v-if="isTabularFormat" class="chk">
-            <input v-model="csvNestedAsJson" type="checkbox" />
-            Nested as JSON
-          </label>
-          <p v-if="format === 'txt'" class="muted tiny">
-            TXT export: tab-separated header line, then one value line per record.
-          </p>
-          <p v-if="format === 'xml'" class="muted tiny">
-            Root / record tags are editable next to the schema name (saved with the schema).
-          </p>
-          <label v-if="format === 'xml'" class="chk">
-            <input
-              v-model="xmlSelfClosing"
-              type="checkbox"
-              @change="persistXmlSettings"
-            />
-            Self-closing empty tags
-            <span class="muted tiny" style="margin-left: 0.25rem"
-              >(&lt;tag/&gt; vs &lt;tag&gt;&lt;/tag&gt;)</span
+              <div class="gen-checks">
+                <label
+                  v-if="outputMode === 'one-file' && streamSupported"
+                  class="chk"
+                  :title="tip('Stream large CSV/TXT runs row-by-row so the full result is not held in memory')"
+                >
+                  <input v-model="streamMode" type="checkbox" />
+                  Stream large counts
+                </label>
+                <label
+                  v-if="isTabularFormat && outputMode === 'one-file'"
+                  class="chk"
+                  :title="tip('Write multiple data lines under one header row (tabular export)')"
+                >
+                  <input v-model="csvMultiRow" type="checkbox" />
+                  Multiple data rows
+                </label>
+                <label
+                  v-if="format === 'xml'"
+                  class="chk"
+                  :title="tip('Default for empty XML elements: self-closing vs open pair. Override per field under Field settings → Constraints.')"
+                >
+                  <input
+                    v-model="xmlSelfClosing"
+                    type="checkbox"
+                    @change="persistXmlSettings"
+                  />
+                  Self-closing empty tags
+                </label>
+              </div>
+
+              <div v-if="format === 'csv' || isTabularFormat" class="gen-format-opts">
+                <label
+                  v-if="format === 'csv'"
+                  class="gen-field"
+                  :title="tip('How nested objects are laid out in the CSV export')"
+                >
+                  <span class="gen-field-label">CSV layout</span>
+                  <select v-model="csvLayoutMode" class="input">
+                    <option value="single-header">Single header</option>
+                    <option value="entity-sections">Entity sections</option>
+                    <option value="per-key-sections">Per-key sections</option>
+                  </select>
+                </label>
+                <label
+                  v-if="isTabularFormat"
+                  class="gen-field"
+                  :title="tip('Character used to flatten nested paths into column names')"
+                >
+                  <span class="gen-field-label">Flatten delimiter</span>
+                  <input v-model="csvDelim" class="input" />
+                </label>
+                <label
+                  v-if="isTabularFormat"
+                  class="chk"
+                  :title="tip('Store nested objects as JSON strings in one cell instead of flattening')"
+                >
+                  <input v-model="csvNestedAsJson" type="checkbox" />
+                  Nested as JSON
+                </label>
+              </div>
+              <p class="muted tiny gen-hint">
+                Per-field mode / empty chance / themes → <strong>Field settings</strong>
+              </p>
+            </div>
+          </section>
+
+          <!-- 3. Data sources -->
+          <section class="gen-section">
+            <header class="gen-section-head">
+              <span class="gen-section-title">Data sources</span>
+              <span class="gen-section-sub muted tiny">What fills values (after field enums)</span>
+            </header>
+            <div class="gen-section-body gen-checks">
+              <label
+                class="chk"
+                :title="tip('Skip live history, themes, and custom lists — only enums, samples, and synthesis')"
+              >
+                <input v-model="ciMode" type="checkbox" />
+                CI mode (ignore history / themes / custom)
+              </label>
+              <label
+                class="chk"
+                :title="tip('Use Data packs themes for fields that have a Theme category')"
+              >
+                <input v-model="useDataThemes" type="checkbox" @change="persistDataThemes" />
+                Use data themes
+                <span v-if="themeBlend.length" class="muted tiny">
+                  ({{ themeBlend.map((b) => b.name || b.themeId.slice(0, 6)).join(' + ') }})
+                </span>
+              </label>
+              <label
+                class="chk"
+                :title="tip('Optional: save individual field values from this Generate into the history bank. Full rows/files are never stored. Off by default.')"
+              >
+                <input v-model="recordGeneratedHistory" type="checkbox" :disabled="ciMode" />
+                Remember field values in history bank
+              </label>
+            </div>
+          </section>
+
+          <!-- 4. Archive -->
+          <section class="gen-section">
+            <header class="gen-section-head">
+              <span class="gen-section-title">Archive</span>
+              <span class="gen-section-sub muted tiny">Optional · wrap download in a folder</span>
+            </header>
+            <div class="gen-section-body gen-checks">
+              <label
+                class="chk"
+                :title="tip('Download as .tar with files under a directory named after the schema (or source folder)')"
+              >
+                <input
+                  type="checkbox"
+                  :checked="archiveTar"
+                  @change="setArchiveTar($event.target.checked)"
+                />
+                Archive (.tar)
+              </label>
+              <label
+                class="chk"
+                :title="tip('Download as .tar.gz with files under a directory named after the schema (or source folder)')"
+              >
+                <input
+                  type="checkbox"
+                  :checked="archiveTarGz"
+                  @change="setArchiveTarGz($event.target.checked)"
+                />
+                Compressed archive (.tar.gz)
+              </label>
+              <p v-if="archiveTar || archiveTarGz" class="muted tiny mono gen-hint">
+                {{ resolveArchiveDirName() }}{{ archiveTarGz ? '.tar.gz' : '.tar' }}
+                · files in
+                <strong>{{ resolveArchiveDirName() }}/</strong>
+              </p>
+            </div>
+          </section>
+
+          <!-- 5. Actions -->
+          <section class="gen-section gen-section-actions">
+            <div class="gen-section-body gen-actions">
+              <button
+                class="btn btn-primary full"
+                :disabled="generating"
+                :title="tip('Generate from seed and download immediately')"
+                @click="generate"
+              >
+                {{ generateButtonLabel }}
+              </button>
+              <button
+                v-if="active"
+                class="btn btn-ghost full"
+                :title="tip('Download the schema design you are editing (sample values only — not a seed Generate)')"
+                @click="downloadDesignOutput"
+              >
+                Download design sample
+              </button>
+              <button
+                v-if="outputMode === 'one-file' && lastGenerated?.records?.length"
+                class="btn btn-ghost full"
+                :title="tip('Pack the last generate as XML + CSV + TXT in one archive')"
+                @click="downloadArchiveMulti"
+              >
+                Multi-format archive (XML+CSV+TXT)
+              </button>
+            </div>
+            <div
+              v-if="lastReport"
+              class="gen-report muted tiny"
+              :title="tip('Stats from the last generate: fill sources, null rate, timing')"
             >
-          </label>
-          <button class="btn btn-primary full" :disabled="generating" @click="generate">
-            {{ generateButtonLabel }}
-          </button>
-          <button
-            v-if="outputMode === 'one-file'"
-            class="btn btn-ghost full"
-            :disabled="!previewText"
-            @click="downloadPreview"
-          >
-            Download preview
-          </button>
-          <button
-            v-if="outputMode === 'one-file'"
-            class="btn btn-ghost full"
-            :disabled="!lastGenerated?.records"
-            @click="downloadArchiveMulti"
-          >
-            Multi-format archive (XML+CSV+TXT)
-          </button>
-          <div v-if="lastReport" class="report muted tiny">
-            history hit {{ lastReport.historyHitRate }}% · theme
-            {{ lastReport.themeHits ?? 0 }} · null {{ lastReport.nullRatePct }}% · synth
-            {{ lastReport.synthesized }} · enum {{ lastReport.enumHits }} · ms
-            {{ lastReport.ms }}
-          </div>
-          <div v-else-if="lastGenerated?.perFile" class="report muted tiny">
-            Per-file run · {{ lastGenerated.written }} file(s) in
-            {{ lastGenerated.archiveFormat || 'archive' }} · seed
-            {{ lastGenerated.seed }}
-          </div>
+              history {{ lastReport.historyHitRate }}% · theme
+              {{ lastReport.themeHits ?? 0 }} · null {{ lastReport.nullRatePct }}% · synth
+              {{ lastReport.synthesized }} · enum {{ lastReport.enumHits }} ·
+              {{ lastReport.ms }}ms
+            </div>
+            <div
+              v-else-if="lastGenerated?.perFile"
+              class="gen-report muted tiny"
+              :title="tip('Summary of the last per-file generate archive')"
+            >
+              Per-file · {{ lastGenerated.written }} file(s) ·
+              {{ lastGenerated.archiveFormat || 'archive' }} · seed
+              {{ lastGenerated.seed }}
+            </div>
+          </section>
         </div>
-
-        <pre v-else class="code">{{ previewText || '// Generate or switch tabs to preview' }}</pre>
 
         </template>
 
         <template v-else-if="workspaceMode === 'package'">
           <div class="ptabs">
-            <button class="on">Generate</button>
+            <button
+              type="button"
+              class="on"
+              :title="tip('Generate package variants from the open package')"
+            >
+              Generate
+            </button>
           </div>
           <div class="gen">
             <div v-if="!activePackage" class="muted tiny">Select a package first.</div>
             <template v-else>
-              <label>
+              <label
+                :title="tip('How many package variants to generate (each variant is one “record”)')"
+              >
                 Records (= package variants)
                 <input
                   v-model.number="packageCount"
@@ -3759,22 +6553,33 @@ const enumText = computed({
                 />
               </label>
               <p class="muted tiny">Interactive cap: 100 variants. High volume → Delivery later.</p>
-              <label>
+              <label
+                :title="tip('Optional seed for repeatable package variants. Empty = random.')"
+              >
                 Seed (empty = random)
                 <input v-model="seed" class="input" placeholder="random" />
               </label>
-              <label class="chk">
+              <label
+                class="chk"
+                :title="tip('Skip history, themes, and custom lists for deterministic CI-style package data')"
+              >
                 <input v-model="ciMode" type="checkbox" />
                 CI mode (ignore live history / themes / custom)
               </label>
-              <label class="chk">
+              <label
+                class="chk"
+                :title="tip('Fill member fields from Data packs themes when categories are set')"
+              >
                 <input v-model="useDataThemes" type="checkbox" @change="persistDataThemes" />
                 Use data themes
                 <span v-if="themeBlend.length" class="muted tiny">
                   ({{ themeBlend.map((b) => b.name || b.themeId.slice(0, 6)).join(' + ') }})
                 </span>
               </label>
-              <label class="chk">
+              <label
+                class="chk"
+                :title="tip('Write generated field values into value history for later fills (off by default)')"
+              >
                 <input v-model="packageRecordHistory" type="checkbox" :disabled="ciMode" />
                 Record value history from this run
               </label>
@@ -3817,33 +6622,50 @@ const enumText = computed({
                 </div>
                 <p class="obs-summary muted tiny">{{ packageEstimate.summary }}</p>
               </div>
-              <label class="muted tiny">
+              <label
+                class="muted tiny"
+                :title="tip('Default random / same / unique for member fields that have no per-field mode')"
+              >
                 Default field mode
                 <select v-model="packageDefaultMode" class="input">
                   <option value="random">Random</option>
-                  <option value="same">Same (sample lock)</option>
+                  <option value="same">Same (immutable across variants)</option>
                   <option value="unique">Unique across variants</option>
+                </select>
+              </label>
+              <label
+                class="muted tiny"
+                :title="tip('How each package variant is packaged: bare files, tar, or tar.gz')"
+              >
+                Output format (each package variant)
+                <select v-model="packageOutputFormat" class="input" aria-label="Package output format">
+                  <option value="itself">Itself (original / bare file)</option>
+                  <option value="tar">.tar</option>
+                  <option value="tar.gz">.tar.gz</option>
                 </select>
               </label>
               <button
                 class="btn btn-primary full"
                 :disabled="packageWorking"
                 :aria-busy="packageWorking"
+                :title="tip('Generate package variants and download the bundle')"
                 @click="runPackageGenerate"
               >
                 {{ packageWorking ? 'Working…' : 'Generate' }}
               </button>
               <p class="muted tiny">
-                Multi-variant downloads use <strong>tar.gz</strong>; a single variant uses ZIP.
-                Package generate uses <strong>member schemas</strong> (Edit member schema) — not the
-                Schemas “preview” umbrella.
+                Multi-variant download bundle defaults to <strong>tar.gz</strong> (single → ZIP or bare
+                file). Use Output format for each variant’s form. Field mode
+                <strong>same</strong> keeps values immutable across records.
               </p>
             </template>
           </div>
         </template>
 
         <template v-else-if="workspaceMode === 'delivery'">
-          <div class="ptabs"><button class="on">Jobs</button></div>
+          <div class="ptabs">
+            <button type="button" class="on" :title="tip('Delivery job tools')">Jobs</button>
+          </div>
           <div class="gen">
             <p class="muted tiny">
               Create a plan in the center panel, then run chunks from the left job list.
@@ -3851,15 +6673,63 @@ const enumText = computed({
             <p class="muted tiny">
               Artifacts land under <span class="mono">data/exports/delivery/</span>.
             </p>
-            <button class="btn btn-ghost full" @click="refreshDeliveryJobs">Refresh</button>
+            <button
+              class="btn btn-ghost full"
+              :title="tip('Reload delivery job status from the server')"
+              @click="refreshDeliveryJobs"
+            >
+              Refresh
+            </button>
           </div>
         </template>
 
         <template v-else-if="workspaceMode === 'archive'">
-          <div class="ptabs"><button class="on">Entry</button></div>
-          <pre class="code">{{ archivePreview || '// Select an entry from the list' }}</pre>
+          <div class="ptabs">
+            <button type="button" class="on" :title="tip('Contents of the selected archive entry')">
+              Entry
+            </button>
+          </div>
+          <pre
+            class="code"
+            :title="tip('Text preview of the selected archive file')"
+          >{{ archivePreview || '// Select an entry from the list' }}</pre>
         </template>
       </aside>
+    </div>
+
+    <!-- Docked fallback only when the pop-out window is blocked -->
+    <div
+      v-if="showSchemaFloat"
+      class="schema-float"
+      :style="schemaFloatStyle"
+      role="dialog"
+      aria-label="Live schema preview (docked)"
+    >
+      <div class="schema-float-head" @pointerdown="onSchemaFloatDragDown">
+        <span class="schema-float-title">
+          Live preview
+          <span class="muted tiny">· docked · drag resets size</span>
+        </span>
+        <div class="schema-float-actions">
+          <button
+            type="button"
+            class="btn btn-ghost tiny-btn"
+            :title="tip('Try opening outside this window again')"
+            @click="openSchemaPreviewPopout"
+          >
+            Pop out
+          </button>
+          <button
+            type="button"
+            class="btn btn-ghost tiny-btn"
+            :title="tip('Close preview')"
+            @click="closeSchemaPreview"
+          >
+            ✕
+          </button>
+        </div>
+      </div>
+      <pre class="schema-float-body mono">{{ liveSchemaPreview }}</pre>
     </div>
   </div>
 </template>
@@ -3869,6 +6739,107 @@ const enumText = computed({
   display: flex;
   flex-direction: column;
   height: 100%;
+  position: relative;
+}
+.schema-float {
+  position: fixed;
+  z-index: 80;
+  right: 1.25rem;
+  bottom: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  width: 380px;
+  height: 280px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+  background: var(--surface);
+  box-shadow:
+    0 12px 40px color-mix(in srgb, #000 35%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent);
+  overflow: hidden;
+  /* no resize handle — size resets to default whenever the popup is dragged */
+}
+.schema-float-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.4rem 0.5rem 0.4rem 0.65rem;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface-2));
+  cursor: grab;
+  user-select: none;
+  flex-shrink: 0;
+  touch-action: none;
+}
+.schema-float-head:active {
+  cursor: grabbing;
+}
+.schema-float-title {
+  font-size: 12px;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.schema-float-actions {
+  display: flex;
+  gap: 0.25rem;
+  flex-shrink: 0;
+}
+.schema-float-body {
+  margin: 0;
+  padding: 0.55rem 0.7rem;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre;
+  tab-size: 2;
+  background: var(--surface);
+  color: var(--text);
+}
+body.dragging-schema-float {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+body.dragging-schema-float * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+.top-actions .btn.on {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+}
+.settings-help-toggle {
+  grid-column: 1 / -1;
+  padding: 0.45rem 0.55rem;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface-2));
+  font-weight: 600;
+}
+.last-output-details {
+  margin-top: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.35rem 0.5rem;
+  background: var(--surface-2);
+}
+.last-output-details summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  user-select: none;
+}
+.last-output-pre {
+  margin: 0.4rem 0 0;
+  max-height: 180px;
+  overflow: auto;
+  font-size: 11px;
 }
 .top {
   display: flex;
@@ -3948,14 +6919,84 @@ const enumText = computed({
   }
 }
 .schema-head {
+  flex-direction: column;
+  align-items: stretch;
+  flex-wrap: nowrap;
+  gap: 0.45rem;
+  padding: 0.55rem 0.65rem;
+}
+.schema-head-row {
+  display: flex;
   flex-wrap: wrap;
-  gap: 0.4rem 0.6rem;
+  align-items: center;
+  gap: 0.4rem 0.55rem;
+  min-width: 0;
+}
+.schema-head-identity {
+  gap: 0.5rem 0.75rem;
+}
+.schema-title-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+  min-width: 0;
+  flex: 1 1 12rem;
+  max-width: min(28rem, 100%);
+}
+.schema-head-kicker {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  line-height: 1;
+}
+.schema-title-input {
+  max-width: none !important;
+  width: 100%;
+  font-weight: 600;
+}
+.schema-title-placeholder {
+  padding: 0.35rem 0;
+}
+.schema-head-grow {
+  flex: 1 1 auto;
+  min-width: 0.5rem;
+}
+.schema-delete-btn {
+  flex-shrink: 0;
+  margin-left: auto;
+}
+.schema-head-tools {
+  padding-top: 0.35rem;
+  border-top: 1px solid var(--border);
+  gap: 0.55rem 0.75rem;
+}
+.schema-btn-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.28rem;
+  padding: 0.2rem 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2, transparent);
+  min-width: 0;
+}
+.schema-group-label {
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  padding: 0 0.25rem;
+  opacity: 0.85;
+}
+.schema-map-btn {
+  font-weight: 600;
 }
 .xml-tag-inline {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 .xml-tag-inline .tag-input {
   width: 6.5rem;
@@ -4060,8 +7101,102 @@ const enumText = computed({
 .layout-tools {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.25rem;
+  gap: 0.4rem;
   align-items: center;
+  padding: 0.3rem 0.4rem 0.3rem 0.55rem;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface-2));
+  box-shadow:
+    0 1px 0 color-mix(in srgb, var(--accent) 20%, transparent),
+    0 4px 14px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.layout-tools-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--accent) 75%, var(--muted));
+  margin-right: 0.15rem;
+  user-select: none;
+}
+.layout-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  min-height: 2.15rem;
+  padding: 0.4rem 0.85rem;
+  border-radius: 9px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 1px 2px color-mix(in srgb, #000 18%, transparent);
+  transition:
+    transform 0.16s cubic-bezier(0.34, 1.4, 0.64, 1),
+    background 0.16s ease,
+    border-color 0.16s ease,
+    box-shadow 0.16s ease,
+    color 0.16s ease;
+}
+.layout-btn-icon {
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  opacity: 0.9;
+  transition: transform 0.18s cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+.layout-btn:hover:not(:disabled) {
+  transform: translateY(-2px) scale(1.04);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+  box-shadow:
+    0 4px 12px color-mix(in srgb, var(--accent) 22%, transparent),
+    0 1px 0 color-mix(in srgb, var(--accent) 25%, transparent);
+}
+.layout-btn:hover:not(:disabled) .layout-btn-icon {
+  transform: scale(1.15);
+}
+.layout-btn:active:not(:disabled) {
+  transform: translateY(0) scale(0.96);
+  box-shadow: 0 1px 2px color-mix(in srgb, #000 16%, transparent);
+  transition-duration: 0.08s;
+}
+.layout-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.layout-btn.on {
+  background: color-mix(in srgb, var(--accent) 22%, var(--surface));
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
+  color: var(--text);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent),
+    0 2px 8px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.layout-btn.on .layout-btn-icon {
+  color: var(--accent);
+}
+.layout-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+.layout-btn-reset:hover:not(:disabled) .layout-btn-spin {
+  animation: layout-spin 0.55s cubic-bezier(0.34, 1.3, 0.64, 1);
+}
+@keyframes layout-spin {
+  from {
+    transform: rotate(0deg) scale(1.15);
+  }
+  to {
+    transform: rotate(-360deg) scale(1.15);
+  }
 }
 .workspace-panel {
   min-height: 0;
@@ -4073,6 +7208,109 @@ const enumText = computed({
   display: flex;
   flex-direction: column;
   padding: 0.5rem 0;
+}
+.pkg-layout {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(160px, 240px) minmax(0, 1fr);
+  overflow: hidden;
+}
+.pkg-explorer {
+  border-right: 1px solid var(--border);
+  overflow: auto;
+  padding: 0.35rem 0;
+  background: var(--surface-2, var(--surface));
+}
+.pkg-explorer-title {
+  padding: 0.25rem 0.6rem;
+  font-weight: 600;
+}
+.pkg-tree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.pkg-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  padding: 0.2rem 0.4rem;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.85rem;
+  border-radius: 4px;
+}
+.pkg-tree-row:hover {
+  background: var(--surface);
+}
+.pkg-tree-row.active {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--text);
+}
+.pkg-tree-row.unsupported {
+  opacity: 0.65;
+}
+.pkg-chevron {
+  width: 0.9rem;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.pkg-icon {
+  flex-shrink: 0;
+  font-size: 0.85rem;
+}
+.pkg-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pkg-skipped {
+  padding: 0.5rem 0.6rem;
+  border-top: 1px solid var(--border);
+  margin-top: 0.35rem;
+}
+.pkg-editor {
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+.pkg-editor-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: flex-end;
+  margin: 0.5rem 0.75rem;
+}
+.pkg-name-edit {
+  flex: 1 1 140px;
+  min-width: 120px;
+}
+.pkg-content-editor {
+  width: 100%;
+  min-height: 220px;
+  resize: vertical;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  margin-top: 0.25rem;
+}
+.field-mode-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0.25rem 0;
+}
+.field-mode-row .mode-sel {
+  width: auto;
+  min-width: 9rem;
 }
 .empty-workspace {
   padding: 1.25rem 1rem;
@@ -4340,6 +7578,33 @@ body.resizing-cols * {
   border-color: var(--accent);
   color: var(--text);
 }
+.drop.disabled,
+.drop:has(input:disabled) {
+  opacity: 0.55;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+.import-pkg-block {
+  margin-bottom: 0.65rem;
+}
+.import-pkg-label {
+  margin-bottom: 0.3rem;
+}
+.import-pkg-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.35rem;
+}
+.import-pkg-row .drop-split {
+  margin-bottom: 0;
+  padding: 0.5rem 0.35rem;
+  font-size: 11px;
+  line-height: 1.25;
+}
+.side.nav-compact .import-pkg-row .drop-split {
+  font-size: 10px;
+  padding: 0.4rem 0.25rem;
+}
 .schema-list {
   list-style: none;
   margin: 0;
@@ -4413,8 +7678,8 @@ body.resizing-cols * {
   padding: 0.45rem 0.5rem;
   border-right: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
-  min-width: 9.5rem;
-  max-width: 16rem;
+  position: relative;
+  box-sizing: border-box;
 }
 .schema-table th:last-child,
 .schema-table td:last-child {
@@ -4431,6 +7696,58 @@ body.resizing-cols * {
   background: color-mix(in srgb, var(--accent) 18%, transparent);
   box-shadow: inset 0 0 0 1px var(--accent);
 }
+.schema-table .tab-col {
+  overflow: hidden;
+}
+.schema-table .row-gutter {
+  min-width: 3.75rem;
+  max-width: 4.25rem;
+  width: 3.75rem;
+  text-align: center;
+  vertical-align: middle;
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: var(--surface-2);
+  border-right: 1px solid var(--border);
+}
+.schema-table thead .row-gutter {
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  z-index: 3;
+}
+.schema-table .row-gutter .row-num {
+  display: block;
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 0.2rem;
+}
+.tab-row-drag {
+  display: block;
+  cursor: grab;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: -1px;
+  user-select: none;
+  line-height: 1;
+  margin-bottom: 0.15rem;
+  padding: 0.1rem 0;
+}
+.tab-row-drag:active {
+  cursor: grabbing;
+}
+.schema-table .value-row.tab-row-dragging {
+  opacity: 0.45;
+}
+.schema-table .value-row.tab-drop-before td {
+  box-shadow: inset 0 2px 0 0 var(--accent);
+}
+.schema-table .value-row.tab-drop-after td {
+  box-shadow: inset 0 -2px 0 0 var(--accent);
+}
+.schema-table .add-row-tr td {
+  border-bottom: none;
+  padding: 0.4rem 0.5rem;
+  vertical-align: middle;
+}
 .schema-table .col-label {
   display: block;
   margin-bottom: 0.2rem;
@@ -4441,8 +7758,12 @@ body.resizing-cols * {
 .schema-table .input.key,
 .schema-table .input.sample {
   width: 100%;
-  min-width: 7rem;
+  min-width: 0;
   font-size: 12px;
+  box-sizing: border-box;
+}
+.schema-table .input.sample {
+  resize: none;
 }
 .schema-table .col-actions {
   display: flex;
@@ -4452,11 +7773,47 @@ body.resizing-cols * {
 .schema-table .add-col-cell {
   min-width: 4.5rem;
   max-width: 5rem;
+  width: 4.5rem;
   vertical-align: middle;
   background: transparent;
 }
 .schema-table .value-row td {
   background: var(--surface);
+}
+/* Column resize handle (right edge) */
+.tab-col-resizer {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 7px;
+  bottom: 0;
+  cursor: col-resize;
+  z-index: 4;
+  touch-action: none;
+  user-select: none;
+}
+.tab-col-resizer::after {
+  content: '';
+  position: absolute;
+  top: 12%;
+  bottom: 12%;
+  left: 2px;
+  width: 2px;
+  border-radius: 1px;
+  background: transparent;
+  transition: background 0.12s ease;
+}
+.tab-col:hover .tab-col-resizer::after,
+.tab-col-resizer:hover::after {
+  background: color-mix(in srgb, var(--accent) 70%, transparent);
+}
+body.resizing-tab-col {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+body.resizing-tab-col * {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 .props-resizer {
   flex-shrink: 0;
@@ -4596,31 +7953,160 @@ body.resizing-props * {
   gap: 0.5rem;
   flex-shrink: 0;
 }
-.props-hint {
-  margin: 0 0 0.5rem;
-  padding: 0 0.15rem;
-  flex-shrink: 0;
-}
-.props-grid {
+.props-head-text {
   display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem;
-  align-items: end;
-  margin-top: 0.35rem;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+.props-path {
+  max-width: 28rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.props-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  margin-top: 0.4rem;
   overflow: auto;
   min-height: 0;
   flex: 1;
+  padding-bottom: 0.25rem;
 }
-.props-grid label {
-  font-size: 12px;
-  color: var(--muted);
+.props-section {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2, color-mix(in srgb, var(--surface) 88%, #000));
+  padding: 0.5rem 0.65rem 0.55rem;
   display: flex;
   flex-direction: column;
-  gap: 0.2rem;
-  min-width: 7rem;
+  gap: 0.4rem;
 }
-.props-grid label.wide {
-  min-width: 100%;
+.props-section-muted {
+  background: transparent;
+  border-style: dashed;
+}
+.props-section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 0.65rem;
+}
+.props-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+.props-section-sub {
+  font-weight: 400;
+}
+.props-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.props-section-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  padding: 0.05rem 0;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+.props-section-toggle:hover .props-section-title {
+  color: var(--accent);
+}
+.props-chevron {
+  width: 0.9rem;
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+.props-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.22rem;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.props-field-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+.props-field-check {
+  flex-direction: row !important;
+  align-items: flex-start !important;
+  gap: 0.45rem !important;
+  padding-top: 0.15rem;
+}
+.props-field-check .props-field-label {
+  color: var(--text);
+}
+.props-field-wide {
+  max-width: 24rem;
+}
+.props-row-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem 0.75rem;
+  align-items: start;
+}
+.props-row-4 {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.5rem 0.65rem;
+  align-items: start;
+}
+.props-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+.props-subcard {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.45rem 0.55rem 0.5rem;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.props-subcard-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.props-hint {
+  margin: 0;
+  line-height: 1.35;
+}
+.props-field textarea.input {
+  min-height: 2.6rem;
+  resize: vertical;
+}
+@media (max-width: 900px) {
+  .props-row-4 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 720px) {
+  .props-row-2,
+  .props-row-4 {
+    grid-template-columns: 1fr;
+  }
 }
 .chk {
   flex-direction: row !important;
@@ -4635,32 +8121,137 @@ body.resizing-props * {
   font-family: ui-monospace, Consolas, monospace;
   font-size: 12px;
 }
-.output-mode {
+.gen {
+  padding: 0.65rem 0.7rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  overflow: auto;
+}
+.gen-section {
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 0.55rem 0.65rem;
+  background: var(--surface-2, color-mix(in srgb, var(--surface) 88%, #000));
+  padding: 0.5rem 0.6rem 0.55rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.gen-section-actions {
+  background: transparent;
+  border-style: dashed;
+}
+.gen-section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.3rem 0.55rem;
+}
+.gen-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+.gen-section-sub {
+  font-weight: 400;
+}
+.gen-section-body {
   display: flex;
   flex-direction: column;
   gap: 0.45rem;
-  background: var(--surface-2, color-mix(in srgb, var(--surface) 80%, #000));
 }
-.output-mode .label {
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+.gen-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.22rem;
+  min-width: 0;
+  font-size: 12px;
   color: var(--muted);
 }
-.output-mode .radio {
+.gen-field-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+.gen-row-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.45rem 0.65rem;
+}
+.gen-choice-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.gen-choice {
+  display: flex !important;
+  flex-direction: row !important;
   align-items: flex-start !important;
+  gap: 0.45rem !important;
+  margin: 0;
+  padding: 0.4rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  cursor: pointer;
+  color: var(--text) !important;
 }
-.output-mode .radio input {
-  margin-top: 0.2rem;
+.gen-choice.on {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
 }
-.output-mode .block {
-  display: block;
+.gen-choice input {
   margin-top: 0.15rem;
+  flex-shrink: 0;
+}
+.gen-choice-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+  min-width: 0;
+  line-height: 1.3;
+}
+.gen-choice-text strong {
+  font-size: 12px;
+}
+.gen-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.gen-checks .chk {
+  font-size: 12px;
+}
+.gen-format-opts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.4rem 0.55rem;
+  align-items: end;
+  padding-top: 0.15rem;
+}
+.gen-format-opts .chk {
+  grid-column: 1 / -1;
+}
+.gen-hint {
+  margin: 0;
   line-height: 1.35;
+}
+.gen-actions {
+  gap: 0.4rem;
+}
+.gen-report {
+  margin-top: 0.15rem;
+  line-height: 1.4;
+  padding: 0.3rem 0.15rem 0;
+}
+@media (max-width: 720px) {
+  .gen-row-2,
+  .gen-format-opts {
+    grid-template-columns: 1fr;
+  }
 }
 .pattern-hint {
   margin: 0;
@@ -4670,19 +8261,9 @@ body.resizing-props * {
   background: var(--bg, #0b0d10);
   word-break: break-all;
 }
-.gen {
-  padding: 0.75rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.6rem;
-  overflow: auto;
-}
-.gen label {
-  font-size: 12px;
-  color: var(--muted);
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
+.archive-opts {
+  /* legacy class kept for any leftover markup */
+  display: none;
 }
 .code {
   flex: 1;
@@ -4739,6 +8320,18 @@ body.resizing-props * {
 }
 .block {
   display: block;
+}
+.badge-record {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0.05rem 0.3rem;
+  border-radius: 4px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
 }
 .badge-multi {
   margin-left: 0.35rem;
@@ -4832,6 +8425,216 @@ body.resizing-props * {
 .tiny-btn {
   font-size: 10px;
   padding: 0.15rem 0.4rem;
+}
+
+/* Data packs — Themes & Field values */
+.datapacks-side {
+  gap: 0.55rem;
+}
+.pack-subtabs button {
+  font-weight: 700;
+  padding: 0.45rem 0.5rem;
+}
+.pack-lead {
+  margin: 0 0 0.15rem;
+  line-height: 1.35;
+}
+.pack-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0.15rem 0 0.35rem;
+}
+.pack-enable {
+  font-size: 12px;
+}
+.pack-cta {
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  box-shadow: 0 1px 0 color-mix(in srgb, #000 25%, transparent),
+    0 2px 8px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+.pack-cta:hover:not(:disabled) {
+  filter: brightness(1.06);
+  transform: translateY(-1px);
+}
+.pack-cta:active:not(:disabled) {
+  transform: translateY(0);
+}
+.btn-accent {
+  background: color-mix(in srgb, var(--accent) 22%, var(--surface));
+  color: var(--text);
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+  font-weight: 650;
+  box-shadow: 0 1px 0 color-mix(in srgb, #000 18%, transparent);
+}
+.btn-accent:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 32%, var(--surface));
+  border-color: var(--accent);
+}
+.btn-outline {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  font-weight: 600;
+  box-shadow: 0 1px 0 color-mix(in srgb, #000 12%, transparent);
+}
+.btn-outline:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+.btn-outline-danger {
+  background: var(--surface);
+  color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+  font-weight: 600;
+  box-shadow: 0 1px 0 color-mix(in srgb, #000 12%, transparent);
+}
+.btn-outline-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 12%, var(--surface));
+  border-color: var(--danger);
+}
+.pack-card-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+.pack-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.55rem 0.6rem 0.5rem;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  box-shadow: 0 1px 0 color-mix(in srgb, #000 14%, transparent);
+}
+.pack-card.active {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+.pack-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+.pack-card-title {
+  margin: 0;
+  min-width: 0;
+  flex: 1;
+}
+.pack-card-title .name {
+  font-weight: 650;
+  color: var(--text);
+}
+.pack-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 0.15rem 0.4rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface-2));
+  color: var(--text);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+}
+.pack-card-meta {
+  font-size: 11px;
+  line-height: 1.3;
+}
+.pack-weight {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.pack-weight .input {
+  max-width: 5.5rem;
+}
+.pack-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.15rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--border);
+}
+.pack-action {
+  flex: 1 1 auto;
+  min-width: 5.5rem;
+  padding: 0.4rem 0.55rem;
+  font-size: 12px;
+}
+.pack-action-sm {
+  padding: 0.28rem 0.5rem;
+  font-size: 11px;
+}
+.pack-empty {
+  padding: 0.5rem 0.15rem;
+}
+.pack-cats {
+  margin: 0.25rem 0 0;
+  line-height: 1.35;
+}
+.pack-editor {
+  margin-top: 0.65rem;
+  padding: 0.65rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 2px 10px color-mix(in srgb, #000 18%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+.pack-editor-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.pack-value-list {
+  list-style: none;
+  margin: 0.25rem 0 0;
+  padding: 0;
+  max-height: 200px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.pack-value-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.45rem;
+  padding: 0.35rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2, var(--bg));
+}
+.pack-value-row .v {
+  min-width: 0;
+  word-break: break-word;
+  color: var(--text);
+  font-size: 12px;
+}
+.pack-value-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 0.3rem;
+}
+.pack-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.35rem;
+}
+.pack-editor-actions .pack-cta {
+  flex: 1 1 8rem;
 }
 .clickable {
   cursor: pointer;

@@ -18,8 +18,11 @@ UUID = re.compile(
 PHONE = re.compile(r"^[+]?[\d\s().-]{7,20}$")
 INT = re.compile(r"^-?\d+$")
 FLOAT = re.compile(r"^-?\d+\.\d+$")
+# Require a currency symbol or thousands separators — bare integers are INT, not currency.
 CURRENCY = re.compile(
-    r"^(\$|€|£)?-?\d{1,3}(,\d{3})*(\.\d+)?$|^(\$|€|£)?-?\d+(\.\d+)?$"
+    r"^(\$|€|£)-?\d{1,3}(,\d{3})*(\.\d+)?$"
+    r"|^(\$|€|£)-?\d+(\.\d+)?$"
+    r"^-?\d{1,3}(,\d{3})+(\.\d+)?$"
 )
 PERCENT = re.compile(r"^-?\d+(\.\d+)?%$")
 ALPHA = re.compile(r"^[A-Za-z]+$")

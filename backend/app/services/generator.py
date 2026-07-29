@@ -114,12 +114,83 @@ def path_exists(obj: Any, path: str) -> bool:
     return True
 
 
+def _path_to_record_tag(
+    rows: list | None, prefix: list[str] | None = None
+) -> list[str] | None:
+    """Absolute schema path to the isRecordTag field (e.g. ['catalog','book'])."""
+    prefix = list(prefix or [])
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        key = (row.get("key") or "field").strip() or "field"
+        full = prefix + [key]
+        if row.get("isRecordTag"):
+            return full
+        hit = _path_to_record_tag(_as_child_list(row.get("children")), full)
+        if hit is not None:
+            return hit
+    return None
+
+
+def normalize_tied_paths(root: list[dict], tied_paths: list[str] | None) -> list[str]:
+    """
+    Map schema-absolute tied paths onto the generated record shape.
+
+    When isRecordTag unwraps a container (e.g. catalog.book → body), UI paths like
+    ``catalog.book.author`` become ``author`` so apply_tied does not inject a
+    phantom nested catalog into each record.
+    """
+    tied = [p.strip() for p in (tied_paths or []) if p and str(p).strip()]
+    if not tied:
+        return []
+    rec_path = _path_to_record_tag(root)
+    if not rec_path:
+        return tied
+    abs_pref = ".".join(rec_path).lower()
+    out: list[str] = []
+    seen: set[str] = set()
+    for p in tied:
+        low = p.lower()
+        rel = p
+        if low == abs_pref:
+            continue
+        if low.startswith(abs_pref + "."):
+            rel = p[len(abs_pref) + 1 :].strip()
+        if not rel:
+            continue
+        k = rel.lower()
+        if k not in seen:
+            seen.add(k)
+            out.append(rel)
+    return out
+
+
 def build_tied_template(root: list[dict], tied_paths: list[str]) -> dict:
+    """
+    Build a template of same-across-records values.
+    ``tied_paths`` should already be normalize_tied_paths()'d (record-relative).
+    """
     want = {p.strip().lower() for p in tied_paths if p and p.strip()}
     template: dict = {}
+    if not want:
+        return template
+
+    rec = _find_record_tag_field(root)
+    if rec is not None:
+        kids = _as_child_list(rec.get("children"))
+        kind = rec.get("kind") or "value"
+        # Match one_record unwrap: walk body only with relative paths
+        if kids or kind in ("object", "array"):
+            walk_rows = kids
+        else:
+            walk_rows = [rec]
+    else:
+        walk_rows = root
 
     def walk(rows: list[dict], parent: list[str]) -> None:
         for row in rows:
+            if not isinstance(row, dict):
+                continue
             leaf = (row.get("key") or "field").strip() or "field"
             full = parent + [leaf]
             pk = ".".join(full)
@@ -130,9 +201,9 @@ def build_tied_template(root: list[dict], tied_paths: list[str]) -> dict:
                     if raw is not None and str(raw) != "":
                         set_value_at_path(template, pk, coerce_sample(str(raw)))
             elif row.get("children"):
-                walk(row["children"], full)
+                walk(_as_child_list(row.get("children")), full)
 
-    walk(root, [])
+    walk(walk_rows if isinstance(walk_rows, list) else [], [])
     return template
 
 
@@ -141,6 +212,7 @@ def apply_tied(source: dict, target: dict, paths: list[str]) -> dict:
         p = p.strip()
         if not p or not path_exists(source, p):
             continue
+        # Only apply when the path matches the unwrapped record shape (no phantom nests)
         set_value_at_path(target, p, get_value_at_path(source, p))
     return target
 
@@ -378,6 +450,19 @@ def _eligible(pool: list[str], used: set[str], require_unique: bool) -> list[str
     return [v for v in pool if v not in used]
 
 
+def _find_record_tag_field(rows: list | None) -> dict | None:
+    """First schema field with isRecordTag=True (depth-first)."""
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        if row.get("isRecordTag"):
+            return row
+        hit = _find_record_tag_field(_as_child_list(row.get("children")))
+        if hit is not None:
+            return hit
+    return None
+
+
 class Generator:
     def __init__(
         self,
@@ -542,20 +627,38 @@ class Generator:
                 and self.theme_prefer is not False
             ):
                 try:
-                    theme_pool = _dedupe_pool(
-                        [
-                            str(v).strip()
-                            for v in (self.theme_lookup(theme_cat) or [])
-                            if str(v).strip()
-                        ]
-                    )
+                    # Optional field themeId: specific pack, or blend/all active packs
+                    field_theme = (row.get("themeId") or "").strip() or None
+                    if field_theme in ("blend", "*", "all"):
+                        field_theme = None
+                    try:
+                        raw_pool = self.theme_lookup(theme_cat, field_theme)
+                    except TypeError:
+                        # Older single-arg lookups still work
+                        raw_pool = self.theme_lookup(theme_cat)
+                    # Keep weighted copies from blend (do not dedupe — weights would collapse)
+                    theme_pool = [
+                        str(v).strip() for v in (raw_pool or []) if str(v).strip()
+                    ]
                 except Exception:
                     theme_pool = []
             custom_pool = self._pool_for_keys(path, row, self.custom_lookup)
             history_pool = self._pool_for_keys(path, row, self.history_lookup)
 
-        pattern_samples = theme_pool + custom_pool + history_pool
-        pattern = detect_pattern(pattern_samples, row.get("sampleValue"))
+        # Extra design samples (CSV/TXT multi-row editor stores sampleValues[])
+        design_samples: list[str] = []
+        raw_sv = row.get("sampleValues")
+        if isinstance(raw_sv, list):
+            design_samples = [
+                str(v).strip() for v in raw_sv if v is not None and str(v).strip()
+            ]
+        primary_sample = row.get("sampleValue")
+        if primary_sample is None or not str(primary_sample).strip():
+            primary_sample = design_samples[0] if design_samples else None
+
+        # Mutate/synth pattern detection uses design samples only (no curated pool leak)
+        pattern_samples = list(design_samples)
+        pattern = detect_pattern(pattern_samples, primary_sample)
 
         re_pat = None
         if row.get("pattern"):
@@ -565,6 +668,11 @@ class Generator:
                 re_pat = None
                 self.stats["patternCompileErrors"] += 1
 
+        def _matches_pattern(val: str) -> bool:
+            if not re_pat:
+                return True
+            return bool(re_pat.search(val))
+
         def try_stage(pool: list[str], source: str) -> tuple[str | None, str | None]:
             eligible = _eligible(pool, used, require_unique)
             if not eligible:
@@ -573,7 +681,7 @@ class Generator:
                 candidate = _pick(self.rand, eligible)
                 candidate = self._apply_length(row, candidate)
                 candidate = self._apply_numeric(row, candidate, pattern)
-                if re_pat and not re_pat.search(candidate):
+                if not _matches_pattern(candidate):
                     self.stats["patternRetries"] += 1
                     continue
                 if require_unique and candidate in used:
@@ -598,7 +706,7 @@ class Generator:
 
         # --- Stage 5–6: mutate sample then synthesize (with unique retries) ---
         if raw is None:
-            for attempt in range(24):
+            for attempt in range(48):
                 cand_source = "synth"
                 candidate = None
                 if (
@@ -622,25 +730,64 @@ class Generator:
                 candidate = self._apply_length(row, candidate)
                 candidate = self._apply_numeric(row, candidate, pattern)
 
-                if re_pat and not re_pat.search(candidate):
+                # Hard pattern: never accept a non-matching value
+                if not _matches_pattern(candidate):
                     self.stats["patternRetries"] += 1
-                    if attempt < 23:
-                        continue
-                    self.stats["patternFailures"] += 1
+                    continue
 
                 if require_unique and candidate in used:
-                    if attempt < 23:
+                    if attempt < 47:
                         continue
                     self.stats["uniqueExhausted"] += 1
+                    # still accept unique-exhausted value only if pattern matches
 
                 raw = candidate
                 source = cand_source
                 break
 
         if raw is None:
-            raw = self._apply_length(
-                row, _synthesize(self.rand, pattern, used, self.epoch_ms)
-            )
+            # Prefer design samples that already satisfy the pattern
+            candidates = []
+            if primary_sample is not None and str(primary_sample).strip():
+                candidates.append(str(primary_sample).strip())
+            candidates.extend(design_samples)
+            for s in candidates:
+                if not _matches_pattern(s):
+                    continue
+                if require_unique and s in used:
+                    continue
+                raw = self._apply_length(row, s)
+                if not _matches_pattern(raw):
+                    continue
+                source = "mutate"
+                break
+
+        if raw is None:
+            # Last synth attempts still under hard pattern
+            for _ in range(64):
+                candidate = self._apply_length(
+                    row,
+                    _synthesize(
+                        self.rand,
+                        pattern,
+                        used if require_unique else set(),
+                        self.epoch_ms,
+                    ),
+                )
+                candidate = self._apply_numeric(row, candidate, pattern)
+                if not _matches_pattern(candidate):
+                    self.stats["patternRetries"] += 1
+                    continue
+                if require_unique and candidate in used:
+                    continue
+                raw = candidate
+                source = "synth"
+                break
+
+        if raw is None:
+            # Impossible / unsatisfiable pattern: empty string rather than wrong data
+            self.stats["patternFailures"] += 1
+            raw = ""
             source = "synth"
 
         if require_unique:
@@ -690,6 +837,25 @@ class Generator:
         return obj
 
     def one_record(self) -> dict:
+        """
+        Build one generated record object.
+
+        If a field is marked isRecordTag and has children (container), the record
+        body is that field's children (unwrapped). Callers place bodies into the
+        full schema tree via ``assemble_schema_document``.
+
+        Body is generated with an empty path prefix so field keys and tied paths
+        match the unwrapped record (``author``, not ``catalog.book.author``).
+        """
+        rec = _find_record_tag_field(self.root)
+        if rec:
+            kids = _as_child_list(rec.get("children"))
+            kind = rec.get("kind") or "value"
+            if kids or kind in ("object", "array"):
+                return self._object(kids, [])
+            # Record tag on a scalar value field — still emit a one-key object
+            key = (rec.get("key") or "field").strip() or "field"
+            return {key: self._leaf(rec, [])}
         return self._object(self.root, [])
 
     def report(self, record_count: int, ms: int) -> dict:
@@ -706,6 +872,66 @@ class Generator:
             "recordCount": record_count,
             "ms": ms,
         }
+
+
+def _nest_at_path(path: list[str], value: Any) -> dict:
+    """Build ``{a: {b: value}}`` for path ``['a','b']``."""
+    if not path:
+        return value if isinstance(value, dict) else {"value": value}
+    doc: dict = {}
+    cur = doc
+    for part in path[:-1]:
+        nxt: dict = {}
+        cur[part] = nxt
+        cur = nxt
+    cur[path[-1]] = value
+    return doc
+
+
+def assemble_schema_document(
+    schema: dict,
+    records: list[dict],
+    *,
+    xml_root_tag: str | None = None,
+) -> dict | list:
+    """
+    Place generated records into the schema tree shape the user edits.
+
+    With isRecordTag at path catalog.book and N bodies:
+      { "catalog": { "book": [ body1, body2, ... ] } }
+    Optionally rename the outermost key to xmlRootTag (document root label).
+
+    Without isRecordTag:
+      N=1 → full tree dict (matches design preview)
+      N>1 → list of full trees (export wraps with root/record tags)
+    """
+    root = schema.get("root") or []
+    records = list(records or [])
+    rec_path = _path_to_record_tag(root)
+    root_label = (xml_root_tag or schema.get("xmlRootTag") or "").strip()
+
+    if rec_path:
+        bodies = records
+        doc = _nest_at_path(rec_path, bodies)
+        # Rename outermost element when user set xmlRootTag (e.g. catalog → DataForge)
+        if root_label and isinstance(doc, dict) and len(doc) == 1:
+            only = next(iter(doc))
+            if only != root_label:
+                doc = {root_label: doc[only]}
+        return doc
+
+    if len(records) == 1:
+        tree = records[0] if isinstance(records[0], dict) else {"value": records[0]}
+        # Optional outer rename: wrap under xmlRootTag only when tree isn't already that key
+        if root_label and isinstance(tree, dict):
+            if len(tree) == 1 and next(iter(tree)) == root_label:
+                return tree
+            # Design preview wraps tree fields under xmlRootTag — keep tree as-is for
+            # serialize document mode (outer tag applied at XML layer).
+            return tree
+        return tree
+
+    return records
 
 
 def generate_records(
@@ -728,7 +954,7 @@ def generate_records(
             f"(requested {count:,}). Use stream generate or lower the count."
         )
     root = schema.get("root") or []
-    tied = [p.strip() for p in (schema.get("csvTiedFieldPaths") or []) if p and str(p).strip()]
+    tied = normalize_tied_paths(root, schema.get("csvTiedFieldPaths"))
     gen = Generator(
         root,
         seed=seed,
@@ -752,14 +978,17 @@ def generate_records(
         records.append(rec)
 
     ms = int((time.time() - started) * 1000)
+    document = assemble_schema_document(schema, records)
     return {
         "records": records,
+        "document": document,
         "recordCount": len(records),
         "seed": gen.seed,
         "ciMode": ci_mode,
         "ms": ms,
         "report": gen.report(len(records), ms),
         "historyBuffer": gen.history_buffer,
+        "hasRecordTag": _path_to_record_tag(root) is not None,
     }
 
 
@@ -777,7 +1006,7 @@ def iter_records(
     """Yield records one by one (for stream / per-file)."""
     count = max(MIN_GENERATE_RECORDS, min(int(record_count or 1), MAX_GENERATE_RECORDS))
     root = schema.get("root") or []
-    tied = [p.strip() for p in (schema.get("csvTiedFieldPaths") or []) if p and str(p).strip()]
+    tied = normalize_tied_paths(root, schema.get("csvTiedFieldPaths"))
     gen = Generator(
         root,
         seed=seed,

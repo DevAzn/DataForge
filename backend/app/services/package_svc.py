@@ -21,16 +21,19 @@ from app.services import export_fmt, generator, infer
 MAX_TEXT = 25 * 1024 * 1024
 MAX_NEST = 6
 
-TEXT_EXTS = {
+# Product surface (import/edit): XML, CSV, TXT only.
+SUPPORTED_TEXT_EXTS = {".xml", ".csv", ".txt"}
+
+# Legacy extensions still recognized by detect_format helpers elsewhere; not imported as members.
+LEGACY_TEXT_EXTS = {
     ".json",
     ".jsonl",
     ".ndjson",
-    ".xml",
-    ".csv",
     ".yml",
     ".yaml",
-    ".txt",
 }
+
+TEXT_EXTS = SUPPORTED_TEXT_EXTS | LEGACY_TEXT_EXTS
 
 
 def now_iso() -> str:
@@ -88,9 +91,71 @@ def detect_nested_format(name: str) -> str | None:
     return None
 
 
-def is_likely_text(name: str) -> bool:
+def is_supported_text(name: str) -> bool:
+    """Product-supported editable members: xml / csv / txt only."""
     lower = name.lower()
-    return any(lower.endswith(e) for e in TEXT_EXTS)
+    return any(lower.endswith(e) for e in SUPPORTED_TEXT_EXTS)
+
+
+def is_likely_text(name: str) -> bool:
+    """Backward-compat alias — product import uses supported extensions only."""
+    return is_supported_text(name)
+
+
+def skip_reason_for_name(name: str, *, too_large: bool = False) -> str:
+    if too_large:
+        return "too large"
+    lower = name.lower()
+    if any(lower.endswith(e) for e in LEGACY_TEXT_EXTS):
+        return "unsupported format (xml/csv/txt only)"
+    if detect_nested_format(name):
+        return "archive expand failed"
+    return "unsupported format (xml/csv/txt only)"
+
+
+def build_path_tree(paths: list[str]) -> list[dict[str, Any]]:
+    """
+    Nested explorer tree from flat POSIX paths (VS Code-like).
+    Each node: { name, path, kind: 'dir'|'file', children? }
+    """
+    root: dict[str, Any] = {"name": "", "path": "", "kind": "dir", "children": {}}
+
+    def ensure_dir(node: dict, name: str, full: str) -> dict:
+        kids = node.setdefault("children", {})
+        if name not in kids:
+            kids[name] = {"name": name, "path": full, "kind": "dir", "children": {}}
+        return kids[name]
+
+    for raw in paths:
+        p = normalize_path(raw)
+        if not p:
+            continue
+        parts = p.split("/")
+        node = root
+        acc: list[str] = []
+        for i, part in enumerate(parts):
+            acc.append(part)
+            full = "/".join(acc)
+            if i == len(parts) - 1:
+                kids = node.setdefault("children", {})
+                kids[part] = {"name": part, "path": full, "kind": "file", "children": {}}
+            else:
+                node = ensure_dir(node, part, full)
+
+    def freeze(node: dict) -> dict[str, Any]:
+        kids_map = node.get("children") or {}
+        children = [freeze(kids_map[k]) for k in sorted(kids_map.keys())]
+        out: dict[str, Any] = {
+            "name": node["name"],
+            "path": node["path"],
+            "kind": node["kind"],
+        }
+        if node["kind"] == "dir" or children:
+            out["children"] = children
+        return out
+
+    top = freeze(root).get("children") or []
+    return top
 
 
 def outer_from_name(name: str) -> tuple[str, str]:
@@ -181,11 +246,11 @@ def expand_files(
             except Exception:
                 skipped.append(full)
             continue
-        if not is_likely_text(name):
-            skipped.append(full)
+        if not is_supported_text(name):
+            skipped.append(f"{full} ({skip_reason_for_name(name)})")
             continue
         if len(content) > MAX_TEXT:
-            skipped.append(f"{full} (too large)")
+            skipped.append(f"{full} ({skip_reason_for_name(name, too_large=True)})")
             continue
         result.append((full, content))
     return result
@@ -269,11 +334,11 @@ def import_package_from_bytes(
             skipped.append(path)
 
     if not pending:
-        reasons = ", ".join(skipped[:12]) if skipped else "no text files found"
+        reasons = ", ".join(skipped[:12]) if skipped else "no supported files found"
         more = f" (+{len(skipped) - 12} more)" if len(skipped) > 12 else ""
         raise ValueError(
             f"Package import produced no text members ({reasons}{more}). "
-            "Import text JSON/XML/CSV/YAML files or an archive that contains them."
+            "Import XML/CSV/TXT files or a .tar / .tar.gz archive that contains them."
         )
 
     is_multifile = len(pending) > 1
@@ -453,17 +518,23 @@ def estimate_output(package: dict[str, Any], record_count: int) -> dict[str, Any
 
 
 def import_uploaded_files(files: list[tuple[str, bytes]]) -> dict[str, Any]:
-    """Multi-file upload (flat names) or single archive."""
+    """
+    Multi-file upload (flat names or relative paths from folder picker)
+    or single archive.
+    """
     if len(files) == 1:
         name, raw = files[0]
         outer_fmt, _ = outer_from_name(name)
         if outer_fmt != "folder":
             return import_uploaded_archive(name, raw)
-    entries = [(basename(n), b) for n, b in files]
+    # Preserve nested relative paths (webkitdirectory / multi-select with paths).
+    entries = [(normalize_path(n) or basename(n), b) for n, b in files]
+    # Common root folder name when all paths share a top segment
+    tops = {(normalize_path(n) or "").split("/")[0] for n, _ in files if normalize_path(n)}
     pkg_name = (
         strip_archive_extensions(files[0][0])
         if len(files) == 1
-        else f"package-{now_iso()[:10]}"
+        else (next(iter(tops)) if len(tops) == 1 else f"package-{now_iso()[:10]}")
     )
     return import_package_from_bytes(
         package_name=pkg_name,
@@ -514,6 +585,34 @@ def _rel_to(file_path: str, folder: str) -> str:
     return file_path
 
 
+def resolve_variant_format(
+    package_outer: str,
+    package_ext: str | None,
+    output_format: str | None,
+    *,
+    text_member_count: int = 1,
+) -> tuple[str, str | None]:
+    """
+    Map user outputFormat → (outer_format, outer_extension) for each package variant.
+
+    - tar / tar.gz / zip: force that form
+    - itself / None: keep package original outer form
+    - single supported file imported as folder → emit bare file (outer_format="file")
+    """
+    of = (output_format or "itself").lower().strip()
+    if of in ("tar.gz", "tgz"):
+        return "tar.gz", ".tar.gz"
+    if of == "tar":
+        return "tar", ".tar"
+    if of == "zip":
+        return "zip", ".zip"
+    # itself
+    outer = package_outer or "folder"
+    if outer == "folder" and text_member_count == 1:
+        return "file", None
+    return outer, package_ext
+
+
 def emit_variant_bytes(
     *,
     outer_format: str,
@@ -523,7 +622,7 @@ def emit_variant_bytes(
     package_name: str,
     index: int,
 ) -> tuple[str, bytes]:
-    """Return (file_name, archive_or_folder_zip_bytes)."""
+    """Return (file_name, archive_or_file_bytes)."""
     files: dict[str, bytes | str] = {p: c for p, c in text_entries}
     nested_sorted = sorted(
         nested, key=lambda n: -len(n.get("folderPath", "").split("/"))
@@ -547,6 +646,22 @@ def emit_variant_bytes(
     flat = list(files.items())
     safe = re.sub(r'[<>:"/\\|?*]', "_", package_name) or "package"
     pad = f"{index:04d}"
+
+    # Bare single file (itself on single-member folder import)
+    if outer_format == "file":
+        if len(flat) == 1:
+            path, content = flat[0]
+            data = content if isinstance(content, bytes) else content.encode("utf-8")
+            base = basename(path) or f"{safe}_{pad}.txt"
+            # Keep original name; for multi-variant distinguish by prefix
+            stem, dot, ext = base.rpartition(".")
+            if dot:
+                out_name = f"{stem}_{pad}.{ext}"
+            else:
+                out_name = f"{base}_{pad}"
+            return out_name, data
+        # Fall through to zip folder if unexpected multi-file
+        outer_format = "folder"
 
     if outer_format == "folder":
         # Zip of folder tree as package_NNNN/
@@ -575,9 +690,12 @@ def generate_package_variants(
     theme_lookup=None,
     theme_prefer: bool = True,
     settings: dict | None = None,
+    output_format: str | None = "itself",
+    bundle_format: str | None = None,
 ) -> dict[str, Any]:
     """
-    Generate N full package variants. Returns archive (ZIP or tar.gz) of variants.
+    Generate N full package variants. Returns archive (ZIP / tar / tar.gz) of variants
+    or a single bare file when N=1 and output is itself on a single-member package.
     Does not store generated content in SQLite.
     """
     hydrated = db.get_package_hydrated(package_id)
@@ -593,6 +711,13 @@ def generate_package_variants(
     default_mode = default_field_mode or "random"
     hist_lookup = history_lookup or (lambda _k: [])
     cust_lookup = custom_lookup or (lambda _k: [])
+
+    v_outer, v_ext = resolve_variant_format(
+        hydrated.get("outerFormat") or "folder",
+        hydrated.get("outerExtension"),
+        output_format,
+        text_member_count=len(text_members),
+    )
 
     # Prepare schemas with modes
     prepared = []
@@ -662,8 +787,8 @@ def generate_package_variants(
             theme_hits_total += ctx["gen"].stats.get("themeHits", 0)
 
         vname, vbytes = emit_variant_bytes(
-            outer_format=hydrated.get("outerFormat") or "zip",
-            outer_extension=hydrated.get("outerExtension"),
+            outer_format=v_outer,
+            outer_extension=v_ext,
             text_entries=text_entries,
             nested=hydrated.get("nestedArchives") or [],
             package_name=hydrated.get("name") or "package",
@@ -677,27 +802,383 @@ def generate_package_variants(
             if buf:
                 db.record_values(buf, mode="use")
 
-    # Bundle variants: tar.gz when more than one (space), else zip
     from app.services import archive_svc
+    import base64
 
-    bundle_fmt = archive_svc.default_bundle_format(len(variant_files))
+    safe = re.sub(r"[^a-zA-Z0-9._-]+", "_", hydrated.get("name") or "package")
+
+    # Single bare file: return as-is (no wrapper archive)
+    if len(variant_files) == 1 and v_outer == "file":
+        vname, vbytes = variant_files[0]
+        b64 = base64.b64encode(vbytes).decode("ascii")
+        return {
+            "ok": True,
+            "written": 1,
+            "seed": seed_used,
+            "sampleNames": [vname],
+            "zipBase64": b64,
+            "archiveBase64": b64,
+            "archiveFormat": "file",
+            "fileName": vname,
+            "themeHits": theme_hits_total,
+            "variantFormat": v_outer,
+            "outputFormat": output_format or "itself",
+        }
+
+    # Bundle variants: explicit bundle_format, else tar.gz when N>1, zip when N=1
+    if bundle_format:
+        bf = bundle_format.lower().strip()
+        if bf in ("tgz", ".tar.gz"):
+            bf = "tar.gz"
+        if bf.startswith("."):
+            bf = bf[1:]
+        bundle_fmt = bf if bf in ("tar", "tar.gz", "zip") else archive_svc.default_bundle_format(
+            len(variant_files)
+        )
+    else:
+        bundle_fmt = archive_svc.default_bundle_format(len(variant_files))
     bundle, arch_ext, _media = archive_svc.pack_named_entries(
         variant_files, format=bundle_fmt
     )
-    import base64
 
     b64 = base64.b64encode(bundle).decode("ascii")
-    safe = re.sub(r"[^a-zA-Z0-9._-]+", "_", hydrated.get("name") or "package")
     return {
         "ok": True,
         "written": len(variant_files),
         "seed": seed_used,
         "sampleNames": [n for n, _ in variant_files[:5]],
-        "zipBase64": b64,  # base64 of archive (zip or tar.gz)
+        "zipBase64": b64,  # base64 of archive (zip or tar / tar.gz)
         "archiveBase64": b64,
         "archiveFormat": bundle_fmt,
         "fileName": f"{safe}-variants{arch_ext}",
         "themeHits": theme_hits_total,
+        "variantFormat": v_outer,
+        "outputFormat": output_format or "itself",
+    }
+
+
+def reinfer_schema_from_content(
+    *,
+    schema_id: str | None,
+    file_name: str,
+    content: str,
+    existing: dict[str, Any] | None = None,
+    package_id: str | None = None,
+    member_path: str | None = None,
+) -> dict[str, Any]:
+    """
+    Re-infer design schema root + sampleValues from edited member text.
+    Preserves schema id / package linkage / display name when updating in place.
+    Harvests history samples (ensure) — never stores generated bulk bodies.
+    """
+    inferred = infer.infer_schema_from_file(file_name, content)
+    new_root = inferred["schema"]["root"]
+    fmt = inferred["format"]
+    samples = inferred.get("historySamples") or []
+
+    prev = existing or (db.get_schema(schema_id) if schema_id else None) or {}
+    sid = schema_id or prev.get("id") or str(uuid.uuid4())
+    display = prev.get("name")
+    if not display:
+        if member_path and package_id:
+            display = f"member › {member_path}"
+        else:
+            display = re.sub(r"\.[^.]+$", "", basename(file_name)) or file_name
+
+    # Merge field flags (isUnique / isPrimary / enumValues / modes-related) by path
+    merged_root = _merge_field_meta(prev.get("root") or [], new_root)
+
+    doc = {
+        "id": sid,
+        "name": display,
+        "root": merged_root,
+        "sourceFileName": file_name,
+        "sourceFormat": fmt,
+        "isPackageMember": prev.get("isPackageMember"),
+        "packageId": prev.get("packageId") or package_id,
+        "xmlRootTag": prev.get("xmlRootTag"),
+        "xmlRecordTag": prev.get("xmlRecordTag"),
+        "csvTiedFieldPaths": prev.get("csvTiedFieldPaths"),
+    }
+    saved = db.save_schema(doc)
+    if samples:
+        # Design samples → Field values by column/tag (not history dump)
+        db.ensure_custom_field_values_bulk(
+            [
+                {
+                    "keyName": (h.get("keyName") or h.get("categoryName") or "field"),
+                    "value": h.get("value") or "",
+                }
+                for h in samples
+                if (h.get("value") or "").strip()
+            ]
+        )
+    return saved
+
+
+def _field_meta_map(rows: list[dict], parent: list[str] | None = None) -> dict[str, dict]:
+    """Map dotted path → selected design flags from an existing schema tree."""
+    parent = parent or []
+    out: dict[str, dict] = {}
+    for row in rows or []:
+        leaf = (row.get("key") or "field").strip() or "field"
+        path = ".".join(parent + [leaf])
+        out[path.lower()] = {
+            "isUnique": row.get("isUnique"),
+            "isPrimary": row.get("isPrimary"),
+            "enumValues": row.get("enumValues"),
+            "nullRate": row.get("nullRate"),
+            "themeCategory": row.get("themeCategory"),
+            "historyPool": row.get("historyPool"),
+            "categoryOverride": row.get("categoryOverride"),
+            "historySourceKeys": row.get("historySourceKeys"),
+            "pattern": row.get("pattern"),
+            "min": row.get("min"),
+            "max": row.get("max"),
+            "minLength": row.get("minLength"),
+            "maxLength": row.get("maxLength"),
+            "selfClosing": row.get("selfClosing"),
+        }
+        kids = row.get("children") or []
+        if kids:
+            out.update(_field_meta_map(kids, parent + [leaf]))
+    return out
+
+
+def _merge_field_meta(old_root: list, new_root: list) -> list:
+    """Apply prior field flags onto re-inferred tree; sampleValues come from new_root."""
+    meta = _field_meta_map(old_root)
+
+    def walk(rows: list, parent: list[str]) -> list:
+        out = []
+        for row in rows or []:
+            leaf = (row.get("key") or "field").strip() or "field"
+            path = ".".join(parent + [leaf])
+            flags = meta.get(path.lower()) or meta.get(leaf.lower()) or {}
+            kids = row.get("children") or []
+            nr = {**row}
+            for k, v in flags.items():
+                if v is not None and k != "sampleValue":
+                    nr[k] = v
+            if kids:
+                nr["children"] = walk(kids, parent + [leaf])
+            out.append(nr)
+        return out
+
+    return walk(new_root, [])
+
+
+def update_package_member(
+    package_id: str,
+    member_path: str,
+    *,
+    new_path: str | None = None,
+    new_name: str | None = None,
+    content: str | None = None,
+    reinfer: bool = True,
+) -> dict[str, Any]:
+    """
+    Design-only member edits: rename path/file name and/or sample content.
+    When content changes, re-infers linked schema root/sampleValues so generate
+    uses the edited design (not stale import samples).
+    Never stores generated bulk bodies — only import sample / user-edited design text.
+    """
+    pkg = db.get_package(package_id)
+    if not pkg:
+        raise ValueError("Package not found")
+    members = list(pkg.get("members") or [])
+    idx = next((i for i, m in enumerate(members) if m.get("path") == member_path), None)
+    if idx is None:
+        raise ValueError(f"Member not found: {member_path}")
+    m = dict(members[idx])
+    if m.get("kind") != "text":
+        raise ValueError("Only text members can be renamed or edited")
+
+    target_path = normalize_path(new_path) if new_path is not None else m["path"]
+    if not target_path:
+        raise ValueError("Invalid path")
+    if new_name is not None:
+        # Rename leaf while keeping parent dirs when new_path not fully supplied
+        parent = dirname_posix(target_path)
+        leaf = basename(new_name) or new_name
+        if not is_supported_text(leaf):
+            raise ValueError("File name must end with .xml, .csv, or .txt")
+        target_path = join_path(parent, leaf) if parent else leaf
+        m["name"] = leaf
+    elif new_path is not None:
+        leaf = basename(target_path)
+        if not is_supported_text(leaf):
+            raise ValueError("File name must end with .xml, .csv, or .txt")
+        m["name"] = leaf
+
+    if target_path != member_path:
+        if any(
+            x.get("path") == target_path for i2, x in enumerate(members) if i2 != idx
+        ):
+            raise ValueError(f"Path already exists: {target_path}")
+        m["path"] = target_path
+
+    content_changed = content is not None
+    if content is not None:
+        if len(content.encode("utf-8")) > MAX_TEXT:
+            raise ValueError("Content too large")
+        m["content"] = content
+        # Keep format in sync with extension when renamed
+        lower = (m.get("name") or "").lower()
+        if lower.endswith(".xml"):
+            m["format"] = "xml"
+        elif lower.endswith(".csv"):
+            m["format"] = "csv"
+        elif lower.endswith(".txt"):
+            m["format"] = "txt"
+
+    members[idx] = m
+    pkg["members"] = members
+
+    # Re-infer schema from edited content so generate uses new sampleValues
+    if m.get("schemaId") and content_changed and reinfer:
+        try:
+            saved_schema = reinfer_schema_from_content(
+                schema_id=m["schemaId"],
+                file_name=m.get("name") or basename(m["path"]),
+                content=m.get("content") or "",
+                package_id=package_id,
+                member_path=m["path"],
+            )
+            m["format"] = saved_schema.get("sourceFormat") or m.get("format")
+            members[idx] = m
+            pkg["members"] = members
+        except Exception as e:
+            raise ValueError(f"Could not re-infer schema from content: {e}") from e
+    elif m.get("schemaId") and (new_path is not None or new_name is not None):
+        schema = db.get_schema(m["schemaId"])
+        if schema:
+            schema = {
+                **schema,
+                "sourceFileName": m["name"],
+                "sourceFormat": m.get("format") or schema.get("sourceFormat"),
+            }
+            if schema.get("isPackageMember"):
+                name = schema.get("name") or ""
+                if " › " in name:
+                    prefix = name.split(" › ", 1)[0]
+                    schema["name"] = f"{prefix} › {m['path']}"
+                else:
+                    schema["name"] = re.sub(r"\.[^.]+$", "", m["name"]) or m["name"]
+            db.save_schema(schema)
+
+    saved = db.save_package(pkg)
+    return db.get_package_hydrated(saved["id"])  # type: ignore[return-value]
+
+
+def save_member_schema_as(
+    package_id: str,
+    member_path: str,
+    *,
+    new_schema_name: str | None = None,
+    root: list | None = None,
+    content: str | None = None,
+    link_to_package: bool = True,
+    reinfer_from_content: bool = True,
+) -> dict[str, Any]:
+    """
+    Save-as: new schema from member — re-infers from edited content by default
+    so the copy is based on the current design text, not a stale import tree.
+    When link_to_package=True, package member points at the new schema id.
+    """
+    hydrated = db.get_package_hydrated(package_id)
+    if not hydrated:
+        raise ValueError("Package not found")
+    member = next(
+        (m for m in hydrated["members"] if m.get("path") == member_path and m.get("kind") == "text"),
+        None,
+    )
+    if not member or not member.get("schemaId"):
+        raise ValueError("Member schema not found")
+    src = hydrated["schemas"].get(member_path) or db.get_schema(member["schemaId"])
+    if not src:
+        raise ValueError("Source schema missing")
+
+    text = content if content is not None else (member.get("content") or "")
+    file_name = member.get("name") or basename(member_path)
+
+    # Optionally persist content edit first (design sample)
+    if content is not None and content != member.get("content"):
+        hydrated = update_package_member(
+            package_id, member_path, content=content, reinfer=True
+        )
+        member = next(
+            (m for m in hydrated["members"] if m.get("path") == member_path),
+            member,
+        )
+        src = (hydrated.get("schemas") or {}).get(member_path) or src
+        text = member.get("content") or text
+
+    display = (new_schema_name or "").strip() or f"{src.get('name') or member['name']} (copy)"
+    existing = {s["name"].lower() for s in db.list_schemas(include_package_members=True)}
+    base = display
+    n = 2
+    while display.lower() in existing:
+        display = f"{base} ({n})"
+        n += 1
+
+    if root is not None:
+        use_root = root
+        use_fmt = src.get("sourceFormat") or member.get("format")
+    elif reinfer_from_content and text.strip():
+        try:
+            inferred = infer.infer_schema_from_file(file_name, text)
+            use_root = _merge_field_meta(src.get("root") or [], inferred["schema"]["root"])
+            use_fmt = inferred["format"]
+            samples = inferred.get("historySamples") or []
+            if samples:
+                db.ensure_custom_field_values_bulk(
+                    [
+                        {
+                            "keyName": (
+                                h.get("keyName") or h.get("categoryName") or "field"
+                            ),
+                            "value": h.get("value") or "",
+                        }
+                        for h in samples
+                        if (h.get("value") or "").strip()
+                    ]
+                )
+        except Exception as e:
+            raise ValueError(f"Could not re-infer schema from content: {e}") from e
+    else:
+        use_root = _clone_rows(src.get("root") or [])
+        use_fmt = src.get("sourceFormat") or member.get("format")
+
+    doc = {
+        "id": str(uuid.uuid4()),
+        "name": display,
+        "root": use_root,
+        "sourceFileName": src.get("sourceFileName") or member.get("name"),
+        "sourceFormat": use_fmt,
+        "isPackageMember": True if link_to_package else None,
+        "packageId": package_id if link_to_package else None,
+        "xmlRootTag": src.get("xmlRootTag"),
+        "xmlRecordTag": src.get("xmlRecordTag"),
+        "csvTiedFieldPaths": src.get("csvTiedFieldPaths"),
+    }
+    saved = db.save_schema(doc)
+    if link_to_package:
+        pkg = db.get_package(package_id)
+        if not pkg:
+            raise ValueError("Package not found")
+        members = []
+        for m in pkg.get("members") or []:
+            if m.get("path") == member_path:
+                members.append({**m, "schemaId": saved["id"]})
+            else:
+                members.append(m)
+        pkg["members"] = members
+        db.save_package(pkg)
+    return {
+        "ok": True,
+        "schema": saved,
+        "package": db.get_package_hydrated(package_id),
     }
 
 
@@ -707,7 +1188,18 @@ def _apply_field_modes(
     tied: list[str] = []
 
     def mode_of(path: str) -> str:
-        return modes.get(path) or modes.get(path.lower()) or default_mode
+        # Full dotted path, case-insensitive, or leaf key fallback
+        if path in modes:
+            return modes[path]
+        low = path.lower()
+        if low in modes:
+            return modes[low]
+        leaf = path.rsplit(".", 1)[-1]
+        if leaf in modes:
+            return modes[leaf]
+        if leaf.lower() in modes:
+            return modes[leaf.lower()]
+        return default_mode
 
     def walk(rows: list[dict], parent: list[str]) -> list[dict]:
         out = []

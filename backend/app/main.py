@@ -5,6 +5,7 @@ import base64
 import io
 import json
 import uuid
+from contextlib import asynccontextmanager
 from typing import Any, Callable
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -31,6 +32,18 @@ from app.services import file_naming
 APP_VERSION = "0.5.0"
 APP_NAME = "DataForge"
 
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    db.init_db()
+    # Repair schemas left behind by older package deletes
+    try:
+        db.cleanup_orphan_package_schemas()
+    except Exception:
+        pass
+    yield
+
+
 app = FastAPI(
     title=APP_NAME,
     version=APP_VERSION,
@@ -38,6 +51,7 @@ app = FastAPI(
         "Local ETL test-data generator. SQLite stores schemas, history, custom values, "
         "and themes only — never auto-generated file bodies."
     ),
+    lifespan=_lifespan,
 )
 app.add_middleware(
     CORSMiddleware,
@@ -46,16 +60,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.on_event("startup")
-def _startup() -> None:
-    db.init_db()
-    # Repair schemas left behind by older package deletes
-    try:
-        db.cleanup_orphan_package_schemas()
-    except Exception:
-        pass
 
 
 # ── models ──────────────────────────────────────────────────────────
@@ -101,7 +105,7 @@ class GenerateBody(BaseModel):
 
 class ExportBody(BaseModel):
     data: Any
-    format: str = "json"
+    format: str = "xml"  # team default (xml · csv · txt); json/yaml/jsonl still accepted
     multiRow: bool = True
     layoutMode: str = "single-header"
     delim: str = "."
@@ -113,6 +117,8 @@ class ExportBody(BaseModel):
     xmlSelfClosing: bool | None = None
     # Optional path/tag overrides: { "field": true, "meta.child": false }
     xmlSelfClosingMap: dict[str, bool] | None = None
+    # Schema-tree document (from generate.document) — XML root is the tree root, not a list envelope
+    documentShaped: bool = False
 
 
 class StreamBody(GenerateBody):
@@ -128,7 +134,7 @@ class StreamBody(GenerateBody):
 
 
 class PerFileBody(GenerateBody):
-    format: str = "json"
+    format: str = "xml"  # team default; json/yaml/jsonl still accepted
     multiRow: bool = True
     layoutMode: str = "single-header"
     delim: str = "."
@@ -138,6 +144,10 @@ class PerFileBody(GenerateBody):
     xmlSelfClosing: bool | None = None
     fileName: str | None = None
     previewSampleSize: int = 5
+    # Archive: tar | tar.gz | zip | None (auto: tar.gz if N>1 else zip)
+    archiveFormat: str | None = None
+    # Folder name inside the archive (and base name of the .tar/.tar.gz file)
+    archiveDir: str | None = None
 
 
 class ArchiveBuildBody(BaseModel):
@@ -178,20 +188,109 @@ class ClearHistoryBody(BaseModel):
 # ── helpers ─────────────────────────────────────────────────────────
 
 
-def _harvest_schema_samples(root: list[dict], path: list[str] | None = None) -> list[dict]:
+def _field_wants_pool_save(row: dict) -> bool:
+    """Field settings opt-in: save sample values into the Field values pool for this tag."""
+    if row.get("saveToFieldPool") is True or row.get("fieldValuePool") is True:
+        return True
+    # Accept stringy truth from older UI
+    v = row.get("saveToFieldPool")
+    if isinstance(v, str) and v.strip().lower() in ("1", "true", "yes"):
+        return True
+    return False
+
+
+def _harvest_schema_samples(
+    root: list[dict],
+    path: list[str] | None = None,
+    *,
+    non_theme_only: bool = False,
+    field_pool_opt_in_only: bool = False,
+) -> list[dict]:
+    """
+    Collect design sample tokens from the schema tree.
+
+    - non_theme_only: skip fields with themeCategory (theme packs own those pools)
+    - field_pool_opt_in_only: only fields with saveToFieldPool enabled in Field settings
+    Pool key is the tag/column name (leaf), e.g. TN — shared across files using that tag.
+    """
     path = path or []
     out: list[dict] = []
     for row in root:
+        if not isinstance(row, dict):
+            continue
         leaf = (row.get("key") or "field").strip() or "field"
         if (row.get("kind") or "value") == "value":
-            sample = (row.get("sampleValue") or "").strip()
-            if sample:
-                key = generator.field_write_key(path, row)
-                out.append({"categoryName": key, "keyName": key, "value": sample})
+            has_theme = bool((row.get("themeCategory") or "").strip())
+            if non_theme_only and has_theme:
+                pass  # skip harvest body; still walk children below
+            elif field_pool_opt_in_only and not _field_wants_pool_save(row):
+                pass
+            else:
+                # Tag/column pool id = leaf (TN), plus full path for generator lookups
+                path_key = generator.field_write_key(path, row)
+                tag = leaf
+                values: list[str] = []
+                sample = (row.get("sampleValue") or "").strip()
+                if sample:
+                    values.append(sample)
+                raw_sv = row.get("sampleValues")
+                if isinstance(raw_sv, list):
+                    for v in raw_sv:
+                        s = "" if v is None else str(v).strip()
+                        if s:
+                            values.append(s)
+                for val in values:
+                    out.append(
+                        {
+                            "categoryName": tag,
+                            "keyName": tag,
+                            "pathKey": path_key,
+                            "value": val,
+                        }
+                    )
         kids = row.get("children") or []
         if kids:
-            out.extend(_harvest_schema_samples(kids, path + [leaf]))
+            out.extend(
+                _harvest_schema_samples(
+                    kids,
+                    path + [leaf],
+                    non_theme_only=non_theme_only,
+                    field_pool_opt_in_only=field_pool_opt_in_only,
+                )
+            )
     return out
+
+
+def _persist_field_pool_samples(
+    root: list[dict],
+    *,
+    all_fields: bool = False,
+) -> dict:
+    """
+    Persist design sample tokens into Field values pools (by tag/column, max 1000).
+
+    - all_fields=False (default Save): only fields with Field settings saveToFieldPool
+    - all_fields=True (Map fields): every non-theme value field with samples
+    Theme fields always skip (theme packs own those pools).
+    """
+    samples = _harvest_schema_samples(
+        root or [],
+        non_theme_only=True,
+        field_pool_opt_in_only=not all_fields,
+    )
+    if not samples:
+        return {"fields": 0, "inserted": 0, "results": [], "warnings": []}
+    # Also ensure full path keys map into the same pool
+    expanded: list[dict] = []
+    for s in samples:
+        expanded.append(s)
+        pk = (s.get("pathKey") or "").strip()
+        tag = (s.get("keyName") or "").strip()
+        if pk and tag and pk.lower() != tag.lower():
+            expanded.append(
+                {"keyName": pk, "categoryName": pk, "value": s.get("value") or ""}
+            )
+    return db.ensure_custom_field_values_bulk(expanded)
 
 
 def _history_lookup(key: str) -> list[str]:
@@ -219,11 +318,16 @@ def _lookup(key: str) -> list[str]:
 
 
 def _resolve_theme_context(body: GenerateBody | None = None) -> tuple[
-    Callable[[str], list[str]] | None,
+    Callable[..., list[str]] | None,
     bool,
     list[dict[str, Any]],
 ]:
-    """Build theme_lookup(category) from settings + optional request override."""
+    """
+    Build theme_lookup(category, theme_id=None) from settings + request override.
+
+    - theme_id None / \"blend\" → active blend packs (all selected themes)
+    - theme_id = specific pack id → only that theme's values for the category
+    """
     settings = db.get_settings()
     dt = settings.get("dataThemes") or {}
     enabled = dt.get("enabled", True) if body is None or body.useDataThemes is None else body.useDataThemes
@@ -238,11 +342,20 @@ def _resolve_theme_context(body: GenerateBody | None = None) -> tuple[
     else:
         blend = list(dt.get("blend") or [])
 
-    if not enabled or not blend:
+    if not enabled:
         return None, prefer, blend
 
-    def theme_lookup(category: str) -> list[str]:
-        return db.get_blended_theme_values(category, blend)
+    def theme_lookup(category: str, theme_id: str | None = None) -> list[str]:
+        cat = (category or "").strip()
+        if not cat:
+            return []
+        tid = (theme_id or "").strip()
+        if tid and tid not in ("blend", "*", "all"):
+            rows = db.get_theme_values(tid, cat, limit=200)
+            return [str(r.get("value") or "").strip() for r in rows if r.get("value")]
+        if not blend:
+            return []
+        return db.get_blended_theme_values(cat, blend)
 
     return theme_lookup, prefer, blend
 
@@ -364,10 +477,28 @@ def schemas_save(body: SchemaBody):
     if not data.get("id"):
         data["id"] = str(uuid.uuid4())
     saved = db.save_schema(data)
-    samples = _harvest_schema_samples(saved.get("root") or [])
-    if samples:
-        db.record_values(samples, mode="ensure")
+    # Only fields with Field settings → “Save samples to Field values pool”
+    # push tokens into the tag/column pool (max 1000 per tag). Not automatic for all fields.
+    _persist_field_pool_samples(saved.get("root") or [], all_fields=False)
     return saved
+
+
+@app.post("/api/schemas/map-fields")
+def schemas_map_fields(body: SchemaBody):
+    """
+    Save schema design, then map ALL non-theme sample values into Field values
+    pools by tag/column (cap 1000 per tag). Use for bulk “Map fields”;
+    per-field saveToFieldPool remains for finer control on ordinary Save.
+    """
+    data = body.model_dump(by_alias=False)
+    if not data.get("id"):
+        data["id"] = str(uuid.uuid4())
+    saved = db.save_schema(data)
+    field_sync = _persist_field_pool_samples(saved.get("root") or [], all_fields=True)
+    return {
+        "schema": saved,
+        "fieldValuesSynced": field_sync,
+    }
 
 
 @app.post("/api/schemas/{schema_id}/touch")
@@ -403,17 +534,15 @@ async def schemas_import(file: UploadFile = File(...)):
         raise HTTPException(400, f"Import failed: {e}") from e
     schema = result["schema"]
     saved = db.save_schema(schema)
-    if result.get("historySamples"):
-        db.record_values(result["historySamples"], mode="ensure")
-    samples = _harvest_schema_samples(saved.get("root") or [])
-    if samples:
-        db.record_values(samples, mode="ensure")
+    # Import: only opt-in fields push into Field values pools on save
+    field_sync = _persist_field_pool_samples(saved.get("root") or [])
     return {
         "schema": saved,
         "format": result["format"],
         "recordHint": result["recordHint"],
         "scannedRecords": result["scannedRecords"],
-        "historyValues": len(result.get("historySamples") or []),
+        "historyValues": int(field_sync.get("inserted") or 0),
+        "fieldValuesSynced": field_sync,
     }
 
 
@@ -426,9 +555,10 @@ def generate(body: GenerateBody):
 def generate_stream(body: StreamBody):
     """
     Stream generate for large counts.
-    - csv / jsonl: true per-record iteration (no full materialization)
-    - json / xml / yaml / txt: capped at STREAM_STRUCTURED_MAX_RECORDS; use csv/jsonl for larger N
+    - csv / txt / jsonl: true per-record iteration (no full materialization)
+    - json / xml / yaml: capped at STREAM_STRUCTURED_MAX_RECORDS; use csv/txt/jsonl for larger N
     Failures raise HTTP errors before the stream starts when possible (never 200 + ERROR: body).
+    Mid-iteration faults end the stream without an ERROR: prefix.
     """
     schema = body.schema_
     if not schema.get("root"):
@@ -440,12 +570,12 @@ def generate_stream(body: StreamBody):
         raise HTTPException(400, str(e)) from e
 
     count = int(body.recordCount or 1)
-    structured = fmt in ("json", "xml", "yaml", "txt")
+    structured = fmt in ("json", "xml", "yaml")
     if structured and count > STREAM_STRUCTURED_MAX_RECORDS:
         raise HTTPException(
             400,
             f"Stream format {fmt!r} is limited to {STREAM_STRUCTURED_MAX_RECORDS:,} records "
-            f"(requested {count:,}). Use format csv or jsonl for large counts.",
+            f"(requested {count:,}). Use format csv, txt, or jsonl for large counts.",
         )
 
     delim = body.delim or settings.get("csvFlattenDelimiter") or "."
@@ -479,27 +609,71 @@ def generate_stream(body: StreamBody):
 
     def line_iter():
         last_gen = None
-        if fmt == "jsonl":
-            for _i, rec, gen in generator.iter_records(schema, **_iter_kwargs()):
-                last_gen = gen
-                yield json.dumps(rec, ensure_ascii=False) + "\n"
-        elif fmt == "csv":
-            # True row stream: headers from first record (single-header layout only for stream).
-            # Other layout modes fall back to buffered serialize within the cap.
-            if layout != "single-header":
+        try:
+            if fmt == "jsonl":
+                for _i, rec, gen in generator.iter_records(schema, **_iter_kwargs()):
+                    last_gen = gen
+                    yield json.dumps(rec, ensure_ascii=False) + "\n"
+            elif fmt in ("csv", "txt"):
+                # True row stream: headers from first record.
+                # Other CSV layout modes fall back to buffered serialize within the cap.
+                if fmt == "csv" and layout != "single-header":
+                    result = generator.generate_records(
+                        schema,
+                        allow_large=count <= MAX_IN_MEMORY_GENERATE_RECORDS,
+                        **_iter_kwargs(),
+                    )
+                    last_gen = None
+                    if body.recordHistory and not body.ciMode:
+                        buf = result.pop("historyBuffer", [])
+                        if buf:
+                            db.record_values(buf, mode="use")
+                    text = export_fmt.serialize(
+                        result["records"],
+                        "csv",
+                        multi_row=multi,
+                        layout_mode=layout,
+                        delim=delim,
+                        nested_as_json=bool(nested),
+                        **xml_opts,
+                    )
+                    step = 64 * 1024
+                    for i in range(0, len(text), step):
+                        yield text[i : i + step]
+                    return
+
+                headers: list[str] | None = None
+                for _i, rec, gen in generator.iter_records(schema, **_iter_kwargs()):
+                    last_gen = gen
+                    flat = export_fmt.flatten_record_for_csv(
+                        rec, delim=delim, nested_as_json=bool(nested)
+                    )
+                    if headers is None:
+                        headers = list(flat.keys())
+                        if fmt == "txt":
+                            yield export_fmt.txt_header_line(headers) + "\n"
+                        else:
+                            yield export_fmt.csv_header_line(headers) + "\n"
+                    if not headers:
+                        continue
+                    if fmt == "txt":
+                        yield export_fmt.txt_data_line(headers, flat) + "\n"
+                    else:
+                        yield export_fmt.csv_data_line(headers, flat) + "\n"
+            else:
+                # Structured formats: generate within cap, then chunk the payload.
                 result = generator.generate_records(
                     schema,
-                    allow_large=count <= MAX_IN_MEMORY_GENERATE_RECORDS,
+                    allow_large=False,
                     **_iter_kwargs(),
                 )
-                last_gen = None
                 if body.recordHistory and not body.ciMode:
                     buf = result.pop("historyBuffer", [])
                     if buf:
                         db.record_values(buf, mode="use")
                 text = export_fmt.serialize(
                     result["records"],
-                    "csv",
+                    fmt,
                     multi_row=multi,
                     layout_mode=layout,
                     delim=delim,
@@ -511,49 +685,16 @@ def generate_stream(body: StreamBody):
                     yield text[i : i + step]
                 return
 
-            headers: list[str] | None = None
-            for _i, rec, gen in generator.iter_records(schema, **_iter_kwargs()):
-                last_gen = gen
-                flat = export_fmt.flatten_record_for_csv(
-                    rec, delim=delim, nested_as_json=bool(nested)
-                )
-                if headers is None:
-                    headers = list(flat.keys())
-                    yield export_fmt.csv_header_line(headers) + "\n"
-                assert headers is not None
-                yield export_fmt.csv_data_line(headers, flat) + "\n"
-        else:
-            # Structured formats: generate within cap, then chunk the payload.
-            result = generator.generate_records(
-                schema,
-                allow_large=False,
-                **_iter_kwargs(),
-            )
-            if body.recordHistory and not body.ciMode:
-                buf = result.pop("historyBuffer", [])
-                if buf:
-                    db.record_values(buf, mode="use")
-            text = export_fmt.serialize(
-                result["records"],
-                fmt,
-                multi_row=multi,
-                layout_mode=layout,
-                delim=delim,
-                nested_as_json=bool(nested),
-                **xml_opts,
-            )
-            step = 64 * 1024
-            for i in range(0, len(text), step):
-                yield text[i : i + step]
+            if body.recordHistory and not body.ciMode and last_gen:
+                try:
+                    if last_gen.history_buffer:
+                        db.record_values(last_gen.history_buffer, mode="use")
+                except Exception:
+                    # Do not corrupt the download stream with an error prefix.
+                    pass
+        except Exception:
+            # Already streaming: end body cleanly without ERROR: prefix.
             return
-
-        if body.recordHistory and not body.ciMode and last_gen:
-            try:
-                if last_gen.history_buffer:
-                    db.record_values(last_gen.history_buffer, mode="use")
-            except Exception:
-                # Do not corrupt the download stream with an error prefix.
-                pass
 
     media = {
         "csv": "text/csv; charset=utf-8",
@@ -573,7 +714,7 @@ def generate_per_file(body: PerFileBody):
         raise HTTPException(400, "Schema has no fields")
     settings = db.get_settings()
     naming = {**settings.get("fileNaming", {})}
-    fmt = body.format or "json"
+    fmt = body.format or "xml"
     ext = export_fmt.extension_for_format(fmt)
     schema_name = export_fmt.sanitize_export_file_name(
         body.fileName or schema.get("name") or "dataforge-record"
@@ -637,13 +778,16 @@ def generate_per_file(body: PerFileBody):
         if claimed is None:
             skipped += 1
             continue
+        # One file per record — same schema tree shape as one-file multi-record
+        doc = generator.assemble_schema_document(schema, [rec])
         text = export_fmt.serialize(
-            rec,
+            doc if isinstance(doc, dict) else rec,
             fmt,
             multi_row=False,
             layout_mode=layout,
             delim=delim,
             nested_as_json=bool(nested),
+            document_shaped=isinstance(doc, dict),
             **_xml_opts(body, settings),
         )
         entries.append((claimed, text))
@@ -651,9 +795,29 @@ def generate_per_file(body: PerFileBody):
         if len(sample) < sample_n:
             sample.append({"path": claimed, "preview": text[:400]})
 
-    # Multi-file default: tar.gz (space); single file: zip
-    raw, arch_ext, _media = archive_svc.pack_named_entries(entries)
-    arch_fmt = "tar.gz" if arch_ext == ".tar.gz" else "zip"
+    # Optional top-level directory inside the archive (dir name = archive base name)
+    arch_dir = export_fmt.sanitize_export_file_name(
+        body.archiveDir or schema_name or "export"
+    )
+    if arch_dir:
+        entries = [
+            (f"{arch_dir}/{path}".replace("\\", "/"), content)
+            for path, content in entries
+        ]
+
+    # Explicit tar / tar.gz / zip, else multi → tar.gz, single → zip
+    req_fmt = (body.archiveFormat or "").lower().strip()
+    if req_fmt in ("tar", "tar.gz", "tgz", "zip"):
+        pack_fmt = "tar.gz" if req_fmt in ("tar.gz", "tgz") else req_fmt
+    else:
+        pack_fmt = None  # default_bundle_format
+    raw, arch_ext, _media = archive_svc.pack_named_entries(entries, format=pack_fmt)
+    if arch_ext == ".tar.gz":
+        arch_fmt = "tar.gz"
+    elif arch_ext == ".tar":
+        arch_fmt = "tar"
+    else:
+        arch_fmt = "zip"
 
     # One-pass history from the same generator used for files
     if body.recordHistory and not body.ciMode and last_gen is not None:
@@ -665,6 +829,8 @@ def generate_per_file(body: PerFileBody):
             history_warning = f"History write failed: {e}"
 
     b64 = base64.b64encode(raw).decode("ascii")
+    # Archive file named after the directory (e.g. TestGen.tar.gz)
+    out_name = f"{arch_dir or schema_name}{arch_ext}"
     out: dict[str, Any] = {
         "ok": True,
         "written": written,
@@ -672,10 +838,11 @@ def generate_per_file(body: PerFileBody):
         "seed": seed_holder[0],
         "format": fmt,
         "sample": sample,
-        "zipBase64": b64,  # base64 of archive (zip or tar.gz)
+        "zipBase64": b64,  # base64 of archive (zip or tar / tar.gz)
         "archiveBase64": b64,
         "archiveFormat": arch_fmt,
-        "fileName": f"{schema_name}-per-file{arch_ext}",
+        "archiveDir": arch_dir,
+        "fileName": out_name,
         "perFile": True,
     }
     if history_warning:
@@ -727,7 +894,13 @@ def _xml_opts(body: Any, settings: dict[str, Any]) -> dict[str, Any]:
 def export_data(body: ExportBody):
     settings = db.get_settings()
     data = body.data
-    if not body.singleObject and isinstance(data, dict):
+    document_shaped = bool(body.documentShaped)
+    # List envelope only for multi-record row exports — never for schema documents
+    if (
+        not document_shaped
+        and not body.singleObject
+        and isinstance(data, dict)
+    ):
         data = [data]
     try:
         fmt = export_fmt.validate_format(body.format)
@@ -740,6 +913,13 @@ def export_data(body: ExportBody):
             nested_as_json=body.nestedAsJson
             if body.nestedAsJson is not None
             else bool(settings.get("csvNestedAsJson")),
+            document_shaped=document_shaped
+            or (
+                # Auto: single-key dict tree (assembled document) for XML
+                fmt == "xml"
+                and isinstance(data, dict)
+                and len(data) == 1
+            ),
             **_xml_opts(body, settings),
         )
     except ValueError as e:
@@ -1050,6 +1230,10 @@ class ThemeValuesBody(BaseModel):
     weight: float = 1.0
 
 
+class ThemeValueUpdateBody(BaseModel):
+    value: str
+
+
 @app.get("/api/themes")
 def themes_list():
     return db.list_themes()
@@ -1075,15 +1259,59 @@ def themes_delete(theme_id: str):
 
 @app.get("/api/themes/{theme_id}/values")
 def themes_values(theme_id: str, category: str | None = None):
-    return db.get_theme_values(theme_id, category)
+    values = db.get_theme_values(theme_id, category)
+    stats = db.list_theme_category_stats(theme_id)
+    return {
+        "values": values,
+        "categories": stats,
+        "count": len(values),
+    }
+
+
+@app.get("/api/themes/{theme_id}/categories")
+def themes_category_stats(theme_id: str):
+    return {"categories": db.list_theme_category_stats(theme_id)}
+
+
+@app.delete("/api/themes/{theme_id}/categories/{category}")
+def themes_delete_category(theme_id: str, category: str):
+    """Delete an entire category and all of its values under a theme pack."""
+    result = db.delete_theme_category(theme_id, category)
+    if result.get("error") == "Theme not found":
+        raise HTTPException(404, "Theme not found")
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error") or "Could not delete category")
+    return {
+        **result,
+        "categories": db.list_theme_category_stats(theme_id),
+    }
 
 
 @app.post("/api/themes/{theme_id}/values")
 def themes_add_values(theme_id: str, body: ThemeValuesBody):
-    n = db.add_theme_values(theme_id, body.category, body.values, body.weight)
-    if n < 0:
-        raise HTTPException(404, "Theme not found")
-    return {"inserted": n, "values": db.get_theme_values(theme_id, body.category)}
+    result = db.add_theme_values(theme_id, body.category, body.values, body.weight)
+    if result.get("inserted") == -1 or result.get("error"):
+        raise HTTPException(404, result.get("error") or "Theme not found")
+    return {
+        **result,
+        "values": db.get_theme_values(theme_id, body.category),
+        "categories": db.list_theme_category_stats(theme_id),
+    }
+
+
+@app.put("/api/themes/{theme_id}/values/{value_id}")
+def themes_update_value(theme_id: str, value_id: str, body: ThemeValueUpdateBody):
+    updated = db.update_theme_value(theme_id, value_id, body.value)
+    if not updated:
+        raise HTTPException(404, "Value not found or duplicate")
+    return updated
+
+
+@app.delete("/api/themes/{theme_id}/values/{value_id}")
+def themes_delete_value(theme_id: str, value_id: str):
+    if not db.delete_theme_value(theme_id, value_id):
+        raise HTTPException(404, "Value not found")
+    return {"ok": True, "categories": db.list_theme_category_stats(theme_id)}
 
 
 # ── Packages / multifile (layout in SQLite; variants only on download) ─
@@ -1099,11 +1327,31 @@ class PackageGenerateBody(BaseModel):
     useDataThemes: bool | None = None
     themeBlend: list[ThemeBlendEntry] | None = None
     themePreferOverHistory: bool | None = None
+    # Per-variant form: tar | tar.gz | zip | itself (original package form / bare file)
+    outputFormat: str | None = "itself"
+    # Multi-variant download wrapper: tar | tar.gz | zip (default: tar.gz when N>1)
+    bundleFormat: str | None = None
 
 
 class PackageVerifyBody(BaseModel):
     memberPath: str
     verified: bool = True
+
+
+class PackageMemberUpdateBody(BaseModel):
+    memberPath: str
+    newPath: str | None = None
+    newName: str | None = None
+    content: str | None = None
+
+
+class PackageMemberSaveAsBody(BaseModel):
+    memberPath: str
+    newSchemaName: str | None = None
+    root: list[dict[str, Any]] | None = None
+    content: str | None = None  # optional edited design text → re-infer root
+    linkToPackage: bool = True
+    reinferFromContent: bool = True
 
 
 @app.get("/api/packages")
@@ -1169,11 +1417,47 @@ def packages_verify(package_id: str, body: PackageVerifyBody):
     return {"ok": True}
 
 
+@app.patch("/api/packages/{package_id}/members")
+def packages_update_member(package_id: str, body: PackageMemberUpdateBody):
+    """Rename member path/file name and/or update design sample content (not bulk generate)."""
+    if not db.get_package(package_id):
+        raise HTTPException(404, "Package not found")
+    try:
+        return package_svc.update_package_member(
+            package_id,
+            body.memberPath,
+            new_path=body.newPath,
+            new_name=body.newName,
+            content=body.content,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.post("/api/packages/{package_id}/members/save-as")
+def packages_member_save_as(package_id: str, body: PackageMemberSaveAsBody):
+    """Save member schema as a new schema (optionally re-link package member)."""
+    if not db.get_package(package_id):
+        raise HTTPException(404, "Package not found")
+    try:
+        return package_svc.save_member_schema_as(
+            package_id,
+            body.memberPath,
+            new_schema_name=body.newSchemaName,
+            root=body.root,
+            content=body.content,
+            link_to_package=body.linkToPackage,
+            reinfer_from_content=body.reinferFromContent,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
 @app.post("/api/packages/{package_id}/generate")
 def packages_generate(package_id: str, body: PackageGenerateBody):
     """
     Generate N full package variants. Returns a downloadable archive
-    (ZIP when one variant, tar.gz when multiple). Generated content is NOT stored in SQLite.
+    (ZIP / tar / tar.gz) or bare file. Generated content is NOT stored in SQLite.
     """
     # Build a temporary GenerateBody for theme context
     gen_body = GenerateBody(
@@ -1200,6 +1484,8 @@ def packages_generate(package_id: str, body: PackageGenerateBody):
             theme_lookup=theme_lookup,
             theme_prefer=theme_prefer,
             settings=db.get_settings(),
+            output_format=body.outputFormat,
+            bundle_format=body.bundleFormat,
         )
     except ValueError as e:
         raise HTTPException(400, str(e)) from e

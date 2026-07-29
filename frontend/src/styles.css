@@ -116,6 +116,68 @@ textarea {
   border-color: var(--accent);
 }
 
+.archive-opts {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0.5rem 0 0.75rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border, #333);
+  border-radius: 6px;
+}
+.archive-opts .label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  margin-bottom: 0.15rem;
+}
+
+
+.theme-cat-bar {
+  margin: 0.45rem 0 0.35rem;
+}
+.theme-cat-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+}
+.theme-cat-chip-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  max-width: 100%;
+}
+.theme-cat-del {
+  padding: 0.1rem 0.35rem;
+  line-height: 1.1;
+  min-width: 1.4rem;
+  font-weight: 700;
+}
+.theme-cat-create {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.55rem;
+  align-items: flex-end;
+  margin-bottom: 0.35rem;
+}
+.theme-cat-chips .btn.warn {
+  outline: 1px solid var(--warn, #e6a23c);
+}
+.theme-cat-chips .btn.full {
+  outline: 1px solid var(--danger, #e66);
+}
+.theme-values-ul .theme-value-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.theme-value-list {
+  margin: 0.6rem 0;
+  max-height: 220px;
+  overflow: auto;
+}
+
 .label {
   font-size: 10px;
   font-weight: 600;

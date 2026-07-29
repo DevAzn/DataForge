@@ -1622,11 +1622,14 @@ def delete_custom_value(value_id: str) -> bool:
         conn.close()
 
 
-def get_custom_values_for_key(key: str, limit: int = 200) -> list[str]:
-    """Values from any custom list mapped to this field key (or list name)."""
+def get_custom_values_for_key(key: str, limit: int | None = None) -> list[str]:
+    """Values from the Field values pool mapped to this tag/column key."""
+    from app.defaults import MAX_FIELD_VALUES_PER_TAG
+
     key = (key or "").strip()
     if not key:
         return []
+    lim = int(limit if limit is not None else MAX_FIELD_VALUES_PER_TAG)
     conn = connect()
     try:
         rows = conn.execute(
@@ -1640,11 +1643,217 @@ def get_custom_values_for_key(key: str, limit: int = 200) -> list[str]:
             ORDER BY cv.sort_order, cv.value
             LIMIT ?
             """,
-            (key, key, limit),
+            (key, key, lim),
         ).fetchall()
         return [r["value"] for r in rows]
     finally:
         conn.close()
+
+
+def _tag_pool_keys(key: str) -> tuple[str, str]:
+    """
+    Pool identity is the tag/column (leaf), e.g. TN.
+    Full path (root.TN) is also registered so generator path lookups hit the same pool.
+    """
+    key = (key or "").strip()
+    leaf = key.split(".")[-1] if "." in key else key
+    leaf = (leaf or key).strip()
+    return leaf, key
+
+
+def _find_custom_list_id_for_key(conn: sqlite3.Connection, key: str) -> str | None:
+    """Find Field values list for a tag/column (leaf preferred, then full path)."""
+    leaf, full = _tag_pool_keys(key)
+    for k in (leaf, full):
+        if not k:
+            continue
+        row = conn.execute(
+            """
+            SELECT list_id FROM custom_list_keys
+            WHERE key_name = ? COLLATE NOCASE
+            ORDER BY list_id LIMIT 1
+            """,
+            (k,),
+        ).fetchone()
+        if row:
+            return str(row["list_id"])
+        row = conn.execute(
+            """
+            SELECT id FROM custom_lists WHERE name = ? COLLATE NOCASE LIMIT 1
+            """,
+            (k,),
+        ).fetchone()
+        if row:
+            return str(row["id"])
+    return None
+
+
+def ensure_custom_field_values(key: str, values: list[str]) -> dict[str, Any]:
+    """
+    Append unique row samples into the Field values pool for a tag/column (e.g. TN).
+
+    One pool per tag name across files/schemas. Cap: MAX_FIELD_VALUES_PER_TAG (1000).
+    Only inserts new values; never stores full generated files.
+    """
+    from app.defaults import FIELD_VALUES_WARN_AT, MAX_FIELD_VALUES_PER_TAG
+
+    leaf, full = _tag_pool_keys(key)
+    pool_key = leaf or full
+    cleaned = []
+    seen: set[str] = set()
+    for raw in values or []:
+        val = (raw or "").strip()
+        if not val or val in seen:
+            continue
+        seen.add(val)
+        cleaned.append(val)
+    if not pool_key or not cleaned:
+        return {
+            "key": pool_key,
+            "listId": None,
+            "inserted": 0,
+            "total": 0,
+            "limit": MAX_FIELD_VALUES_PER_TAG,
+            "skippedCap": 0,
+            "warning": None,
+        }
+
+    conn = connect()
+    try:
+        ts = now_iso()
+        lid = _find_custom_list_id_for_key(conn, pool_key)
+        if not lid:
+            lid = str(uuid.uuid4())
+            display = pool_key
+            base = display
+            n = 2
+            while conn.execute(
+                "SELECT 1 FROM custom_lists WHERE name = ? COLLATE NOCASE LIMIT 1",
+                (display,),
+            ).fetchone():
+                display = f"{base} ({n})"
+                n += 1
+            conn.execute(
+                """
+                INSERT INTO custom_lists (id, name, description, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    lid,
+                    display,
+                    f"Field values pool for tag/column “{pool_key}” (max {MAX_FIELD_VALUES_PER_TAG})",
+                    ts,
+                    ts,
+                ),
+            )
+        # Always map tag leaf + full path to this pool
+        for k in {pool_key, full, leaf}:
+            k = (k or "").strip()
+            if not k:
+                continue
+            conn.execute(
+                "INSERT OR IGNORE INTO custom_list_keys (list_id, key_name) VALUES (?, ?)",
+                (lid, k),
+            )
+
+        current = int(
+            conn.execute(
+                "SELECT COUNT(*) AS n FROM custom_values WHERE list_id = ?", (lid,)
+            ).fetchone()["n"]
+        )
+        room = max(0, MAX_FIELD_VALUES_PER_TAG - current)
+        max_ord = conn.execute(
+            "SELECT COALESCE(MAX(sort_order), 0) AS m FROM custom_values WHERE list_id = ?",
+            (lid,),
+        ).fetchone()["m"]
+        inserted = 0
+        skipped_cap = 0
+        skipped_dup = 0
+        for val in cleaned:
+            if inserted >= room:
+                skipped_cap += 1
+                continue
+            try:
+                max_ord += 1
+                conn.execute(
+                    """
+                    INSERT INTO custom_values (id, list_id, value, sort_order, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (str(uuid.uuid4()), lid, val, max_ord, ts),
+                )
+                inserted += 1
+            except sqlite3.IntegrityError:
+                skipped_dup += 1
+        if inserted:
+            conn.execute(
+                "UPDATE custom_lists SET updated_at = ? WHERE id = ?", (ts, lid)
+            )
+        conn.commit()
+        total = int(
+            conn.execute(
+                "SELECT COUNT(*) AS n FROM custom_values WHERE list_id = ?", (lid,)
+            ).fetchone()["n"]
+        )
+        warning = None
+        if total >= FIELD_VALUES_WARN_AT:
+            warning = (
+                f"Tag “{pool_key}” has {total}/{MAX_FIELD_VALUES_PER_TAG} values "
+                f"(warn at {FIELD_VALUES_WARN_AT}+)."
+            )
+        if skipped_cap:
+            warning = (
+                f"Tag “{pool_key}” is full ({MAX_FIELD_VALUES_PER_TAG} max). "
+                f"Inserted {inserted}; skipped {skipped_cap} over cap."
+            )
+        return {
+            "key": pool_key,
+            "listId": lid,
+            "inserted": inserted,
+            "total": total,
+            "limit": MAX_FIELD_VALUES_PER_TAG,
+            "warnAt": FIELD_VALUES_WARN_AT,
+            "skippedCap": skipped_cap,
+            "skippedDup": skipped_dup,
+            "warning": warning,
+        }
+    finally:
+        conn.close()
+
+
+def ensure_custom_field_values_bulk(
+    items: list[dict[str, str]],
+) -> dict[str, Any]:
+    """
+    items: [{ keyName|categoryName|tag, value }, ...] → Field values pools by tag/column.
+    """
+    by_key: dict[str, list[str]] = {}
+    for it in items or []:
+        key = (
+            it.get("keyName")
+            or it.get("categoryName")
+            or it.get("tag")
+            or ""
+        ).strip()
+        val = (it.get("value") or "").strip()
+        if not key or not val:
+            continue
+        by_key.setdefault(key, []).append(val)
+    results = []
+    inserted = 0
+    warnings: list[str] = []
+    for key, vals in by_key.items():
+        r = ensure_custom_field_values(key, vals)
+        results.append(r)
+        inserted += int(r.get("inserted") or 0)
+        if r.get("warning"):
+            warnings.append(str(r["warning"]))
+    return {
+        "fields": len(by_key),
+        "inserted": inserted,
+        "results": results,
+        "warnings": warnings,
+    }
 
 
 def custom_list_count() -> int:
@@ -1725,21 +1934,58 @@ def save_theme(data: dict[str, Any]) -> dict[str, Any]:
         conn.close()
 
 
+def theme_category_count(theme_id: str, category: str) -> int:
+    """How many values exist for a theme category."""
+    conn = connect()
+    try:
+        cat = (category or "general").strip() or "general"
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM theme_values
+            WHERE theme_id = ? AND category = ? COLLATE NOCASE
+            """,
+            (theme_id, cat),
+        ).fetchone()
+        return int(row["n"] if row else 0)
+    finally:
+        conn.close()
+
+
 def add_theme_values(
     theme_id: str, category: str, values: list[str], weight: float = 1.0
-) -> int:
+) -> dict[str, Any]:
+    """
+    Insert theme values under a category.
+    Caps at MAX_THEME_CATEGORY_VALUES (100). Returns counts + optional warning.
+    """
+    from app.defaults import MAX_THEME_CATEGORY_VALUES, THEME_CATEGORY_WARN_AT
+
     conn = connect()
     try:
         if not conn.execute(
             "SELECT 1 FROM themes WHERE id = ?", (theme_id,)
         ).fetchone():
-            return -1
+            return {"inserted": -1, "error": "Theme not found"}
         cat = (category or "general").strip() or "general"
+        existing = conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM theme_values
+            WHERE theme_id = ? AND category = ? COLLATE NOCASE
+            """,
+            (theme_id, cat),
+        ).fetchone()
+        current = int(existing["n"] if existing else 0)
+        room = max(0, MAX_THEME_CATEGORY_VALUES - current)
         n = 0
+        skipped_cap = 0
+        skipped_dup = 0
         ts = now_iso()
         for raw in values:
             val = (raw or "").strip()
             if not val:
+                continue
+            if n >= room:
+                skipped_cap += 1
                 continue
             try:
                 conn.execute(
@@ -1751,12 +1997,32 @@ def add_theme_values(
                 )
                 n += 1
             except sqlite3.IntegrityError:
-                pass
+                skipped_dup += 1
         conn.execute(
             "UPDATE themes SET updated_at = ? WHERE id = ?", (ts, theme_id)
         )
         conn.commit()
-        return n
+        total = current + n
+        warning = None
+        if total >= THEME_CATEGORY_WARN_AT:
+            warning = (
+                f"Category “{cat}” has {total}/{MAX_THEME_CATEGORY_VALUES} values "
+                f"(warn at {THEME_CATEGORY_WARN_AT}+)."
+            )
+        if skipped_cap:
+            warning = (
+                f"Category “{cat}” is full ({MAX_THEME_CATEGORY_VALUES} max). "
+                f"Inserted {n}; skipped {skipped_cap} over cap."
+            )
+        return {
+            "inserted": n,
+            "total": total,
+            "limit": MAX_THEME_CATEGORY_VALUES,
+            "warnAt": THEME_CATEGORY_WARN_AT,
+            "skippedCap": skipped_cap,
+            "skippedDup": skipped_dup,
+            "warning": warning,
+        }
     finally:
         conn.close()
 
@@ -1796,9 +2062,99 @@ def get_theme_values(
         conn.close()
 
 
+def update_theme_value(theme_id: str, value_id: str, value: str) -> dict[str, Any] | None:
+    val = (value or "").strip()
+    if not val:
+        return None
+    conn = connect()
+    try:
+        row = conn.execute(
+            """
+            SELECT id, category, value, weight FROM theme_values
+            WHERE id = ? AND theme_id = ?
+            """,
+            (value_id, theme_id),
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            conn.execute(
+                "UPDATE theme_values SET value = ? WHERE id = ? AND theme_id = ?",
+                (val, value_id, theme_id),
+            )
+            conn.execute(
+                "UPDATE themes SET updated_at = ? WHERE id = ?",
+                (now_iso(), theme_id),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError:
+            return None
+        return {
+            "id": value_id,
+            "category": row["category"],
+            "value": val,
+            "weight": row["weight"],
+        }
+    finally:
+        conn.close()
+
+
+def delete_theme_value(theme_id: str, value_id: str) -> bool:
+    conn = connect()
+    try:
+        cur = conn.execute(
+            "DELETE FROM theme_values WHERE id = ? AND theme_id = ?",
+            (value_id, theme_id),
+        )
+        if cur.rowcount > 0:
+            conn.execute(
+                "UPDATE themes SET updated_at = ? WHERE id = ?",
+                (now_iso(), theme_id),
+            )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def delete_theme_category(theme_id: str, category: str) -> dict[str, Any]:
+    """
+    Delete an entire category pool under a theme (all values in that category).
+    Returns { ok, deleted, category }. Local-only empty categories have deleted=0.
+    """
+    cat = (category or "").strip()
+    if not theme_id or not cat:
+        return {"ok": False, "deleted": 0, "category": cat, "error": "Missing theme or category"}
+    conn = connect()
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM themes WHERE id = ? LIMIT 1", (theme_id,)
+        ).fetchone()
+        if not exists:
+            return {"ok": False, "deleted": 0, "category": cat, "error": "Theme not found"}
+        cur = conn.execute(
+            """
+            DELETE FROM theme_values
+            WHERE theme_id = ? AND category = ? COLLATE NOCASE
+            """,
+            (theme_id, cat),
+        )
+        deleted = int(cur.rowcount or 0)
+        if deleted:
+            conn.execute(
+                "UPDATE themes SET updated_at = ? WHERE id = ?",
+                (now_iso(), theme_id),
+            )
+        conn.commit()
+        return {"ok": True, "deleted": deleted, "category": cat}
+    finally:
+        conn.close()
+
+
 def delete_theme(theme_id: str) -> bool:
     conn = connect()
     try:
+        conn.execute("DELETE FROM theme_values WHERE theme_id = ?", (theme_id,))
         cur = conn.execute("DELETE FROM themes WHERE id = ?", (theme_id,))
         conn.commit()
         return cur.rowcount > 0
@@ -1826,6 +2182,40 @@ def list_theme_categories(theme_id: str | None = None) -> list[str]:
                 """
             ).fetchall()
         return [r["category"] for r in rows]
+    finally:
+        conn.close()
+
+
+def list_theme_category_stats(theme_id: str) -> list[dict[str, Any]]:
+    """Categories for a theme with value counts (for Data packs UI)."""
+    from app.defaults import MAX_THEME_CATEGORY_VALUES, THEME_CATEGORY_WARN_AT
+
+    conn = connect()
+    try:
+        rows = conn.execute(
+            """
+            SELECT category, COUNT(*) AS n
+            FROM theme_values
+            WHERE theme_id = ?
+            GROUP BY category
+            ORDER BY category COLLATE NOCASE
+            """,
+            (theme_id,),
+        ).fetchall()
+        out = []
+        for r in rows:
+            n = int(r["n"])
+            out.append(
+                {
+                    "category": r["category"],
+                    "count": n,
+                    "limit": MAX_THEME_CATEGORY_VALUES,
+                    "warnAt": THEME_CATEGORY_WARN_AT,
+                    "nearLimit": n >= THEME_CATEGORY_WARN_AT,
+                    "full": n >= MAX_THEME_CATEGORY_VALUES,
+                }
+            )
+        return out
     finally:
         conn.close()
 

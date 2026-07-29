@@ -13,7 +13,7 @@ SUPPORTED_FORMATS = frozenset(
 
 
 def normalize_format(fmt: str | None) -> str:
-    f = (fmt or "json").lower().strip()
+    f = (fmt or "xml").lower().strip()
     if f == "yml":
         return "yaml"
     if f == "ndjson":
@@ -184,6 +184,20 @@ def _xml_node(
     if isinstance(value, list):
         if not value:
             return _empty_xml(safe, sc)
+        # List of objects → repeated sibling tags <book>…</book><book>…</book>
+        # (not <book><book_0/>… which looks like tags were mangled)
+        if all(v is None or isinstance(v, dict) for v in value):
+            return "\n".join(
+                _xml_node(
+                    safe,
+                    v,
+                    self_closing=self_closing,
+                    path=f"{path}.{i}",
+                    self_closing_map=self_closing_map,
+                )
+                for i, v in enumerate(value)
+            )
+        # Scalars / mixed: keep a wrapper with indexed children
         inner = "\n".join(
             _xml_node(
                 f"{safe}_{i}",
@@ -228,6 +242,7 @@ def to_xml(
     record_tag: str = "record",
     self_closing: bool = True,
     self_closing_map: dict[str, bool] | None = None,
+    document_shaped: bool = False,
 ) -> str:
     """
     Serialize data as XML.
@@ -236,10 +251,79 @@ def to_xml(
     - record_tag: each array item name when data is a list of records
     - self_closing: default for null/empty elements as <tag/> vs <tag></tag>
     - self_closing_map: optional path or tag-name overrides (bool)
+    - document_shaped: when True and data is a single-key dict, that key is the
+      document root element (matches schema-tree / design-preview shape — no
+      extra wrapper, no synthetic <record> list envelope)
     """
     root = sanitize_xml_tag(root_tag, "root")
     rec = sanitize_xml_tag(record_tag, "record")
     sc_map = self_closing_map
+
+    # Schema-assembled document: { catalog: { book: [ {...}, ... ] } }
+    if document_shaped and isinstance(data, dict) and data:
+        if len(data) == 1:
+            root_key, root_val = next(iter(data.items()))
+            safe_root = sanitize_xml_tag(str(root_key), root)
+            if isinstance(root_val, dict):
+                if not root_val:
+                    return _empty_xml(safe_root, self_closing)
+                inner = "\n".join(
+                    _xml_node(
+                        k,
+                        v,
+                        self_closing=self_closing,
+                        path=str(k),
+                        self_closing_map=sc_map,
+                    )
+                    for k, v in root_val.items()
+                )
+                return f"<{safe_root}>\n{_indent(inner)}\n</{safe_root}>"
+            if isinstance(root_val, list):
+                # { book: [body, body] } → repeated <book> under xml root_tag wrapper
+                # when N>1; single item is just one <book>…</book> (or wrap if root_tag set)
+                if all(v is None or isinstance(v, dict) for v in root_val):
+                    parts = [
+                        _xml_node(
+                            safe_root,
+                            v,
+                            self_closing=self_closing,
+                            path=f"{safe_root}.{i}",
+                            self_closing_map=sc_map,
+                        )
+                        for i, v in enumerate(root_val)
+                    ]
+                    if len(parts) == 1 and (
+                        not root_tag or root_tag == safe_root or root_tag == "root"
+                    ):
+                        return parts[0]
+                    wrap = sanitize_xml_tag(root_tag, "root")
+                    return f"<{wrap}>\n{_indent(chr(10).join(parts))}\n</{wrap}>"
+                return _xml_node(
+                    safe_root,
+                    root_val,
+                    self_closing=self_closing,
+                    path=safe_root,
+                    self_closing_map=sc_map,
+                )
+            return _xml_node(
+                safe_root,
+                root_val,
+                self_closing=self_closing,
+                path=safe_root,
+                self_closing_map=sc_map,
+            )
+        # Multi-key document_shaped: wrap under root_tag (design preview style)
+        inner = "\n".join(
+            _xml_node(
+                k,
+                v,
+                self_closing=self_closing,
+                path=str(k),
+                self_closing_map=sc_map,
+            )
+            for k, v in data.items()
+        )
+        return f"<{root}>\n{_indent(inner)}\n</{root}>"
 
     if isinstance(data, list):
         if not data:
@@ -278,6 +362,20 @@ def to_xml(
     if isinstance(data, dict):
         if not data:
             return _empty_xml(root, self_closing)
+        # Prefer document-shaped when dict is clearly a single root element tree
+        # (e.g. {catalog: {...}}) — matches design preview without extra wrapper.
+        if len(data) == 1:
+            only_key = next(iter(data))
+            only_val = data[only_key]
+            if isinstance(only_val, (dict, list)):
+                return to_xml(
+                    data,
+                    root_tag=root_tag,
+                    record_tag=record_tag,
+                    self_closing=self_closing,
+                    self_closing_map=self_closing_map,
+                    document_shaped=True,
+                )
         inner = "\n".join(
             _xml_node(
                 k,
@@ -497,6 +595,7 @@ def serialize(
     xml_record_tag: str = "record",
     xml_self_closing: bool = True,
     xml_self_closing_map: dict[str, bool] | None = None,
+    document_shaped: bool = False,
 ) -> str:
     f = validate_format(fmt)
     if f == "json":
@@ -510,6 +609,7 @@ def serialize(
             record_tag=xml_record_tag,
             self_closing=xml_self_closing,
             self_closing_map=xml_self_closing_map,
+            document_shaped=document_shaped,
         )
     if f == "csv":
         return to_csv(
@@ -551,3 +651,16 @@ def csv_header_line(headers: list[str]) -> str:
 
 def csv_data_line(headers: list[str], flat: dict[str, str]) -> str:
     return ",".join(csv_escape(flat.get(h, "")) for h in headers)
+
+
+def txt_header_line(headers: list[str], *, col_sep: str = "\t") -> str:
+    """TSV-style header for streaming TXT (tab by default)."""
+    return col_sep.join(_escape_delimited(h, col_sep) for h in headers)
+
+
+def txt_data_line(
+    headers: list[str], flat: dict[str, str], *, col_sep: str = "\t"
+) -> str:
+    return col_sep.join(
+        _escape_delimited(flat.get(h, ""), col_sep) for h in headers
+    )

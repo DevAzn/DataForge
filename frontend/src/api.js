@@ -72,6 +72,13 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(schema)
     }),
+  /** Save schema + map all non-theme sample values into Field values pools by tag. */
+  mapSchemaFields: (schema) =>
+    req('/api/schemas/map-fields', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(schema)
+    }),
   deleteSchema: (id) => req(`/api/schemas/${id}`, { method: 'DELETE' }),
   touchSchema: (id) => req(`/api/schemas/${id}/touch`, { method: 'POST' }),
   importFile: async (file) => {
@@ -178,19 +185,40 @@ export const api = {
     req(
       `/api/themes/${id}/values${category ? `?category=${encodeURIComponent(category)}` : ''}`
     ),
+  themeCategoryStats: (id) => req(`/api/themes/${id}/categories`),
+  /** Delete entire category pool (all values) under a theme. */
+  deleteThemeCategory: (themeId, category) =>
+    req(
+      `/api/themes/${themeId}/categories/${encodeURIComponent(category)}`,
+      { method: 'DELETE' }
+    ),
   addThemeValues: (id, body) =>
     req(`/api/themes/${id}/values`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     }),
+  updateThemeValue: (themeId, valueId, value) =>
+    req(`/api/themes/${themeId}/values/${valueId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value })
+    }),
+  deleteThemeValue: (themeId, valueId) =>
+    req(`/api/themes/${themeId}/values/${valueId}`, { method: 'DELETE' }),
   listPackages: () => req('/api/packages'),
   getPackage: (id) => req(`/api/packages/${id}`),
   estimatePackage: (id, recordCount = 1) =>
     req(`/api/packages/${id}/estimate?recordCount=${recordCount}`),
   importPackage: async (fileList) => {
     const fd = new FormData()
-    for (const f of fileList) fd.append('files', f)
+    for (const f of fileList) {
+      // Preserve webkitRelativePath for folder uploads (nested explorer paths)
+      const rel =
+        (f.webkitRelativePath && String(f.webkitRelativePath).replace(/\\/g, '/')) ||
+        f.name
+      fd.append('files', f, rel)
+    }
     return req('/api/packages/import', { method: 'POST', body: fd })
   },
   deletePackage: (id) => req(`/api/packages/${id}`, { method: 'DELETE' }),
@@ -199,6 +227,18 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ memberPath, verified })
+    }),
+  updatePackageMember: (id, body) =>
+    req(`/api/packages/${id}/members`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }),
+  savePackageMemberAs: (id, body) =>
+    req(`/api/packages/${id}/members/save-as`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
     }),
   generatePackage: (id, body) =>
     req(`/api/packages/${id}/generate`, {
@@ -299,6 +339,8 @@ export function emptyRow(sortOrder = 0) {
     sampleValue: '',
     isPrimary: false,
     isUnique: false,
+    /** When true, this tag wraps each record in multi-record one-file XML */
+    isRecordTag: false,
     nullRate: 0,
     enumValues: undefined,
     minLength: undefined,

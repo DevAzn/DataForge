@@ -41,9 +41,21 @@ def _fill_remaining(
     chunk_max: int,
     rng: random.Random,
 ) -> list[int]:
-    """Partition remaining into sizes in [chunk_min, chunk_max] (best effort)."""
+    """
+    Partition remaining into sizes in [chunk_min, chunk_max] (best effort).
+
+    Prefer not emitting undersized tails: when a leftover is below chunk_min,
+    merge it into the previous chunk (may exceed chunk_max) so the plan still
+    sums correctly without assert-crashing.
+    """
     chunks: list[int] = []
     while remaining > 0:
+        if remaining < chunk_min:
+            if chunks:
+                chunks[-1] += remaining
+            else:
+                chunks.append(remaining)
+            break
         if remaining <= chunk_max:
             chunks.append(remaining)
             break
@@ -54,10 +66,21 @@ def _fill_remaining(
             upper = remaining - chunk_min
             upper = max(chunk_min, min(chunk_max, upper))
         if upper < lower:
-            chunks.append(remaining)
+            if chunks:
+                chunks[-1] += remaining
+            else:
+                chunks.append(remaining)
             break
         size = rng.randint(lower, upper)
-        size = max(1, min(size, remaining))
+        size = max(chunk_min, min(size, remaining))
+        # Avoid leaving an undersized remainder when we can take a smaller legal chunk
+        if 0 < remaining - size < chunk_min:
+            alt = remaining - chunk_min
+            if chunk_min <= alt <= chunk_max:
+                size = alt
+            else:
+                # Take all remaining into this chunk (may exceed max) rather than a bad tail
+                size = remaining
         chunks.append(size)
         remaining -= size
     return chunks
@@ -116,7 +139,14 @@ def _rebalance(chunks: list[int], target: int) -> list[int]:
     chunks = list(chunks)
     chunks[-1] += target - s
     if chunks[-1] <= 0:
-        chunks[-1] = 1
+        # Fold non-positive tail into prior chunk or replace plan with [target]
+        if len(chunks) > 1:
+            chunks[-2] += chunks[-1]
+            chunks.pop()
+            if sum(chunks) != target:
+                chunks[-1] += target - sum(chunks)
+        else:
+            chunks = [target]
     return chunks
 
 

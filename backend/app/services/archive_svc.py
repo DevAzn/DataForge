@@ -92,21 +92,33 @@ def build_archive(
     """
     entries: list[tuple[str, str]] = []
     for f in files:
-        fmt = f.get("format") or "json"
+        fmt = f.get("format") or "xml"
         name = f.get("fileName") or "data"
-        content = export_fmt.serialize(
-            f.get("data"),
-            fmt,
-            multi_row=f.get("multiRow", True),
-            layout_mode=f.get("layoutMode") or "single-header",
-            delim=f.get("delim") or ".",
-            nested_as_json=bool(f.get("nestedAsJson")),
-            xml_root_tag=f.get("xmlRootTag") or "root",
-            xml_record_tag=f.get("xmlRecordTag") or "record",
-            xml_self_closing=bool(f["xmlSelfClosing"])
-            if "xmlSelfClosing" in f and f["xmlSelfClosing"] is not None
-            else True,
-        )
+        data = f.get("data")
+        # Pre-serialized body (skip re-encode)
+        if f.get("content") is not None and str(f.get("content")) != "":
+            content = str(f.get("content"))
+        else:
+            # Schema-shaped XML document (single-key tree) — do not list-wrap
+            doc_shaped = bool(f.get("documentShaped")) or (
+                (fmt or "").lower() == "xml"
+                and isinstance(data, dict)
+                and len(data) == 1
+            )
+            content = export_fmt.serialize(
+                data,
+                fmt,
+                multi_row=f.get("multiRow", True),
+                layout_mode=f.get("layoutMode") or "single-header",
+                delim=f.get("delim") or ".",
+                nested_as_json=bool(f.get("nestedAsJson")),
+                xml_root_tag=f.get("xmlRootTag") or "root",
+                xml_record_tag=f.get("xmlRecordTag") or "record",
+                xml_self_closing=bool(f["xmlSelfClosing"])
+                if "xmlSelfClosing" in f and f["xmlSelfClosing"] is not None
+                else True,
+                document_shaped=doc_shaped,
+            )
         e = export_fmt.extension_for_format(fmt)
         lower = name.lower()
         if not any(
