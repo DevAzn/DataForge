@@ -12,10 +12,17 @@ Design or import schemas (XML / CSV / TXT), edit every field, generate realistic
 |-------------|-----------------|
 | **Python** | **3.12+** (`python3` / `python3.12`) |
 | **Node.js** | **18+** (LTS recommended) |
-| **npm** | Bundled with Node |
+| **npm** | Bundled with Node (only needed if frontend deps are missing) |
 | **bash** | Linux, macOS, **WSL**, or **Git Bash** on Windows |
 | **Ports free** | **8765** (API), **5173** (UI) |
 | **Browser** | Any modern browser for the UI |
+
+**Vendored deps (committed in the repo):**
+
+- `frontend/node_modules/` — Vue/Vite tooling (multi-OS natives included)
+- `backend/vendor/wheels/` — Python wheels for common OS/arch + Python 3.12–3.14
+
+You still need **Python** and **Node** installed on the machine. Start scripts create a local venv and prefer the wheelhouse (offline-friendly); they fall back to PyPI/npm only if something is missing for your platform.
 
 Optional: `pip install "pv-dataforge[bulk]"` (polars/numpy) — not required for normal use.
 
@@ -32,7 +39,7 @@ Works on **Linux**, **macOS**, **WSL**, and **Git Bash** on Windows.
 ```bash
 cd DataForge
 chmod +x scripts/*.sh   # once, if needed
-./scripts/install.sh
+./scripts/install.sh    # uses vendored wheels + existing node_modules
 ```
 
 **Download + install** in one step (clones into `./DataForge`):

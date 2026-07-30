@@ -37,8 +37,12 @@ if ! version_ge "$node_ver" "18.0"; then
   exit 1
 fi
 
-if [[ ! -d "$FRONTEND/node_modules" ]]; then
+# node_modules is committed; only npm install when incomplete (e.g. wrong OS natives)
+if [[ ! -d "$FRONTEND/node_modules" || ! -d "$FRONTEND/node_modules/vite" ]]; then
   echo "Installing frontend dependencies..."
+  npm install
+elif [[ ! -x "$FRONTEND/node_modules/.bin/vite" && ! -f "$FRONTEND/node_modules/.bin/vite.cmd" ]]; then
+  echo "Frontend tooling incomplete — running npm install..."
   npm install
 fi
 

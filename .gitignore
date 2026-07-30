@@ -1,13 +1,16 @@
 # ── Python ──────────────────────────────────────────────────────────
 .venv/
 venv/
+backend/.venv/
 __pycache__/
 *.py[cod]
 *$py.class
 *.egg-info/
 .eggs/
-dist/
-build/
+# Only app build outputs — never strip package trees under node_modules
+/dist/
+/build/
+frontend/dist/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -16,8 +19,9 @@ htmlcov/
 *.cover
 
 # ── Node / Vue ──────────────────────────────────────────────────────
-# frontend/node_modules/ intentionally tracked for offline/clone convenience
-frontend/dist/
+# frontend/node_modules/ is tracked so clones can run without npm install
+!frontend/node_modules/
+!frontend/node_modules/**
 npm-debug.log*
 yarn-error.log*
 .pnpm-store/

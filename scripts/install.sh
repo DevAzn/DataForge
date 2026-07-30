@@ -258,7 +258,16 @@ install_backend() {
 
   info "Installing Python dependencies..."
   "$venv_py" -m pip install --upgrade pip
-  "$venv_py" -m pip install -r requirements.txt
+  local wheels="$backend/vendor/wheels"
+  if [[ -d "$wheels" ]] && compgen -G "$wheels/*.whl" >/dev/null 2>&1; then
+    info "Using vendored wheels in backend/vendor/wheels ..."
+    if ! "$venv_py" -m pip install --no-index --find-links="$wheels" -r requirements.txt; then
+      warn "Offline wheel install incomplete for this Python/platform — using PyPI fallback"
+      "$venv_py" -m pip install --find-links="$wheels" -r requirements.txt
+    fi
+  else
+    "$venv_py" -m pip install -r requirements.txt
+  fi
 
   if [[ "$WITH_BULK" -eq 1 ]]; then
     info "Installing optional bulk extras (polars, numpy)..."
@@ -278,12 +287,12 @@ install_frontend() {
     rm -rf node_modules
   fi
 
-  if [[ ! -d node_modules ]]; then
+  # node_modules is committed for clone-and-run; only install when missing or --force
+  if [[ "$FORCE" -eq 1 || ! -d node_modules || ! -d node_modules/vite ]]; then
     info "Installing frontend dependencies (npm install)..."
     npm install
   else
-    info "node_modules present — running npm install to sync lockfile..."
-    npm install
+    info "node_modules already present (vendored) — skipping npm install"
   fi
 
   ok "Frontend ready"

@@ -47,6 +47,23 @@ resolve_venv_python() {
   fi
 }
 
+WHEELS="$BACKEND/vendor/wheels"
+
+install_deps() {
+  local py="$1"
+  # Prefer vendored wheels (committed for offline / first-run clones).
+  if [[ -d "$WHEELS" ]] && compgen -G "$WHEELS/*.whl" >/dev/null 2>&1; then
+    echo "Installing Python deps from vendor/wheels (offline-friendly)..."
+    if "$py" -m pip install --no-index --find-links="$WHEELS" -r requirements.txt; then
+      return 0
+    fi
+    echo "Vendor wheelhouse incomplete for this platform/Python — falling back to PyPI..."
+    "$py" -m pip install --find-links="$WHEELS" -r requirements.txt
+  else
+    "$py" -m pip install -r requirements.txt
+  fi
+}
+
 VENV_PY="$(resolve_venv_python)"
 if [[ -z "$VENV_PY" ]]; then
   PY="$(resolve_python)"
@@ -58,9 +75,14 @@ if [[ -z "$VENV_PY" ]]; then
     exit 1
   fi
   "$VENV_PY" -m pip install --upgrade pip
-  "$VENV_PY" -m pip install -r requirements.txt
+  install_deps "$VENV_PY"
 else
   echo "Using existing venv Python $("$VENV_PY" -c 'import sys; print(sys.version.split()[0])')"
+  # Ensure core imports work (fresh clone may ship empty .venv paths incorrectly)
+  if ! "$VENV_PY" -c "import fastapi, uvicorn" >/dev/null 2>&1; then
+    echo "Venv missing packages — installing..."
+    install_deps "$VENV_PY"
+  fi
 fi
 
 # Ensure data dir exists (SQLite path is relative to project root)
