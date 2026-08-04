@@ -9,6 +9,7 @@ __pycache__/
 .eggs/
 # Only app build outputs — never strip package trees under node_modules
 /dist/
+!/dist/DataForge/DataForge.exe
 /build/
 frontend/dist/
 .pytest_cache/
