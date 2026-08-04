@@ -75,6 +75,30 @@ def test_txt_header_then_data_rows_tab_separated():
     assert not text.lstrip().startswith("[")
 
 
+def test_xlsx_workbook_has_header_and_rows():
+    """XLSX is real OOXML bytes with header + data (openpyxl)."""
+    records = [
+        {"name": "Ada", "city": "London"},
+        {"name": "Bob", "city": "Paris"},
+    ]
+    raw = export_fmt.serialize(records, "xlsx", multi_row=True)
+    assert isinstance(raw, (bytes, bytearray)), type(raw)
+    # ZIP/OOXML magic
+    assert raw[:2] == b"PK"
+    from openpyxl import load_workbook
+    import io
+
+    wb = load_workbook(io.BytesIO(raw), read_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    assert rows[0] == ("name", "city") or rows[0][0] == "name"
+    assert "Ada" in rows[1]
+    assert "Bob" in rows[2]
+    assert export_fmt.extension_for_format("xlsx") == "xlsx"
+    assert export_fmt.is_binary_format("xlsx") is True
+    assert export_fmt.normalize_format("xls") == "xlsx"
+
+
 def test_generate_then_serialize_csv_and_txt():
     schema = _flat_schema()
     result = generator.generate_records(

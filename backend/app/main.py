@@ -107,7 +107,7 @@ class GenerateBody(BaseModel):
 
 class ExportBody(BaseModel):
     data: Any
-    format: str = "xml"  # team default (xml · csv · txt); json/yaml/jsonl still accepted
+    format: str = "xml"  # team UI: xml · csv · txt · xlsx; json/yaml/jsonl still accepted
     multiRow: bool = True
     layoutMode: str = "single-header"
     delim: str = "."
@@ -604,6 +604,11 @@ def generate_stream(body: StreamBody):
     settings = db.get_settings()
     try:
         fmt = export_fmt.validate_format(body.format or "csv")
+        if export_fmt.is_binary_format(fmt):
+            raise HTTPException(
+                400,
+                "Streaming is not supported for XLSX — use one-file Generate download instead.",
+            )
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
 
@@ -818,7 +823,7 @@ def generate_per_file(body: PerFileBody):
             continue
         # One file per record — same schema tree shape as one-file multi-record
         doc = generator.assemble_schema_document(schema, [rec])
-        text = export_fmt.serialize(
+        payload = export_fmt.serialize(
             doc if isinstance(doc, dict) else rec,
             fmt,
             multi_row=False,
@@ -828,10 +833,14 @@ def generate_per_file(body: PerFileBody):
             document_shaped=isinstance(doc, dict),
             **_xml_opts(body, settings),
         )
-        entries.append((claimed, text))
+        entries.append((claimed, payload))
         written += 1
         if len(sample) < sample_n:
-            sample.append({"path": claimed, "preview": text[:400]})
+            if isinstance(payload, (bytes, bytearray)):
+                preview = f"// binary {fmt} · {len(payload)} bytes"
+            else:
+                preview = str(payload)[:400]
+            sample.append({"path": claimed, "preview": preview})
 
     # Optional top-level directory inside the archive (dir name = archive base name)
     arch_dir = export_fmt.sanitize_export_file_name(
@@ -942,7 +951,7 @@ def export_data(body: ExportBody):
         data = [data]
     try:
         fmt = export_fmt.validate_format(body.format)
-        text = export_fmt.serialize(
+        payload = export_fmt.serialize(
             data,
             fmt,
             multi_row=body.multiRow,
@@ -962,7 +971,15 @@ def export_data(body: ExportBody):
         )
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
-    return {"content": text, "format": fmt}
+    # Binary formats (xlsx) travel as base64 so JSON transport stays intact
+    if isinstance(payload, (bytes, bytearray)):
+        return {
+            "contentBase64": base64.b64encode(bytes(payload)).decode("ascii"),
+            "format": fmt,
+            "binary": True,
+            "mediaType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        }
+    return {"content": payload, "format": fmt, "binary": False}
 
 
 @app.post("/api/export/archive")

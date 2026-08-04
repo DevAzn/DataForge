@@ -90,13 +90,18 @@ def build_archive(
     Default extension: .tar.gz when packing more than one file, else .zip.
     Pass an explicit extension to override.
     """
-    entries: list[tuple[str, str]] = []
+    entries: list[tuple[str, bytes | str]] = []
     for f in files:
         fmt = f.get("format") or "xml"
         name = f.get("fileName") or "data"
         data = f.get("data")
-        # Pre-serialized body (skip re-encode)
-        if f.get("content") is not None and str(f.get("content")) != "":
+        content: bytes | str
+        # Pre-serialized binary (base64) or text body
+        if f.get("contentBase64"):
+            import base64
+
+            content = base64.b64decode(str(f.get("contentBase64")))
+        elif f.get("content") is not None and str(f.get("content")) != "":
             content = str(f.get("content"))
         else:
             # Schema-shaped XML document (single-key tree) — do not list-wrap
@@ -123,7 +128,17 @@ def build_archive(
         lower = name.lower()
         if not any(
             lower.endswith(x)
-            for x in (f".{e}", ".json", ".xml", ".csv", ".txt", ".yml", ".yaml")
+            for x in (
+                f".{e}",
+                ".json",
+                ".xml",
+                ".csv",
+                ".txt",
+                ".yml",
+                ".yaml",
+                ".xlsx",
+                ".xls",
+            )
         ):
             name = f"{name}.{e}"
         if top_folder:

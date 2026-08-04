@@ -11,6 +11,7 @@ Keep in sync with `.gitlab/duo/skills/` (same content; chat-rules reference both
 | [bootstrap](./bootstrap/SKILL.md) | Start / verify local stack |
 | [product-rules](./product-rules/SKILL.md) | Generate, package, persistence, formats |
 | [test-pass](./test-pass/SKILL.md) | Smoke / verify before calling done |
+| [test-matrix](./test-matrix/SKILL.md) | Full UI/UX · functional · system · UAT · perf · compatibility |
 | [ui-workspace](./ui-workspace/SKILL.md) | App.vue workspaces, layout, brand |
 | [quality-audit](./quality-audit/SKILL.md) | Read-only production readiness pass |
 

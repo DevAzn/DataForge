@@ -179,6 +179,7 @@ Details: **[GROK_BUILD_SETUP.md](./GROK_BUILD_SETUP.md)**.
 | **bootstrap** | Start / verify stack |
 | **product-rules** | Generate, package, persistence, formats |
 | **test-pass** | Smoke before done |
+| **test-matrix** | Full UI/UX · functional · system · UAT · perf · compatibility matrix |
 | **ui-workspace** | App.vue layout / brand / workspaces |
 | **quality-audit** | Read-only readiness pass |
 
@@ -191,6 +192,7 @@ Admin checklist (protected branches, code owners, Duo enablement): `.gitlab/duo/
 | **pv-bootstrap** | Shipped | Start stack / health |
 | **pv-rules** | Shipped | Product non-negotiables |
 | **pv-test-pass** | Shipped | Ordered smoke |
+| **pv-test-matrix** | Shipped | Full test matrix (UI/UX, UAT, perf, automation, …) |
 | **pv-ui-workspace** | Shipped | Dynamic layout, nav density, brand, formats |
 | **skill-evolve** | Shipped | Promote loops → skills |
 | **skillify-helper** | Shipped | Power-user skillify |
@@ -220,6 +222,7 @@ Admin checklist (protected branches, code owners, Duo enablement): `.gitlab/duo/
 
 ## 10. Session changelog
 
+- **2026-08-04** — Skill **`pv-test-matrix`** / Duo **`test-matrix`**: full quality matrix (UI/UX, functional, system, UAT, performance, usability, compatibility, automation, regression, security).  
 - **2026-07-26** — Skill **`pv-ui-workspace`** shipped (dynamic layout, nav density, brand icon, xml/csv/txt, Library/Recent/Data packs). **pv-rules** updated: strict fill order, team formats, UI brand DataForge. Stabilization Phases A–B + UI polish in progress.  
 - **2026-07-26** — Workspace folder **`DataForge`**; product brand **DataForge**; skills `pv-*`; package `pv-dataforge`; Grok power-user OS retained.  
 - Earlier: power-user AGENTS/skills/workflow; tar.gz multi; dynamic workspaces; delivery plan fix.

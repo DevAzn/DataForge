@@ -17,10 +17,11 @@ import { formatApiError } from './api.js'
 import { createDialogController } from './dialogController.js'
 
 describe('TEAM_EXPORT_FORMATS', () => {
-  it('is only xml, csv, txt', () => {
-    assert.deepEqual([...TEAM_EXPORT_FORMATS], ['xml', 'csv', 'txt'])
+  it('is xml, csv, txt, xlsx only (no json/yaml in chrome)', () => {
+    assert.deepEqual([...TEAM_EXPORT_FORMATS], ['xml', 'csv', 'txt', 'xlsx'])
     assert.equal(TEAM_EXPORT_FORMATS.includes('json'), false)
     assert.equal(TEAM_EXPORT_FORMATS.includes('yaml'), false)
+    assert.equal(TEAM_EXPORT_FORMATS.includes('xlsx'), true)
   })
 })
 

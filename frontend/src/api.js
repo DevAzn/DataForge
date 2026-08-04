@@ -390,16 +390,40 @@ export function downloadText(text, fileName) {
   downloadBlob(new Blob([text], { type: 'text/plain' }), fileName)
 }
 
-/** Download base64 archive (ZIP or tar.gz). MIME inferred from fileName. */
-export function downloadBase64Zip(b64, fileName) {
-  const bin = atob(b64)
+/** Decode base64 to Uint8Array. */
+export function base64ToBytes(b64) {
+  const bin = atob(b64 || '')
   const bytes = new Uint8Array(bin.length)
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+  return bytes
+}
+
+/**
+ * Download a base64 payload (xlsx, zip, etc.).
+ * @param {string} b64
+ * @param {string} fileName
+ * @param {string} [mime]
+ */
+export function downloadBase64(b64, fileName, mime) {
+  const bytes = base64ToBytes(b64)
   const lower = (fileName || '').toLowerCase()
-  const type = lower.endsWith('.tar.gz') || lower.endsWith('.tgz')
-    ? 'application/gzip'
-    : lower.endsWith('.tar')
-      ? 'application/x-tar'
-      : 'application/zip'
-  downloadBlob(new Blob([bytes], { type }), fileName || 'archive.zip')
+  let type = mime || 'application/octet-stream'
+  if (!mime) {
+    if (lower.endsWith('.xlsx')) {
+      type =
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    } else if (lower.endsWith('.tar.gz') || lower.endsWith('.tgz')) {
+      type = 'application/gzip'
+    } else if (lower.endsWith('.tar')) {
+      type = 'application/x-tar'
+    } else if (lower.endsWith('.zip')) {
+      type = 'application/zip'
+    }
+  }
+  downloadBlob(new Blob([bytes], { type }), fileName || 'download.bin')
+}
+
+/** Download base64 archive (ZIP or tar.gz). MIME inferred from fileName. */
+export function downloadBase64Zip(b64, fileName) {
+  downloadBase64(b64, fileName || 'archive.zip')
 }

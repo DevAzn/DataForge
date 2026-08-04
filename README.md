@@ -2,7 +2,7 @@
 
 Local **ETL test-data generator** for developers and testers.
 
-Design or import schemas (XML / CSV / TXT), edit every field, generate realistic randomized records, and export single files or multi-file packages. Runs entirely on your machine — **Python + Vue 3 + SQLite**. No cloud account required.
+Design or import schemas (XML / CSV / TXT), edit every field, generate realistic randomized records, and export single files or multi-file packages (**XML · CSV · TXT · XLSX**). Runs entirely on your machine — **Python + Vue 3 + SQLite**. No cloud account required.
 
 ---
 
@@ -126,6 +126,8 @@ curl -s http://127.0.0.1:8765/api/status
 Open http://localhost:5173 — you should see the **DataForge** UI (Vite proxies `/api` to the backend).
 
 **Where data is stored:** design data (schemas, themes, categories, custom lists, settings) is saved in `data/pv_dataforge.sqlite` on **your machine**. That folder is gitignored — each developer gets their own empty DB after install. Generated export file bodies are **not** stored in SQLite.
+
+**Starter themes:** on first launch the app seeds built-in **Data packs** (General, Star Wars, Fantasy) with ready-made categories and values so Generate works immediately. You can add your own categories/values to those packs, create new themes, and everything saves in your local SQLite — re-seeding never deletes user data.
 
 ---
 

@@ -268,6 +268,162 @@ def init_db() -> None:
         conn.commit()
     finally:
         conn.close()
+    # Starter theme library (idempotent; never wipes user values)
+    try:
+        seed_builtin_themes()
+    except Exception:
+        # Fresh install must still boot even if seed fails
+        pass
+
+
+def seed_builtin_themes(*, force: bool = False) -> dict[str, Any]:
+    """
+    Install / refresh shipped theme packs into SQLite.
+
+    - Stable theme IDs from builtin_themes.BUILTIN_THEME_PACKS
+    - INSERT OR IGNORE for values → user-added rows stay; no duplicates
+    - Does not delete user categories or values
+    - Skips a pack if another theme already owns the same slug or name
+      (unless that theme is this builtin id)
+    - Tracks version in settings so we can expand packs in future releases
+    """
+    from app.builtin_themes import (
+        BUILTIN_THEME_PACKS,
+        BUILTIN_THEMES_SEED_VERSION,
+    )
+
+    settings = get_settings()
+    current_ver = int(settings.get("builtinThemesSeedVersion") or 0)
+    if not force and current_ver >= BUILTIN_THEMES_SEED_VERSION:
+        # Still ensure each pack exists if user wiped DB themes but kept settings
+        need = False
+        for pack in BUILTIN_THEME_PACKS:
+            if not _theme_exists_by_id(pack["id"]):
+                need = True
+                break
+        if not need:
+            return {
+                "ok": True,
+                "skipped": True,
+                "version": current_ver,
+                "packs": 0,
+                "valuesInserted": 0,
+            }
+
+    packs_touched = 0
+    values_inserted = 0
+    for pack in BUILTIN_THEME_PACKS:
+        r = _seed_one_builtin_pack(pack)
+        if r.get("touched"):
+            packs_touched += 1
+        values_inserted += int(r.get("inserted") or 0)
+
+    # Enable themes + prefer them; blend General if no blend configured yet
+    patch: dict[str, Any] = {
+        "builtinThemesSeedVersion": BUILTIN_THEMES_SEED_VERSION,
+    }
+    dt = dict(settings.get("dataThemes") or {})
+    dt["enabled"] = True if dt.get("enabled") is None else dt.get("enabled", True)
+    if dt.get("preferOverHistory") is None:
+        dt["preferOverHistory"] = True
+    blend = list(dt.get("blend") or [])
+    if not blend and _theme_exists_by_id("theme-builtin-general"):
+        blend = [{"themeId": "theme-builtin-general", "weight": 1}]
+        dt["blend"] = blend
+    # Keep enabled true by default for new installs
+    if "enabled" not in (settings.get("dataThemes") or {}):
+        dt["enabled"] = True
+    patch["dataThemes"] = dt
+    set_settings(patch)
+
+    return {
+        "ok": True,
+        "skipped": False,
+        "version": BUILTIN_THEMES_SEED_VERSION,
+        "packs": packs_touched,
+        "valuesInserted": values_inserted,
+    }
+
+
+def _theme_exists_by_id(theme_id: str) -> bool:
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM themes WHERE id = ?", (theme_id,)
+        ).fetchone()
+        return bool(row)
+    finally:
+        conn.close()
+
+
+def _seed_one_builtin_pack(pack: dict[str, Any]) -> dict[str, Any]:
+    """Ensure one builtin theme + categories/values exist (additive only)."""
+    tid = pack["id"]
+    name = (pack.get("name") or "Theme").strip()
+    slug = (pack.get("slug") or name).strip().lower().replace(" ", "-")
+    desc = pack.get("description")
+    categories: dict[str, list[str]] = pack.get("categories") or {}
+
+    conn = connect()
+    try:
+        by_id = conn.execute(
+            "SELECT id, is_builtin FROM themes WHERE id = ?", (tid,)
+        ).fetchone()
+        if not by_id:
+            # Avoid UNIQUE(name)/UNIQUE(slug) clash with user themes
+            clash = conn.execute(
+                """
+                SELECT id FROM themes
+                WHERE id != ?
+                  AND (slug = ? COLLATE NOCASE OR name = ? COLLATE NOCASE)
+                LIMIT 1
+                """,
+                (tid, slug, name),
+            ).fetchone()
+            if clash:
+                return {
+                    "touched": False,
+                    "inserted": 0,
+                    "skipped": "name_or_slug_exists",
+                }
+            ts = now_iso()
+            conn.execute(
+                """
+                INSERT INTO themes (id, name, slug, description, is_builtin, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 1, ?, ?)
+                """,
+                (tid, name, slug, desc, ts, ts),
+            )
+            conn.commit()
+        else:
+            # Refresh metadata for builtin packs we own (not user themes)
+            if int(by_id["is_builtin"] or 0) == 1:
+                conn.execute(
+                    """
+                    UPDATE themes
+                    SET name = ?, slug = ?, description = ?, is_builtin = 1,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (name, slug, desc, now_iso(), tid),
+                )
+                conn.commit()
+    finally:
+        conn.close()
+
+    inserted_total = 0
+    for cat, values in categories.items():
+        if not values:
+            continue
+        res = add_theme_values(tid, cat, list(values))
+        n = int(res.get("inserted") or 0)
+        if n > 0:
+            inserted_total += n
+        # Cap / missing theme returns negative or error — ignore for seed
+        if res.get("error"):
+            continue
+
+    return {"touched": True, "inserted": inserted_total}
 
 
 def deep_merge(base: dict, overlay: dict) -> dict:

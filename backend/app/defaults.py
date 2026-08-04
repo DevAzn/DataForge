@@ -23,6 +23,7 @@ DEFAULT_DATA_THEMES = {
     # When true, fields with themeCategory pull from active theme packs
     "enabled": True,
     # Blend packs: [{ themeId, weight }] — multiple themes = cross-theme mix
+    # Seed may set General builtin on first install when blend is still empty.
     "blend": [],
     # Prefer theme values before custom lists / history (still after enums)
     "preferOverHistory": True,
@@ -45,6 +46,8 @@ DEFAULT_SETTINGS = {
     "defaultRecordCount": 10,
     # Data theme packs (Star Wars, GoT, …) — not UI chrome
     "dataThemes": {**DEFAULT_DATA_THEMES},
+    # Bumped by seed_builtin_themes when starter packs are installed
+    "builtinThemesSeedVersion": 0,
     "encryption": {**DEFAULT_ENCRYPTION},
     "fileNaming": {**DEFAULT_FILE_NAMING},
 }

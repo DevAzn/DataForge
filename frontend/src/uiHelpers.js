@@ -3,8 +3,8 @@
  * Used by App.vue and covered by node --test.
  */
 
-/** Team export formats offered in chrome (xml / csv / txt only). */
-export const TEAM_EXPORT_FORMATS = ['xml', 'csv', 'txt']
+/** Team export formats offered in chrome (xml / csv / txt / xlsx). */
+export const TEAM_EXPORT_FORMATS = ['xml', 'csv', 'txt', 'xlsx']
 
 /**
  * Normalize a format string to a team format or fallback.

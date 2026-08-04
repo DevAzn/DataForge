@@ -1,6 +1,7 @@
 """Serialize generated data — full CSV layout modes matching Electron."""
 from __future__ import annotations
 
+import io
 import json
 from typing import Any
 
@@ -8,7 +9,25 @@ import yaml
 
 
 SUPPORTED_FORMATS = frozenset(
-    {"json", "yaml", "yml", "xml", "csv", "txt", "jsonl", "ndjson"}
+    {
+        "json",
+        "yaml",
+        "yml",
+        "xml",
+        "csv",
+        "txt",
+        "jsonl",
+        "ndjson",
+        "xlsx",
+        "xls",  # accepted alias → xlsx workbook (Excel 2007+)
+    }
+)
+
+# Formats that return bytes (not UTF-8 text)
+BINARY_FORMATS = frozenset({"xlsx"})
+
+_CANONICAL = frozenset(
+    {"json", "yaml", "xml", "csv", "txt", "jsonl", "xlsx"}
 )
 
 
@@ -18,22 +37,28 @@ def normalize_format(fmt: str | None) -> str:
         return "yaml"
     if f == "ndjson":
         return "jsonl"
+    if f == "xls":
+        # We always write real .xlsx workbooks (openpyxl)
+        return "xlsx"
     return f
+
+
+def is_binary_format(fmt: str | None) -> bool:
+    return normalize_format(fmt) in BINARY_FORMATS
 
 
 def validate_format(fmt: str | None) -> str:
     """Return normalized format or raise ValueError for unknown formats."""
     f = normalize_format(fmt)
-    if f not in SUPPORTED_FORMATS and f not in {"yaml", "jsonl"}:
+    if f not in SUPPORTED_FORMATS and f not in _CANONICAL:
         raise ValueError(
             f"Unknown export format {fmt!r}. "
-            f"Supported: json, yaml, xml, csv, txt, jsonl."
+            f"Supported: json, yaml, xml, csv, txt, jsonl, xlsx."
         )
-    # SUPPORTED includes yml/ndjson aliases via normalize
-    if f not in ("json", "yaml", "xml", "csv", "txt", "jsonl"):
+    if f not in _CANONICAL:
         raise ValueError(
             f"Unknown export format {fmt!r}. "
-            f"Supported: json, yaml, xml, csv, txt, jsonl."
+            f"Supported: json, yaml, xml, csv, txt, jsonl, xlsx."
         )
     return f
 
@@ -583,6 +608,58 @@ def to_csv(
     return to_csv_single_header(records, delim, nested_as_json)
 
 
+def to_xlsx(
+    data: Any,
+    *,
+    multi_row: bool = True,
+    delim: str = ".",
+    nested_as_json: bool = False,
+    sheet_name: str = "Data",
+) -> bytes:
+    """
+    Excel .xlsx workbook: header row + one row per record (same flatten as CSV).
+    Returns raw workbook bytes (ZIP/OOXML).
+    """
+    try:
+        from openpyxl import Workbook
+    except ImportError as e:
+        raise ValueError(
+            "XLSX export requires openpyxl (pip install openpyxl)"
+        ) from e
+
+    records = _normalize_records(data, multi_row)
+    key_set: set[str] = set()
+    flat_rows = [
+        _flatten_object(r, delim, nested_as_json, key_set) for r in records
+    ]
+    headers: list[str] = []
+    seen: set[str] = set()
+    for fr in flat_rows:
+        for k in fr:
+            if k not in seen:
+                seen.add(k)
+                headers.append(k)
+
+    wb = Workbook()
+    ws = wb.active
+    title = (sheet_name or "Data").strip() or "Data"
+    # Excel sheet name max 31 chars, no []:*?/\
+    bad = set('[]:*?/\\')
+    cleaned = "".join(c for c in title if c not in bad)[:31].strip()
+    ws.title = cleaned or "Data"
+
+    if headers:
+        ws.append(headers)
+        for fr in flat_rows:
+            ws.append([fr.get(h, "") for h in headers])
+    else:
+        ws.append(["(empty)"])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def serialize(
     data: Any,
     fmt: str,
@@ -596,7 +673,10 @@ def serialize(
     xml_self_closing: bool = True,
     xml_self_closing_map: dict[str, bool] | None = None,
     document_shaped: bool = False,
-) -> str:
+) -> str | bytes:
+    """
+    Serialize records to text (str) or binary workbook (bytes for xlsx).
+    """
     f = validate_format(fmt)
     if f == "json":
         return to_json(data)
@@ -626,6 +706,13 @@ def serialize(
             delim=delim,
             nested_as_json=nested_as_json,
             col_sep="\t",
+        )
+    if f == "xlsx":
+        return to_xlsx(
+            data,
+            multi_row=multi_row,
+            delim=delim,
+            nested_as_json=nested_as_json,
         )
     if f == "jsonl":
         rows = data if isinstance(data, list) else [data]

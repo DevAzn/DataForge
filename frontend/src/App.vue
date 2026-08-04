@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   api,
+  downloadBase64,
   downloadBase64Zip,
   downloadBlob,
   downloadText,
@@ -169,7 +170,10 @@ const displayRows = computed(() =>
 
 /** CSV/TXT: flat header+value grid instead of XML tree chrome */
 const isTabularFormat = computed(
-  () => format.value === 'csv' || format.value === 'txt'
+  () =>
+    format.value === 'csv' ||
+    format.value === 'txt' ||
+    format.value === 'xlsx'
 )
 
 /** Root-level fields as columns (header = key, value rows = samples) */
@@ -1464,13 +1468,16 @@ function generatedExportFileName(fmt) {
   return `${base}-generated.${ext}`
 }
 
-/** Build export text from the schema the user is editing (samples only, no seed generate). */
-async function buildDesignExportText(fmt) {
+/**
+ * Build export from the schema the user is editing (samples only, no seed generate).
+ * @returns {Promise<{ text?: string, contentBase64?: string, binary?: boolean }>}
+ */
+async function buildDesignExport(fmt) {
   const f = (fmt || format.value || 'xml').toLowerCase()
   if (f === 'xml') {
-    return liveSchemaPreview.value || ''
+    return { text: liveSchemaPreview.value || '', binary: false }
   }
-  if (!active.value) return ''
+  if (!active.value) return { text: '', binary: false }
   const sample = buildSample(active.value.root)
   const exp = await api.exportData({
     data: sample,
@@ -1481,7 +1488,14 @@ async function buildDesignExportText(fmt) {
     nestedAsJson: csvNestedAsJson.value,
     ...xmlExportOpts()
   })
-  return exp.content || ''
+  if (exp.binary || exp.contentBase64) {
+    return {
+      contentBase64: exp.contentBase64,
+      binary: true,
+      mediaType: exp.mediaType
+    }
+  }
+  return { text: exp.content || '', binary: false }
 }
 
 /** Download user/design sample (schema + sample values you edited). */
@@ -1491,8 +1505,8 @@ async function downloadDesignOutput() {
     return
   }
   const fmt = format.value || 'xml'
-  const text = await buildDesignExportText(fmt)
-  if (!text) {
+  const built = await buildDesignExport(fmt)
+  if (!built.text && !built.contentBase64) {
     flashError('Nothing to download for this design sample')
     return
   }
@@ -1500,20 +1514,24 @@ async function downloadDesignOutput() {
   const dirName = resolveArchiveDirName()
   if (archFmt) {
     const packed = await downloadAsArchive({
-      text,
+      text: built.text,
+      contentBase64: built.contentBase64,
       fmt,
       archFmt,
       dirName
     })
     flashStatus(`Downloaded design sample as ${packed.fileName}`)
+  } else if (built.contentBase64) {
+    downloadBase64(built.contentBase64, designExportFileName(fmt), built.mediaType)
+    flashStatus(`Downloaded design sample (${fmt.toUpperCase()})`)
   } else {
-    downloadText(text, designExportFileName(fmt))
+    downloadText(built.text, designExportFileName(fmt))
     flashStatus(`Downloaded design sample (${fmt.toUpperCase()})`)
   }
 }
 
 /** Pack text or structured data into tar / tar.gz under archiveDir/ and download. */
-async function downloadAsArchive({ text, data, fmt, archFmt, dirName }) {
+async function downloadAsArchive({ text, contentBase64, data, fmt, archFmt, dirName }) {
   const dir = sanitizeFileBase(dirName || resolveArchiveDirName())
   const fileName = exportFileName(fmt)
   const innerName = fileName.includes('/') ? fileName.split('/').pop() : fileName
@@ -1522,7 +1540,8 @@ async function downloadAsArchive({ text, data, fmt, archFmt, dirName }) {
     {
       fileName: innerName,
       format: fmt,
-      content: text != null ? text : undefined,
+      content: text != null && text !== '' ? text : undefined,
+      contentBase64: contentBase64 || undefined,
       data: data,
       multiRow: csvMultiRow.value,
       layoutMode: csvLayoutMode.value,
@@ -1574,6 +1593,8 @@ const workspaceSupportsPreview = computed(() =>
   ['schema', 'package', 'delivery', 'archive'].includes(workspaceMode.value)
 )
 const streamSupported = computed(() => ['csv', 'txt'].includes(format.value))
+/** Binary exports (xlsx) download as base64, not plain text. */
+const isBinaryFormat = computed(() => format.value === 'xlsx')
 
 /** Default column widths per workflow (center always flexes) */
 const WORKSPACE_LAYOUT = {
@@ -1976,12 +1997,16 @@ async function generate() {
         singleObject: useDoc,
         ...xmlExportOpts()
       })
-      const text = exp.content || ''
+      const isBin = !!(exp.binary || exp.contentBase64)
+      const text = isBin
+        ? `// ${String(format.value).toUpperCase()} binary · download to open in Excel`
+        : exp.content || ''
       previewText.value = text
       if (archFmt) {
         const packed = await downloadAsArchive({
-          text,
-          data: payload,
+          text: isBin ? undefined : text,
+          contentBase64: isBin ? exp.contentBase64 : undefined,
+          data: isBin ? undefined : payload,
           fmt: format.value,
           archFmt,
           dirName
@@ -1990,6 +2015,7 @@ async function generate() {
           ...res,
           format: format.value,
           outputText: text,
+          contentBase64: isBin ? exp.contentBase64 : undefined,
           fileName: packed.fileName,
           archiveFormat: packed.archiveFormat,
           archiveDir: packed.archiveDir
@@ -2001,9 +2027,18 @@ async function generate() {
         lastGenerated.value = {
           ...res,
           format: format.value,
-          outputText: text
+          outputText: text,
+          contentBase64: isBin ? exp.contentBase64 : undefined
         }
-        downloadText(text, generatedExportFileName(format.value))
+        if (isBin) {
+          downloadBase64(
+            exp.contentBase64,
+            generatedExportFileName(format.value),
+            exp.mediaType
+          )
+        } else {
+          downloadText(text, generatedExportFileName(format.value))
+        }
         flashStatus(
           `Generated ${res.recordCount} record(s) · downloaded · seed ${res.seed} · ${res.ms}ms`
         )
@@ -2069,8 +2104,22 @@ async function refreshPreview() {
   const gen = lastGenerated.value
   const doc = gen?.document
   const data = gen?.records
+  const fmtNow = (format.value || 'xml').toLowerCase()
+  // XLSX is binary — show a short note instead of dumping base64 into the preview pane
+  if (fmtNow === 'xlsx') {
+    if (gen?.contentBase64 && (gen.format || fmtNow) === fmtNow) {
+      previewText.value =
+        '// XLSX binary ready · use Generate / download to open in Excel'
+      return
+    }
+    if (!data?.length && active.value) {
+      previewText.value =
+        '// XLSX design sample · Generate or Download design to get a .xlsx file'
+      return
+    }
+  }
   if (
-    (format.value || 'xml').toLowerCase() === 'xml' &&
+    fmtNow === 'xml' &&
     doc &&
     typeof doc === 'object' &&
     !Array.isArray(doc)
@@ -2100,7 +2149,7 @@ async function refreshPreview() {
   if (!data?.length) {
     if (!active.value) return
     // Design sample — client live preview already matches tree; keep API path for CSV/TXT
-    if ((format.value || 'xml').toLowerCase() === 'xml') {
+    if (fmtNow === 'xml') {
       previewText.value = liveSchemaPreview.value
       return
     }
@@ -2114,7 +2163,10 @@ async function refreshPreview() {
       nestedAsJson: csvNestedAsJson.value,
       ...xmlExportOpts()
     })
-    previewText.value = exp.content
+    previewText.value =
+      exp.binary || exp.contentBase64
+        ? `// ${fmtNow.toUpperCase()} binary · download to open`
+        : exp.content
     return
   }
   const exp = await api.exportData({
@@ -2126,7 +2178,10 @@ async function refreshPreview() {
     nestedAsJson: csvNestedAsJson.value,
     ...xmlExportOpts()
   })
-  previewText.value = exp.content
+  previewText.value =
+    exp.binary || exp.contentBase64
+      ? `// ${fmtNow.toUpperCase()} binary · download to open`
+      : exp.content
 }
 
 function buildSample(rows) {
@@ -2847,7 +2902,7 @@ async function downloadArchiveMulti() {
       }))
     })
     downloadBlob(blob, `${active.value?.name || 'data'}-multi.tar.gz`)
-    flashStatus('Downloaded multi-format archive (XML + CSV + TXT)')
+    flashStatus('Downloaded multi-format archive (XML + CSV + TXT + XLSX)')
   } catch (e) {
     flashError(e.message)
   }
@@ -4246,6 +4301,7 @@ function tip(msg) {
           <option value="xml">XML</option>
           <option value="csv">CSV</option>
           <option value="txt">TXT</option>
+          <option value="xlsx">XLSX</option>
         </select>
         <button
           v-if="workspaceMode === 'schema'"
@@ -4340,6 +4396,7 @@ function tip(msg) {
             <option value="xml">XML</option>
             <option value="csv">CSV</option>
             <option value="txt">TXT</option>
+            <option value="xlsx">XLSX</option>
           </select>
         </label>
         <label>
