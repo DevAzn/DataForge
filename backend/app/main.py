@@ -10,7 +10,8 @@ from typing import Any, Callable
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app import database as db
@@ -19,6 +20,7 @@ from app.defaults import (
     MAX_IN_MEMORY_GENERATE_RECORDS,
     STREAM_STRUCTURED_MAX_RECORDS,
 )
+from app.runtime_paths import ui_dist_dir
 from app.services import (
     archive_svc,
     delivery_svc,
@@ -29,7 +31,7 @@ from app.services import (
 )
 from app.services import file_naming
 
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.6.0"
 APP_NAME = "DataForge"
 
 
@@ -407,8 +409,7 @@ def health():
     return {"ok": True, "app": APP_NAME, "version": APP_VERSION}
 
 
-@app.get("/api/status")
-def status():
+def _status_payload() -> dict[str, Any]:
     schemas = db.list_schemas()
     templates = db.list_templates()
     return {
@@ -445,6 +446,43 @@ def status():
             "dbPath": str(db.DB_PATH),
             "encryptionDir": str(db.ENCRYPTION_DIR),
         },
+    }
+
+
+@app.get("/api/status")
+def status():
+    return _status_payload()
+
+
+@app.get("/api/bootstrap")
+def bootstrap():
+    """Single boot payload for the UI (lists + settings + status).
+
+    Individual list endpoints remain for mutations and targeted reloads.
+    Delivery jobs are best-effort so older DB layouts still boot.
+    """
+    delivery_jobs: list[Any] = []
+    try:
+        delivery_jobs = [
+            delivery_svc.job_summary(j) for j in db.list_delivery_jobs()
+        ]
+    except Exception:
+        delivery_jobs = []
+    try:
+        theme_cats = list(db.list_theme_categories(None) or [])
+    except Exception:
+        theme_cats = []
+    return {
+        "ok": True,
+        "status": _status_payload(),
+        "settings": db.get_settings(),
+        "schemas": db.list_schemas(),
+        "packages": db.list_packages(),
+        "themes": db.list_themes(),
+        "customLists": db.list_custom_lists(),
+        "templates": db.list_templates(),
+        "deliveryJobs": delivery_jobs,
+        "themeCategories": theme_cats,
     }
 
 
@@ -1234,6 +1272,10 @@ class ThemeValueUpdateBody(BaseModel):
     value: str
 
 
+class ThemeCategoryBody(BaseModel):
+    category: str
+
+
 @app.get("/api/themes")
 def themes_list():
     return db.list_themes()
@@ -1271,6 +1313,20 @@ def themes_values(theme_id: str, category: str | None = None):
 @app.get("/api/themes/{theme_id}/categories")
 def themes_category_stats(theme_id: str):
     return {"categories": db.list_theme_category_stats(theme_id)}
+
+
+@app.post("/api/themes/{theme_id}/categories")
+def themes_ensure_category(theme_id: str, body: ThemeCategoryBody):
+    """Create/register a category under a theme (persists even with zero values)."""
+    result = db.ensure_theme_category(theme_id, body.category)
+    if result.get("error") == "Theme not found":
+        raise HTTPException(404, "Theme not found")
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error") or "Could not create category")
+    return {
+        **result,
+        "categories": db.list_theme_category_stats(theme_id),
+    }
 
 
 @app.delete("/api/themes/{theme_id}/categories/{category}")
@@ -1558,3 +1614,33 @@ def delivery_jobs_delete(job_id: str):
     if not db.delete_delivery_job(job_id):
         raise HTTPException(404, "Job not found")
     return {"ok": True}
+
+
+# ── Packaged UI (desktop .exe / single-process mode) ─────────────────
+# Serve frontend/dist from the same origin as /api so one port is enough.
+# Registered last so /api/* routes always win.
+
+_UI_DIST = ui_dist_dir()
+if _UI_DIST is not None:
+    _assets = _UI_DIST / "assets"
+    if _assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(_assets)), name="ui-assets")
+
+    @app.get("/")
+    def ui_index():
+        return FileResponse(_UI_DIST / "index.html")
+
+    @app.get("/{full_path:path}")
+    def ui_spa(full_path: str):
+        # Never steal API (matched earlier); serve static files or SPA shell.
+        if full_path.startswith("api/") or full_path == "api":
+            raise HTTPException(404, "Not found")
+        # Block path escape
+        candidate = (_UI_DIST / full_path).resolve()
+        try:
+            candidate.relative_to(_UI_DIST.resolve())
+        except ValueError:
+            raise HTTPException(404, "Not found") from None
+        if candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(_UI_DIST / "index.html")

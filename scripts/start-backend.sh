@@ -85,9 +85,15 @@ else
   fi
 fi
 
-# Ensure data dir exists (SQLite path is relative to project root)
-mkdir -p "$ROOT/data"
+# Ensure data dir exists; init SQLite if missing (install normally does this)
+mkdir -p "$ROOT/data/encryption" "$ROOT/data/exports"
+if [[ ! -f "$ROOT/data/pv_dataforge.sqlite" && ! -f "$ROOT/data/dataforge.sqlite" ]]; then
+  echo "Initializing SQLite database..."
+  (cd "$BACKEND" && "$VENV_PY" -c "from app.database import init_db, DB_PATH; init_db(); print('DB:', DB_PATH)") \
+    || echo "warning: SQLite init failed; API startup will retry" >&2
+fi
 
 echo "API:  http://127.0.0.1:8765"
 echo "docs: http://127.0.0.1:8765/docs"
+echo "status: http://127.0.0.1:8765/api/status  (dbPath + counts)"
 exec "$VENV_PY" -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8765

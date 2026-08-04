@@ -9,6 +9,7 @@ Persistence policy (product rule):
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -16,8 +17,9 @@ from pathlib import Path
 from typing import Any
 
 from app.defaults import DEFAULT_SETTINGS
+from app.runtime_paths import project_root
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = project_root()
 DATA_DIR = ROOT / "data"
 DB_PATH = DATA_DIR / "pv_dataforge.sqlite"
 # Prefer canonical name; fall back if only short-lived rebrand file exists
@@ -152,6 +154,16 @@ def init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_tv_theme_cat ON theme_values(theme_id, category);
 
+            -- Theme category registry (empty categories persist without values)
+            CREATE TABLE IF NOT EXISTS theme_categories (
+              theme_id TEXT NOT NULL,
+              category TEXT NOT NULL COLLATE NOCASE,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (theme_id, category),
+              FOREIGN KEY (theme_id) REFERENCES themes(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_tc_theme ON theme_categories(theme_id);
+
             -- Package / multifile layout (no generated file bodies)
             CREATE TABLE IF NOT EXISTS package_import (
               id TEXT PRIMARY KEY,
@@ -241,6 +253,18 @@ def init_db() -> None:
                 "INSERT INTO settings (key, value_json) VALUES ('app', ?)",
                 (json.dumps(DEFAULT_SETTINGS),),
             )
+        # Backfill category registry from existing values (older DBs)
+        try:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO theme_categories (theme_id, category, created_at)
+                SELECT theme_id, category, MIN(created_at)
+                FROM theme_values
+                GROUP BY theme_id, category
+                """
+            )
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
     finally:
         conn.close()
@@ -1934,11 +1958,17 @@ def save_theme(data: dict[str, Any]) -> dict[str, Any]:
         conn.close()
 
 
+def _normalize_theme_category(category: str | None) -> str:
+    """Stable category key: trim, spaces→_, lowercase."""
+    cat = (category or "general").strip().replace(" ", "_").lower()
+    return cat or "general"
+
+
 def theme_category_count(theme_id: str, category: str) -> int:
     """How many values exist for a theme category."""
     conn = connect()
     try:
-        cat = (category or "general").strip() or "general"
+        cat = _normalize_theme_category(category)
         row = conn.execute(
             """
             SELECT COUNT(*) AS n FROM theme_values
@@ -1947,6 +1977,53 @@ def theme_category_count(theme_id: str, category: str) -> int:
             (theme_id, cat),
         ).fetchone()
         return int(row["n"] if row else 0)
+    finally:
+        conn.close()
+
+
+def ensure_theme_category(theme_id: str, category: str) -> dict[str, Any]:
+    """
+    Register a theme category so it survives refresh even with zero values.
+    Returns category stats row for the UI.
+    """
+    from app.defaults import MAX_THEME_CATEGORY_VALUES, THEME_CATEGORY_WARN_AT
+
+    cat = _normalize_theme_category(category)
+    if not theme_id:
+        return {"ok": False, "error": "Missing theme"}
+    if not cat or not re.match(r"^[a-z0-9][a-z0-9_-]{0,47}$", cat):
+        return {
+            "ok": False,
+            "error": "Use letters, numbers, underscore, or hyphen (max 48 chars)",
+        }
+    conn = connect()
+    try:
+        if not conn.execute(
+            "SELECT 1 FROM themes WHERE id = ?", (theme_id,)
+        ).fetchone():
+            return {"ok": False, "error": "Theme not found"}
+        ts = now_iso()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO theme_categories (theme_id, category, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (theme_id, cat, ts),
+        )
+        conn.execute(
+            "UPDATE themes SET updated_at = ? WHERE id = ?", (ts, theme_id)
+        )
+        conn.commit()
+        n = theme_category_count(theme_id, cat)
+        return {
+            "ok": True,
+            "category": cat,
+            "count": n,
+            "limit": MAX_THEME_CATEGORY_VALUES,
+            "warnAt": THEME_CATEGORY_WARN_AT,
+            "nearLimit": n >= THEME_CATEGORY_WARN_AT,
+            "full": n >= MAX_THEME_CATEGORY_VALUES,
+        }
     finally:
         conn.close()
 
@@ -1966,7 +2043,15 @@ def add_theme_values(
             "SELECT 1 FROM themes WHERE id = ?", (theme_id,)
         ).fetchone():
             return {"inserted": -1, "error": "Theme not found"}
-        cat = (category or "general").strip() or "general"
+        cat = _normalize_theme_category(category)
+        ts = now_iso()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO theme_categories (theme_id, category, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (theme_id, cat, ts),
+        )
         existing = conn.execute(
             """
             SELECT COUNT(*) AS n FROM theme_values
@@ -1979,7 +2064,6 @@ def add_theme_values(
         n = 0
         skipped_cap = 0
         skipped_dup = 0
-        ts = now_iso()
         for raw in values:
             val = (raw or "").strip()
             if not val:
@@ -2119,10 +2203,10 @@ def delete_theme_value(theme_id: str, value_id: str) -> bool:
 
 def delete_theme_category(theme_id: str, category: str) -> dict[str, Any]:
     """
-    Delete an entire category pool under a theme (all values in that category).
-    Returns { ok, deleted, category }. Local-only empty categories have deleted=0.
+    Delete an entire category under a theme (registry row + all values).
+    Returns { ok, deleted, category }. Empty registered categories have deleted=0.
     """
-    cat = (category or "").strip()
+    cat = _normalize_theme_category(category) if (category or "").strip() else ""
     if not theme_id or not cat:
         return {"ok": False, "deleted": 0, "category": cat, "error": "Missing theme or category"}
     conn = connect()
@@ -2140,7 +2224,15 @@ def delete_theme_category(theme_id: str, category: str) -> dict[str, Any]:
             (theme_id, cat),
         )
         deleted = int(cur.rowcount or 0)
-        if deleted:
+        reg = conn.execute(
+            """
+            DELETE FROM theme_categories
+            WHERE theme_id = ? AND category = ? COLLATE NOCASE
+            """,
+            (theme_id, cat),
+        )
+        removed_reg = int(reg.rowcount or 0)
+        if deleted or removed_reg:
             conn.execute(
                 "UPDATE themes SET updated_at = ? WHERE id = ?",
                 (now_iso(), theme_id),
@@ -2155,6 +2247,7 @@ def delete_theme(theme_id: str) -> bool:
     conn = connect()
     try:
         conn.execute("DELETE FROM theme_values WHERE theme_id = ?", (theme_id,))
+        conn.execute("DELETE FROM theme_categories WHERE theme_id = ?", (theme_id,))
         cur = conn.execute("DELETE FROM themes WHERE id = ?", (theme_id,))
         conn.commit()
         return cur.rowcount > 0
@@ -2163,21 +2256,29 @@ def delete_theme(theme_id: str) -> bool:
 
 
 def list_theme_categories(theme_id: str | None = None) -> list[str]:
-    """Distinct categories across one theme or all themes."""
+    """Distinct categories across one theme or all themes (registry + values)."""
     conn = connect()
     try:
         if theme_id:
             rows = conn.execute(
                 """
-                SELECT DISTINCT category FROM theme_values
-                WHERE theme_id = ? ORDER BY category COLLATE NOCASE
+                SELECT category FROM (
+                  SELECT category FROM theme_categories WHERE theme_id = ?
+                  UNION
+                  SELECT DISTINCT category FROM theme_values WHERE theme_id = ?
+                )
+                ORDER BY category COLLATE NOCASE
                 """,
-                (theme_id,),
+                (theme_id, theme_id),
             ).fetchall()
         else:
             rows = conn.execute(
                 """
-                SELECT DISTINCT category FROM theme_values
+                SELECT category FROM (
+                  SELECT category FROM theme_categories
+                  UNION
+                  SELECT DISTINCT category FROM theme_values
+                )
                 ORDER BY category COLLATE NOCASE
                 """
             ).fetchall()
@@ -2187,27 +2288,47 @@ def list_theme_categories(theme_id: str | None = None) -> list[str]:
 
 
 def list_theme_category_stats(theme_id: str) -> list[dict[str, Any]]:
-    """Categories for a theme with value counts (for Data packs UI)."""
+    """Categories for a theme with value counts (includes empty registered categories)."""
     from app.defaults import MAX_THEME_CATEGORY_VALUES, THEME_CATEGORY_WARN_AT
 
     conn = connect()
     try:
-        rows = conn.execute(
+        counts: dict[str, int] = {}
+        # Prefer registered display name casing from registry, fall back to values
+        for r in conn.execute(
             """
             SELECT category, COUNT(*) AS n
             FROM theme_values
             WHERE theme_id = ?
             GROUP BY category
-            ORDER BY category COLLATE NOCASE
             """,
             (theme_id,),
-        ).fetchall()
+        ).fetchall():
+            counts[str(r["category"])] = int(r["n"] or 0)
+        names: dict[str, str] = {}
+        for r in conn.execute(
+            "SELECT category FROM theme_categories WHERE theme_id = ?",
+            (theme_id,),
+        ).fetchall():
+            cat = str(r["category"])
+            names[cat.lower()] = cat
+            counts.setdefault(cat, 0)
+        # Keep value-only categories (pre-registry) keyed as stored
+        for cat in list(counts.keys()):
+            names.setdefault(cat.lower(), cat)
         out = []
-        for r in rows:
-            n = int(r["n"])
+        for key in sorted(names.keys()):
+            cat = names[key]
+            n = counts.get(cat, 0)
+            # count may be under a different case key
+            if n == 0:
+                for ck, cv in counts.items():
+                    if ck.lower() == key:
+                        n = cv
+                        break
             out.append(
                 {
-                    "category": r["category"],
+                    "category": cat,
                     "count": n,
                     "limit": MAX_THEME_CATEGORY_VALUES,
                     "warnAt": THEME_CATEGORY_WARN_AT,

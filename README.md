@@ -85,6 +85,32 @@ Or both in one terminal (Ctrl+C stops both):
 | **API health** | http://127.0.0.1:8765/api/health |
 | **API docs (OpenAPI)** | http://127.0.0.1:8765/docs |
 
+### Windows desktop app (`.exe`)
+
+Double-click launcher — starts **API + UI** on one port and opens your browser.
+
+**Build** (from repo root, Windows PowerShell):
+
+```powershell
+.\scripts\build-exe.ps1
+# optional single-file bundle (slower start):
+.\scripts\build-exe.ps1 -OneFile
+```
+
+| Output | Path |
+|--------|------|
+| Recommended | `dist\DataForge\DataForge.exe` |
+| One-file | `dist\DataForge.exe` |
+
+**Use:** run `DataForge.exe`. Browser opens **http://127.0.0.1:8765/** (UI and `/api` same origin). SQLite lives in a `data\` folder next to the exe. Stop with Ctrl+C in the console window.
+
+**Without packaging** (still one process, needs Python + a built UI):
+
+```powershell
+cd frontend; npm run build; cd ..
+backend\.venv\Scripts\python.exe backend\desktop_main.py
+```
+
 If you skip `install.sh`, the start scripts still create the venv / run `npm install` on first launch.
 
 ### Confirm it works
@@ -92,9 +118,14 @@ If you skip `install.sh`, the start scripts still create the venv / run `npm ins
 ```bash
 curl -s http://127.0.0.1:8765/api/health
 # expect: {"ok":true,"app":"DataForge","version":"..."}
+
+curl -s http://127.0.0.1:8765/api/status
+# shows dbPath (local SQLite) + counts after you save data
 ```
 
-Open http://localhost:5173 — you should see the **DataForge** UI.
+Open http://localhost:5173 — you should see the **DataForge** UI (Vite proxies `/api` to the backend).
+
+**Where data is stored:** design data (schemas, themes, categories, custom lists, settings) is saved in `data/pv_dataforge.sqlite` on **your machine**. That folder is gitignored — each developer gets their own empty DB after install. Generated export file bodies are **not** stored in SQLite.
 
 ---
 

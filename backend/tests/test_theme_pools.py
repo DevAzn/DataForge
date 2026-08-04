@@ -137,9 +137,44 @@ def test_delete_theme_category():
     assert "ships" not in remaining
     assert "names" in remaining
 
-    # Deleting again is ok (0 deleted)
+    # Deleting again is ok (0 deleted) once registry + values are gone
     r2 = client.delete(f"/api/themes/{tid}/categories/ships")
     assert r2.status_code == 200
     assert r2.json()["deleted"] == 0
+
+    client.delete(f"/api/themes/{tid}")
+
+
+def test_empty_theme_category_persists():
+    """Categories registered without values survive list/reload."""
+    client = TestClient(app)
+    t = client.post("/api/themes", json={"name": "Empty Cat Theme"}).json()
+    tid = t["id"]
+    r = client.post(
+        f"/api/themes/{tid}/categories",
+        json={"category": "lightsabers"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["category"] == "lightsabers"
+    assert body["count"] == 0
+    cats = {c["category"] for c in body["categories"]}
+    assert "lightsabers" in cats
+
+    again = client.get(f"/api/themes/{tid}/categories").json()["categories"]
+    assert any(c["category"] == "lightsabers" and c["count"] == 0 for c in again)
+
+    # Idempotent re-register
+    r2 = client.post(
+        f"/api/themes/{tid}/categories",
+        json={"category": "Lightsabers"},
+    )
+    assert r2.status_code == 200
+    assert r2.json()["category"] == "lightsabers"
+
+    client.delete(f"/api/themes/{tid}/categories/lightsabers")
+    gone = client.get(f"/api/themes/{tid}/categories").json()["categories"]
+    assert "lightsabers" not in {c["category"] for c in gone}
 
     client.delete(f"/api/themes/{tid}")

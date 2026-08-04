@@ -56,6 +56,8 @@ async function req(path, opts = {}) {
 export const api = {
   health: () => req('/api/health'),
   status: () => req('/api/status'),
+  /** Single boot payload (status, settings, lists). Falls back client-side if missing. */
+  bootstrap: () => req('/api/bootstrap'),
   activity: (limit = 40) => req(`/api/activity?limit=${limit}`),
   getSettings: () => req('/api/settings'),
   setSettings: (body) =>
@@ -186,6 +188,13 @@ export const api = {
       `/api/themes/${id}/values${category ? `?category=${encodeURIComponent(category)}` : ''}`
     ),
   themeCategoryStats: (id) => req(`/api/themes/${id}/categories`),
+  /** Register a category under a theme (persists even with zero values). */
+  ensureThemeCategory: (themeId, category) =>
+    req(`/api/themes/${themeId}/categories`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ category })
+    }),
   /** Delete entire category pool (all values) under a theme. */
   deleteThemeCategory: (themeId, category) =>
     req(

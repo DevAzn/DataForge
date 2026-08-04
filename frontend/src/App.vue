@@ -10,6 +10,8 @@ import {
   newId
 } from './api'
 import BrandIcon from './components/BrandIcon.vue'
+import AppDialog from './components/AppDialog.vue'
+import FieldValuesCenter from './components/FieldValuesCenter.vue'
 import {
   buildSelfClosingMap,
   insertAsChild,
@@ -20,13 +22,24 @@ import {
   serializeFieldClip,
   walkDisplay
 } from './schemaTree.js'
+import { askConfirm, askPrompt } from './dialogController.js'
+import {
+  TEAM_EXPORT_FORMATS,
+  createDebounced,
+  mergeBootstrapPayload,
+  normalizeExportFormat,
+  removeById,
+  shouldShowHeaderGenerate,
+  sideNavDensityFromWidth,
+  upsertById
+} from './uiHelpers.js'
 
 const schemas = ref([])
 const templates = ref([])
 const active = ref(null)
 const selectedId = ref(null)
 /** Team formats only: xml, csv, txt (json/yaml removed from UI) */
-const EXPORT_FORMATS = ['xml', 'csv', 'txt']
+const EXPORT_FORMATS = TEAM_EXPORT_FORMATS
 const format = ref('xml')
 const recordCount = ref(10)
 const seed = ref('')
@@ -62,8 +75,12 @@ const dataPackSubTab = ref('themes') // themes | custom
 const themeEditor = ref(null)
 const statusMsg = ref('')
 const errorMsg = ref('')
+/** True while first library load is in flight (boot affordance). */
+const bootLoading = ref(false)
 let statusDismissTimer = null
 let errorDismissTimer = null
+/** Debounce timer for theme blend weight → settings */
+let themePersistTimer = null
 /** Right Generate rail tab (schema options; kept for layout chrome) */
 const tab = ref('generate')
 const sidebar = ref('schemas')
@@ -723,36 +740,104 @@ function setSelectedGenerateMode(mode, opts = {}) {
   }
 }
 
+/**
+ * Apply a /api/bootstrap payload into local refs (no settings clobber of live format).
+ * @param {Record<string, any>} boot
+ */
+function applyBootstrapPayload(boot) {
+  const bag = {}
+  if (!mergeBootstrapPayload(bag, boot)) return false
+  if (bag.schemas) schemas.value = bag.schemas
+  if (bag.templates) templates.value = bag.templates
+  if (bag.customLists) customLists.value = bag.customLists
+  if (bag.themes) themes.value = bag.themes
+  if (bag.packages) packages.value = bag.packages
+  if (bag.deliveryJobs) deliveryJobs.value = bag.deliveryJobs
+  if (bag.themeCategories) themeCategories.value = bag.themeCategories
+  if (bag.status) status.value = bag.status
+  if (bag.settings) settings.value = bag.settings
+  return true
+}
+
+/**
+ * Full library reload for boot / backup import.
+ * Prefers /api/bootstrap; falls back to multi-GET path if missing/failed.
+ * Does not re-apply settings to live generate controls (use applySettingsLocal).
+ */
 async function refresh() {
-  schemas.value = await api.listSchemas()
-  templates.value = await api.listTemplates()
+  let usedBootstrap = false
   try {
-    customLists.value = await api.listCustomLists()
-    themes.value = await api.listThemes()
-    const cats = await api.themeCategories()
-    themeCategories.value = cats.categories || []
-    packages.value = await api.listPackages()
-    try {
-      deliveryJobs.value = await api.listDeliveryJobs()
-    } catch {
-      /* older */
-    }
+    const boot = await api.bootstrap()
+    usedBootstrap = applyBootstrapPayload(boot)
   } catch {
-    /* optional lists may fail on older backends */
+    usedBootstrap = false
   }
-  status.value = await api.status()
-  settings.value = await api.getSettings()
-  applySettingsLocal(settings.value)
+  if (!usedBootstrap) {
+    schemas.value = await api.listSchemas()
+    templates.value = await api.listTemplates()
+    try {
+      customLists.value = await api.listCustomLists()
+      themes.value = await api.listThemes()
+      const cats = await api.themeCategories()
+      themeCategories.value = cats.categories || []
+      packages.value = await api.listPackages()
+      try {
+        deliveryJobs.value = await api.listDeliveryJobs()
+      } catch {
+        /* older */
+      }
+    } catch {
+      /* optional lists may fail on older backends */
+    }
+    status.value = await api.status()
+    settings.value = await api.getSettings()
+  }
   await loadHistory()
   // Keep Field settings Category dropdown in sync with theme pools
   await reloadFieldThemeCategories()
 }
 
+/** Schemas + packages + templates only (library mutations). */
+async function refreshLibraryLists() {
+  try {
+    schemas.value = await api.listSchemas()
+    templates.value = await api.listTemplates()
+    packages.value = await api.listPackages()
+  } catch (e) {
+    flashError(e.message || 'Could not refresh library')
+  }
+}
+
+/** Themes + custom field lists (data packs mutations). */
+async function refreshDataPackLists() {
+  try {
+    customLists.value = await api.listCustomLists()
+    themes.value = await api.listThemes()
+    const cats = await api.themeCategories()
+    themeCategories.value = cats.categories || []
+  } catch (e) {
+    flashError(e.message || 'Could not refresh data packs')
+  }
+}
+
+/** Status counters only (no settings clobber). */
+async function refreshStatusOnly() {
+  try {
+    status.value = await api.status()
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Apply persisted settings into live controls.
+ * Call only on boot and after explicit Settings saves — not after every list refresh
+ * (otherwise defaultExportFormat / defaultRecordCount clobber the active run).
+ */
 function applySettingsLocal(s) {
   if (!s) return
   if (s.defaultExportFormat) {
-    const f = String(s.defaultExportFormat).toLowerCase()
-    format.value = EXPORT_FORMATS.includes(f) ? f : 'xml'
+    format.value = normalizeExportFormat(s.defaultExportFormat, 'xml')
   }
   if (s.defaultRecordCount) recordCount.value = s.defaultRecordCount
   if (typeof s.csvMultiRow === 'boolean') csvMultiRow.value = s.csvMultiRow
@@ -787,8 +872,8 @@ async function persistDataThemes() {
         }))
       }
     })
-  } catch {
-    /* ignore */
+  } catch (e) {
+    flashError(e.message || 'Could not save theme settings')
   }
 }
 
@@ -807,8 +892,17 @@ function setThemeWeight(id, weight) {
   const b = themeBlend.value.find((x) => x.themeId === id)
   if (b) {
     b.weight = Number(weight) || 1
-    void persistDataThemes()
+    schedulePersistDataThemes()
   }
+}
+
+/** Debounce weight edits so each keystroke does not hit the API. */
+function schedulePersistDataThemes() {
+  if (themePersistTimer) clearTimeout(themePersistTimer)
+  themePersistTimer = setTimeout(() => {
+    themePersistTimer = null
+    void persistDataThemes()
+  }, 350)
 }
 
 /** Field marked as the multi-record unit (isRecordTag). */
@@ -922,6 +1016,16 @@ async function loadHistory() {
   )
 }
 
+/** A4: debounced Fill values search (≥250ms) against history page API. */
+const loadHistoryDebounced = createDebounced(() => {
+  void loadHistory()
+}, 300)
+
+watch(historySearch, () => {
+  if (historySubTab.value !== 'values') return
+  loadHistoryDebounced()
+})
+
 async function loadRecentActivity() {
   try {
     recentActivity.value = await api.activity(50)
@@ -965,8 +1069,10 @@ onMounted(async () => {
   ensureSchemaPreviewChannel()
   applyWorkspaceLayoutDefaults(workspaceMode.value)
   window.addEventListener('keydown', onSchemaClipboardKeydown)
+  bootLoading.value = true
   try {
     await refresh()
+    applySettingsLocal(settings.value)
     await loadRecentActivity()
     if (schemas.value.length) {
       active.value = schemas.value[0]
@@ -978,12 +1084,16 @@ onMounted(async () => {
     }
   } catch (e) {
     flashError(e.message + ' — is the API running? (uvicorn on port 8765)')
+  } finally {
+    bootLoading.value = false
   }
 })
 
 onUnmounted(() => {
   if (statusDismissTimer) clearTimeout(statusDismissTimer)
   if (errorDismissTimer) clearTimeout(errorDismissTimer)
+  if (themePersistTimer) clearTimeout(themePersistTimer)
+  loadHistoryDebounced.cancel()
   window.removeEventListener('keydown', onSchemaClipboardKeydown)
   window.removeEventListener('pointermove', onResizePointerMove)
   window.removeEventListener('pointerup', onResizePointerUp)
@@ -1035,8 +1145,9 @@ async function saveSchema() {
     const saved = await api.saveSchema(active.value)
     active.value = saved
     syncXmlTagsFromSchema(saved)
+    schemas.value = upsertById(schemas.value, saved)
     flashStatus(`Saved “${saved.name}”`)
-    await refresh()
+    await refreshStatusOnly()
   } catch (e) {
     flashError(e.message)
   }
@@ -1064,7 +1175,9 @@ async function mapSchemaFields() {
         'No new pool values (add samples on fields, or pools already have them)'
       )
     }
-    await refresh()
+    schemas.value = upsertById(schemas.value, saved)
+    await refreshDataPackLists()
+    await refreshStatusOnly()
   } catch (e) {
     flashError(e.message)
   }
@@ -1110,10 +1223,19 @@ async function deleteSchema() {
       'This schema belongs to a package. Open Packages and delete the package instead.'
     return
   }
-  if (!confirm(`Delete schema “${active.value.name}”?`)) return
+  if (
+    !(await askConfirm(`Delete schema “${active.value.name}”?`, {
+      title: 'Delete schema',
+      danger: true,
+      confirmLabel: 'Delete'
+    }))
+  )
+    return
   try {
-    await api.deleteSchema(active.value.id)
-    await refresh()
+    const deletedId = active.value.id
+    await api.deleteSchema(deletedId)
+    schemas.value = removeById(schemas.value, deletedId)
+    await refreshStatusOnly()
     if (schemas.value.length) selectSchema(schemas.value[0].id)
     else newSchema()
   } catch (e) {
@@ -1136,7 +1258,8 @@ async function onImport(ev) {
     }
     statusMsg.value = `Imported “${res.schema.name}” (${String(res.format).toUpperCase()}) · scanned ${res.scannedRecords} · history ${res.historyValues}`
     errorMsg.value = ''
-    await refresh()
+    await refreshLibraryLists()
+    await refreshStatusOnly()
     await api.setSettings({ defaultExportFormat: format.value })
   } catch (e) {
     errorMsg.value = e.message
@@ -1446,7 +1569,6 @@ const workspaceMode = computed(() => {
 })
 
 const showFormatSelector = computed(() => workspaceMode.value === 'schema')
-const showHeaderGenerate = computed(() => workspaceMode.value === 'schema')
 /** Workspaces that can show a right tools/preview rail */
 const workspaceSupportsPreview = computed(() =>
   ['schema', 'package', 'delivery', 'archive'].includes(workspaceMode.value)
@@ -1519,6 +1641,14 @@ const showRightPanel = computed(
   () => workspaceSupportsPreview.value && !layout.value.previewCollapsed
 )
 
+/** A5: header Generate only when tools rail is hidden (rail owns the primary CTA). */
+const showHeaderGenerate = computed(() =>
+  shouldShowHeaderGenerate(workspaceMode.value, showRightPanel.value)
+)
+const showHeaderPackageGenerate = computed(
+  () => workspaceMode.value === 'package' && !showRightPanel.value
+)
+
 const mainLayoutStyle = computed(() => {
   const side = layout.value.sideCollapsed
     ? '52px'
@@ -1544,13 +1674,9 @@ const mainLayoutClass = computed(() => ({
  * How dense the left nav should be based on live panel width.
  * comfortable = full words, cozy = short labels, compact = 2-letter codes.
  */
-const sideNavDensity = computed(() => {
-  if (layout.value.sideCollapsed) return 'rail'
-  const w = Number(layout.value.sideWidth) || 280
-  if (w < 228) return 'compact'
-  if (w < 280) return 'cozy'
-  return 'comfortable'
-})
+const sideNavDensity = computed(() =>
+  sideNavDensityFromWidth(layout.value.sideWidth, layout.value.sideCollapsed)
+)
 
 function toggleSidePanel() {
   layout.value.sideCollapsed = !layout.value.sideCollapsed
@@ -1883,8 +2009,8 @@ async function generate() {
         )
       }
     }
-    await refresh()
     await loadRecentActivity()
+    await refreshStatusOnly()
   } catch (e) {
     flashError(e.message)
   } finally {
@@ -1930,8 +2056,8 @@ async function generatePerFile() {
         .join('\n\n')
       tab.value = 'generate'
     }
-    await refresh()
     await loadRecentActivity()
+    await refreshStatusOnly()
   } catch (e) {
     flashError(e.message)
   } finally {
@@ -2729,15 +2855,24 @@ async function downloadArchiveMulti() {
 
 async function saveAsTemplate() {
   if (!active.value) return
-  const name = prompt('Template name', active.value.name + ' template')
-  if (!name) return
-  await api.saveTemplate({
-    name,
+  const name = await askPrompt('Template name', active.value.name + ' template', {
+    title: 'Save template'
+  })
+  if (!name?.trim()) return
+  const saved = await api.saveTemplate({
+    name: name.trim(),
     schema: active.value,
     schemaJson: JSON.stringify(active.value)
   })
-  statusMsg.value = `Template “${name}” saved`
-  await refresh()
+  statusMsg.value = `Template “${name.trim()}” saved`
+  if (saved?.id) templates.value = upsertById(templates.value, saved)
+  else {
+    try {
+      templates.value = await api.listTemplates()
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 async function loadTemplate(t) {
@@ -2754,15 +2889,39 @@ async function loadTemplate(t) {
 }
 
 async function removeTemplate(id) {
-  if (!confirm('Delete template?')) return
+  if (
+    !(await askConfirm('Delete template?', {
+      title: 'Delete template',
+      danger: true,
+      confirmLabel: 'Delete'
+    }))
+  )
+    return
   await api.deleteTemplate(id)
-  await refresh()
+  templates.value = removeById(templates.value, id)
 }
 
 async function saveSettingsPatch(patch) {
   settings.value = await api.setSettings(patch)
   applySettingsLocal(settings.value)
   statusMsg.value = 'Settings saved'
+}
+
+async function openSettings() {
+  if (settingsOpen.value) {
+    settingsOpen.value = false
+    return
+  }
+  if (!settings.value) {
+    try {
+      settings.value = await api.getSettings()
+      applySettingsLocal(settings.value)
+    } catch (e) {
+      flashError(e.message || 'Could not load settings — is the API running?')
+      return
+    }
+  }
+  settingsOpen.value = true
 }
 
 async function exportBackup() {
@@ -2778,6 +2937,7 @@ async function importBackup(ev) {
   const res = await api.backupImport(file)
   statusMsg.value = `Imported backup (${res.imported} items)`
   await refresh()
+  applySettingsLocal(settings.value)
 }
 
 async function onArchiveOpen(ev) {
@@ -2800,11 +2960,18 @@ async function readArchiveEntry(path) {
 
 async function clearHistoryAll() {
   const c = await api.historyClearCount({ mode: 'all', confirmAll: true })
-  if (!confirm(`Delete all ${c.count} history rows?`)) return
+  if (
+    !(await askConfirm(`Delete all ${c.count} history rows?`, {
+      title: 'Clear fill values',
+      danger: true,
+      confirmLabel: 'Clear all'
+    }))
+  )
+    return
   const r = await api.historyClear({ mode: 'all', confirmAll: true })
   statusMsg.value = `Cleared ${r.deleted} history rows`
   await loadHistory()
-  await refresh()
+  await refreshStatusOnly()
 }
 
 async function openCustomList(id) {
@@ -2814,13 +2981,16 @@ async function openCustomList(id) {
 }
 
 async function createCustomList() {
-  const name = prompt('List name (e.g. Heroes, Cities)')
+  const name = await askPrompt('List name (e.g. Heroes, Cities)', '', {
+    title: 'New field list'
+  })
   if (!name?.trim()) return
   const saved = await api.saveCustomList({ name: name.trim(), keys: [] })
-  await refresh()
+  await refreshDataPackLists()
   await openCustomList(saved.id)
   statusMsg.value = `Custom list “${saved.name}” created`
-  sidebar.value = 'custom'
+  sidebar.value = 'datapacks'
+  dataPackSubTab.value = 'custom'
 }
 
 async function saveActiveCustomList() {
@@ -2836,7 +3006,10 @@ async function saveActiveCustomList() {
     keys
   })
   activeCustomList.value = saved
-  await refresh()
+  customLists.value = upsertById(customLists.value, {
+    ...saved,
+    valueCount: saved.values?.length ?? saved.valueCount
+  })
   statusMsg.value = 'Custom list saved'
 }
 
@@ -2850,12 +3023,13 @@ async function addBulkCustomValues() {
   const res = await api.addCustomValues(activeCustomList.value.id, values)
   customBulkValues.value = ''
   await openCustomList(activeCustomList.value.id)
-  await refresh()
+  await refreshDataPackLists()
+  await refreshStatusOnly()
   statusMsg.value = `Added ${res.inserted} value(s)`
 }
 
 async function editCustomValue(v) {
-  const next = prompt('Edit value', v.value)
+  const next = await askPrompt('Edit value', v.value, { title: 'Edit list value' })
   if (next == null || !next.trim()) return
   await api.updateCustomValue(v.id, next.trim())
   await openCustomList(activeCustomList.value.id)
@@ -2864,24 +3038,64 @@ async function editCustomValue(v) {
 async function removeCustomValue(id) {
   await api.deleteCustomValue(id)
   await openCustomList(activeCustomList.value.id)
-  await refresh()
+  await refreshDataPackLists()
+  await refreshStatusOnly()
 }
 
 async function removeCustomList() {
   if (!activeCustomList.value) return
-  if (!confirm(`Delete list “${activeCustomList.value.name}”?`)) return
-  await api.deleteCustomList(activeCustomList.value.id)
+  if (
+    !(await askConfirm(`Delete list “${activeCustomList.value.name}”?`, {
+      title: 'Delete field list',
+      danger: true,
+      confirmLabel: 'Delete'
+    }))
+  )
+    return
+  const id = activeCustomList.value.id
+  await api.deleteCustomList(id)
   activeCustomList.value = null
-  await refresh()
+  customLists.value = removeById(customLists.value, id)
+  await refreshStatusOnly()
 }
 
 async function createTheme() {
-  const name = prompt('Theme name (e.g. Star Wars, Westeros)')
+  const name = await askPrompt('Theme name (e.g. Star Wars, Westeros)', '', {
+    title: 'New theme'
+  })
   if (!name?.trim()) return
-  await api.saveTheme({ name: name.trim() })
-  await refresh()
-  await reloadFieldThemeCategories()
-  statusMsg.value = `Theme “${name.trim()}” created`
+  try {
+    await api.saveTheme({ name: name.trim() })
+    await refreshDataPackLists()
+    await reloadFieldThemeCategories()
+    flashStatus(`Theme “${name.trim()}” created`)
+  } catch (e) {
+    flashError(e.message || 'Could not create theme')
+  }
+}
+
+async function deleteTheme(theme) {
+  if (!theme?.id) return
+  if (
+    !(await askConfirm(`Delete theme “${theme.name}”?`, {
+      title: 'Delete theme',
+      danger: true,
+      confirmLabel: 'Delete'
+    }))
+  )
+    return
+  try {
+    await api.deleteTheme(theme.id)
+    if (themeEditor.value?.theme?.id === theme.id) themeEditor.value = null
+    themes.value = removeById(themes.value, theme.id)
+    themeBlend.value = themeBlend.value.filter((b) => b.themeId !== theme.id)
+    await refreshDataPackLists()
+    await reloadFieldThemeCategories()
+    void persistDataThemes()
+    flashStatus(`Deleted theme “${theme.name}”`)
+  } catch (e) {
+    flashError(e.message || 'Could not delete theme')
+  }
 }
 
 async function openThemeValuesEditor(theme, categoryHint) {
@@ -2982,13 +3196,14 @@ const themeEditorCatStat = computed(() =>
 
 /**
  * Create / switch to a category under the open theme.
- * Empty categories are kept locally until the first value is saved.
+ * Categories are registered in SQLite immediately (even with zero values).
  */
-function addThemeCategory() {
+async function addThemeCategory() {
   if (!themeEditor.value?.theme) return
-  const raw = prompt(
+  const raw = await askPrompt(
     'New category name (e.g. names, ships, lightsabers, codes)',
-    ''
+    '',
+    { title: 'Add category' }
   )
   if (raw == null) return
   const name = String(raw).trim().replace(/\s+/g, '_').toLowerCase()
@@ -3004,23 +3219,34 @@ function addThemeCategory() {
   const exists = chips.some(
     (s) => String(s.category).toLowerCase() === name.toLowerCase()
   )
-  const local = [...(themeEditor.value.localCategories || [])]
-  if (!exists && !local.some((c) => c.toLowerCase() === name.toLowerCase())) {
-    local.push(name)
+  try {
+    if (!exists) {
+      const res = await api.ensureThemeCategory(themeEditor.value.theme.id, name)
+      themeEditor.value = {
+        ...themeEditor.value,
+        category: name,
+        localCategories: [],
+        bulk: '',
+        values: [],
+        stats: res.categories || themeEditor.value.stats
+      }
+      await refreshDataPackLists()
+      await loadThemeEditorValues()
+      await reloadFieldThemeCategories()
+      flashStatus(`Category “${name}” saved — add values below`)
+    } else {
+      themeEditor.value = {
+        ...themeEditor.value,
+        category: name,
+        bulk: '',
+        values: themeEditor.value.values
+      }
+      void loadThemeEditorValues()
+      flashStatus(`Switched to category “${name}”`)
+    }
+  } catch (e) {
+    flashError(e.message || 'Could not save category')
   }
-  themeEditor.value = {
-    ...themeEditor.value,
-    category: name,
-    localCategories: local,
-    bulk: '',
-    values: exists ? themeEditor.value.values : []
-  }
-  void loadThemeEditorValues()
-  flashStatus(
-    exists
-      ? `Switched to category “${name}”`
-      : `Category “${name}” ready — add values below (saved when you add the first value)`
-  )
 }
 
 function selectThemeCategory(name) {
@@ -3045,7 +3271,14 @@ async function deleteThemeCategory(name) {
   const msg = isLocalOnly
     ? `Remove empty category “${cat}”?`
     : `Delete category “${cat}” and all ${count} value(s)? This cannot be undone.`
-  if (!confirm(msg)) return
+  if (
+    !(await askConfirm(msg, {
+      title: 'Delete category',
+      danger: true,
+      confirmLabel: 'Delete'
+    }))
+  )
+    return
   try {
     // Always try API delete so DB pool is cleared when values exist
     const res = await api.deleteThemeCategory(themeEditor.value.theme.id, cat)
@@ -3067,7 +3300,8 @@ async function deleteThemeCategory(name) {
       values: [],
       stats: res?.categories || []
     }
-    await refresh()
+    await refreshDataPackLists()
+    await refreshStatusOnly()
     await loadThemeEditorValues()
     await reloadFieldThemeCategories()
     flashStatus(
@@ -3124,7 +3358,8 @@ async function submitThemeValuesEditor() {
       flashStatus(
         `Theme “${theme.name}”: +${res.inserted} in “${category.trim()}” (${res.total}/${res.limit})`
       )
-    await refresh()
+    await refreshDataPackLists()
+    await refreshStatusOnly()
     await loadThemeEditorValues()
     await reloadFieldThemeCategories()
   } catch (e) {
@@ -3134,11 +3369,19 @@ async function submitThemeValuesEditor() {
 
 async function deleteThemeValueRow(row) {
   if (!themeEditor.value?.theme || !row?.id) return
-  if (!confirm(`Remove “${row.value}” from ${row.category}?`)) return
+  if (
+    !(await askConfirm(`Remove “${row.value}” from ${row.category}?`, {
+      title: 'Remove value',
+      danger: true,
+      confirmLabel: 'Remove'
+    }))
+  )
+    return
   try {
     await api.deleteThemeValue(themeEditor.value.theme.id, row.id)
     await loadThemeEditorValues()
-    await refresh()
+    await refreshDataPackLists()
+    await refreshStatusOnly()
     await reloadFieldThemeCategories()
     flashStatus('Value removed')
   } catch (e) {
@@ -3148,14 +3391,14 @@ async function deleteThemeValueRow(row) {
 
 async function editThemeValueRow(row) {
   if (!themeEditor.value?.theme || !row?.id) return
-  const next = prompt('Edit value', row.value)
+  const next = await askPrompt('Edit value', row.value, { title: 'Edit theme value' })
   if (next == null) return
   const v = String(next).trim()
   if (!v || v === row.value) return
   try {
     await api.updateThemeValue(themeEditor.value.theme.id, row.id, v)
     await loadThemeEditorValues()
-    await refresh()
+    await refreshDataPackLists()
     await reloadFieldThemeCategories()
     flashStatus('Value updated')
   } catch (e) {
@@ -3163,20 +3406,37 @@ async function editThemeValueRow(row) {
   }
 }
 
-function onThemeEditorCategoryChange() {
-  const cat = (themeEditor.value?.category || '').trim()
-  if (cat && themeEditor.value) {
-    const key = cat.toLowerCase()
-    const known = themeEditorCategoryChips.value.some(
-      (s) => String(s.category).toLowerCase() === key
-    )
-    if (!known) {
-      const local = [...(themeEditor.value.localCategories || [])]
-      if (!local.some((c) => c.toLowerCase() === key)) {
-        local.push(cat)
-        themeEditor.value = { ...themeEditor.value, localCategories: local }
-      }
+async function onThemeEditorCategoryChange() {
+  const raw = (themeEditor.value?.category || '').trim()
+  if (!raw || !themeEditor.value?.theme) {
+    void loadThemeEditorValues()
+    return
+  }
+  const cat = raw.replace(/\s+/g, '_').toLowerCase()
+  const known = themeEditorCategoryChips.value.some(
+    (s) => String(s.category).toLowerCase() === cat
+  )
+  if (!known) {
+    if (!/^[a-z0-9][a-z0-9_-]{0,47}$/i.test(cat)) {
+      flashError('Use letters, numbers, underscore, or hyphen (max 48 chars)')
+      return
     }
+    try {
+      const res = await api.ensureThemeCategory(themeEditor.value.theme.id, cat)
+      themeEditor.value = {
+        ...themeEditor.value,
+        category: cat,
+        localCategories: [],
+        stats: res.categories || themeEditor.value.stats
+      }
+      await reloadFieldThemeCategories()
+      flashStatus(`Category “${cat}” saved`)
+    } catch (e) {
+      flashError(e.message || 'Could not save category')
+      return
+    }
+  } else if (cat !== themeEditor.value.category) {
+    themeEditor.value = { ...themeEditor.value, category: cat }
   }
   void loadThemeEditorValues()
 }
@@ -3440,7 +3700,8 @@ async function onPackageImport(ev) {
     const multi = res.multifileSchemaId ? ' · Multifile preview schema saved' : ''
     const skipN = res.skipped?.length || 0
     statusMsg.value = `Package “${res.name}” · ${res.members?.filter((x) => x.kind === 'text').length || 0} text · nested ${res.nestedArchives?.length || 0} · skipped ${skipN}${multi}`
-    await refresh()
+    await refreshLibraryLists()
+    await refreshStatusOnly()
     await refreshPackageEstimate()
   } catch (e) {
     errorMsg.value = e.message
@@ -3625,7 +3886,7 @@ async function savePackageMemberContent() {
     selectPackageMember(nextPath)
     statusMsg.value =
       'Member + schema saved from content (design sample re-inferred; not bulk generate)'
-    await refresh()
+    await refreshLibraryLists()
   } catch (e) {
     errorMsg.value = e.message
   } finally {
@@ -3653,9 +3914,10 @@ async function savePackageMemberSchemaAs() {
     errorMsg.value = 'Only XML, CSV, and TXT members support save-as from content'
     return
   }
-  const name = window.prompt(
+  const name = await askPrompt(
     'Save schema as (new name, inferred from current editor content):',
-    `${m.name || 'member'} schema copy`
+    `${m.name || 'member'} schema copy`,
+    { title: 'Save member schema as' }
   )
   if (name == null) return
   packageWorking.value = true
@@ -3672,7 +3934,8 @@ async function savePackageMemberSchemaAs() {
     else activePackage.value = await api.getPackage(activePackage.value.id)
     selectPackageMember(packageMemberPath.value)
     statusMsg.value = `Saved as new schema “${res.schema?.name || name}” from edited content (linked)`
-    await refresh()
+    await refreshLibraryLists()
+    await refreshStatusOnly()
   } catch (e) {
     errorMsg.value = e.message
   } finally {
@@ -3745,16 +4008,20 @@ async function editPackageMemberSchema() {
 
 async function removePackage(id) {
   if (
-    !confirm(
-      'Delete package layout and its linked schemas from SQLite? Generated files on disk are not removed.'
-    )
+    !(await askConfirm(
+      'Delete package layout and its linked schemas from SQLite? Generated files on disk are not removed.',
+      { title: 'Delete package', danger: true, confirmLabel: 'Delete' }
+    ))
   )
     return
   errorMsg.value = ''
   try {
     await api.deletePackage(id)
     if (activePackage.value?.id === id) activePackage.value = null
-    await refresh()
+    packages.value = removeById(packages.value, id)
+    await refreshLibraryLists()
+    await refreshDeliveryJobs()
+    await refreshStatusOnly()
     statusMsg.value = 'Package deleted (linked schemas and delivery jobs cleaned up)'
   } catch (e) {
     errorMsg.value = e.message
@@ -3809,7 +4076,14 @@ async function refreshDeliveryJobs() {
 }
 
 async function removeDeliveryJob(id) {
-  if (!confirm('Delete this delivery job?')) return
+  if (
+    !(await askConfirm('Delete this delivery job?', {
+      title: 'Delete delivery job',
+      danger: true,
+      confirmLabel: 'Delete'
+    }))
+  )
+    return
   await api.deleteDeliveryJob(id)
   await refreshDeliveryJobs()
 }
@@ -3820,7 +4094,7 @@ async function deleteHist(id) {
 }
 
 async function editHist(h) {
-  const v = prompt('Edit value', h.value)
+  const v = await askPrompt('Edit value', h.value, { title: 'Edit fill value' })
   if (v == null) return
   await api.historyUpdate(h.id, v)
   await loadHistory()
@@ -3901,7 +4175,7 @@ function tip(msg) {
 </script>
 
 <template>
-  <div class="shell">
+  <div class="shell" :aria-busy="bootLoading ? 'true' : undefined">
     <header class="top">
       <div class="brand">
         <div class="brand-row">
@@ -3944,15 +4218,15 @@ function tip(msg) {
           :title="
             tip(
               !workspaceSupportsPreview
-                ? 'Generate panel is not used in this workspace'
+                ? 'Tools panel is not used in this workspace'
                 : layout.previewCollapsed
-                  ? 'Show the right Generate panel (run options)'
-                  : 'Hide the right Generate panel for more editor space'
+                  ? 'Show the right tools panel (run options)'
+                  : 'Hide the right tools panel for more editor space'
             )
           "
           @click="togglePreviewPanel"
         >
-          <span class="layout-btn-text">Generate</span>
+          <span class="layout-btn-text">Tools</span>
           <span class="layout-btn-icon" aria-hidden="true">{{
             showRightPanel ? '»' : '«'
           }}</span>
@@ -3960,7 +4234,7 @@ function tip(msg) {
         <button
           type="button"
           class="layout-btn layout-btn-reset"
-          :title="tip('Reset list/Generate panel sizes to defaults for this workspace')"
+          :title="tip('Reset list/tools panel sizes to defaults for this workspace')"
           @click="resetLayoutToWorkspace"
         >
           <span class="layout-btn-icon layout-btn-spin" aria-hidden="true">↺</span>
@@ -3993,12 +4267,12 @@ function tip(msg) {
         <button
           class="btn btn-ghost"
           :title="tip('App preferences: theme, defaults, file naming, and UI help tips')"
-          @click="settingsOpen = !settingsOpen"
+          @click="openSettings"
         >
           Settings
         </button>
         <button
-          v-if="showHeaderGenerate"
+          v-if="showHeaderGenerate && workspaceMode === 'schema'"
           class="btn btn-primary"
           :disabled="generating || !active"
           :title="tip('Generate test records from the current schema and download/export')"
@@ -4007,7 +4281,7 @@ function tip(msg) {
           {{ generateButtonLabel }}
         </button>
         <button
-          v-else-if="workspaceMode === 'package'"
+          v-else-if="showHeaderPackageGenerate"
           class="btn btn-primary"
           :disabled="packageWorking || !activePackage"
           :title="tip('Generate package variants from the selected package layout')"
@@ -4018,7 +4292,12 @@ function tip(msg) {
       </div>
     </header>
 
-    <div v-if="errorMsg" class="banner err" role="alert">
+    <AppDialog />
+
+    <div v-if="bootLoading" class="banner boot" role="status">
+      Loading library…
+    </div>
+    <div v-else-if="errorMsg" class="banner err" role="alert">
       {{ errorMsg }}
       <button class="btn btn-ghost" type="button" @click="errorMsg = ''">Dismiss</button>
     </div>
@@ -4579,10 +4858,17 @@ function tip(msg) {
               v-model="historySearch"
               class="input"
               placeholder="Search fill values…"
-              @keyup.enter="loadHistory"
+              aria-label="Search fill values"
+              @keyup.enter="loadHistoryDebounced.cancel(); loadHistory()"
             />
             <div class="hist-actions">
-              <button type="button" class="btn btn-ghost" @click="loadHistory">Search</button>
+              <button
+                type="button"
+                class="btn btn-ghost"
+                @click="loadHistoryDebounced.cancel(); loadHistory()"
+              >
+                Search
+              </button>
               <button type="button" class="btn btn-ghost danger" @click="clearHistoryAll">
                 Clear all
               </button>
@@ -4622,6 +4908,9 @@ function tip(msg) {
                   Delete
                 </button>
               </div>
+            </li>
+            <li v-if="!templates.length" class="muted tiny" style="padding: 0.5rem">
+              No templates yet — save the current schema as a template.
             </li>
           </ul>
         </div>
@@ -4703,12 +4992,7 @@ function tip(msg) {
                   <button
                     type="button"
                     class="btn btn-outline-danger pack-action"
-                    @click.stop="
-                      api
-                        .deleteTheme(t.id)
-                        .then(() => refresh())
-                        .then(() => reloadFieldThemeCategories())
-                    "
+                    @click.stop="deleteTheme(t)"
                   >
                     Delete
                   </button>
@@ -4762,51 +5046,9 @@ function tip(msg) {
                 No field lists yet — save a schema or create one.
               </li>
             </ul>
-            <div v-if="activeCustomList" class="custom-editor pack-editor">
-              <div class="pack-editor-title">Edit list</div>
-              <label class="gen-field">
-                <span class="gen-field-label">Name</span>
-                <input v-model="customListName" class="input" />
-              </label>
-              <label class="gen-field">
-                <span class="gen-field-label">Field keys (comma-separated)</span>
-                <input
-                  v-model="customListKeys"
-                  class="input mono"
-                  placeholder="name, person.name, city"
-                />
-              </label>
-              <button type="button" class="btn btn-accent full pack-action" @click="saveActiveCustomList">
-                Save list
-              </button>
-              <label class="gen-field">
-                <span class="gen-field-label">Add values (one per line)</span>
-                <textarea v-model="customBulkValues" class="input mono" rows="4" />
-              </label>
-              <button type="button" class="btn btn-primary full pack-cta" @click="addBulkCustomValues">
-                Add values
-              </button>
-              <ul class="pack-value-list">
-                <li v-for="v in activeCustomList.values || []" :key="v.id" class="pack-value-row">
-                  <span class="v mono">{{ v.value }}</span>
-                  <div class="pack-value-actions">
-                    <button type="button" class="btn btn-outline pack-action-sm" @click="editCustomValue(v)">
-                      Edit
-                    </button>
-                    <button
-                      type="button"
-                      class="btn btn-outline-danger pack-action-sm"
-                      @click="removeCustomValue(v.id)"
-                    >
-                      Del
-                    </button>
-                  </div>
-                </li>
-              </ul>
-              <button type="button" class="btn btn-outline-danger full pack-action" @click="removeCustomList">
-                Delete list
-              </button>
-            </div>
+            <p v-if="activeCustomList" class="muted tiny pack-lead" style="margin-top: 0.5rem">
+              Editing <strong>{{ activeCustomList.name }}</strong> in the center panel.
+            </p>
           </template>
         </div>
 
@@ -4832,6 +5074,9 @@ function tip(msg) {
                   Del
                 </button>
               </div>
+            </li>
+            <li v-if="!deliveryJobs.length" class="muted tiny" style="padding: 0.5rem">
+              No delivery jobs yet — create one in the center panel.
             </li>
           </ul>
         </div>
@@ -6024,9 +6269,10 @@ function tip(msg) {
                   <span class="muted tiny">· theme values</span>
                 </h3>
                 <p class="muted tiny">
-                  Categories are your buckets (names, ships, lightsabers…). Map a schema field’s
-                  <strong>Theme pack</strong> + <strong>Category</strong> to pull random values
-                  from this pool. Cap: <strong>{{ THEME_CAT_LIMIT }}</strong> values per category.
+                  Categories are your buckets (names, ships, lightsabers…) and are saved as soon as
+                  you add them. Map a schema field’s <strong>Theme pack</strong> +
+                  <strong>Category</strong> to pull random values from this pool. Cap:
+                  <strong>{{ THEME_CAT_LIMIT }}</strong> values per category.
                 </p>
 
                 <div class="theme-cat-bar">
@@ -6189,6 +6435,24 @@ function tip(msg) {
                   </button>
                 </div>
               </template>
+              <template v-else-if="dataPackSubTab === 'custom'">
+                <FieldValuesCenter
+                  :list="activeCustomList"
+                  :list-name="customListName"
+                  :list-keys="customListKeys"
+                  :bulk-values="customBulkValues"
+                  :list-count="customLists.length"
+                  @update:list-name="customListName = $event"
+                  @update:list-keys="customListKeys = $event"
+                  @update:bulk-values="customBulkValues = $event"
+                  @save="saveActiveCustomList"
+                  @add-values="addBulkCustomValues"
+                  @edit-value="editCustomValue"
+                  @remove-value="removeCustomValue"
+                  @delete-list="removeCustomList"
+                  @close="activeCustomList = null"
+                />
+              </template>
               <template v-else>
                 <h3 style="margin-top: 0">Data packs</h3>
                 <p>
@@ -6200,7 +6464,7 @@ function tip(msg) {
                 <p class="muted tiny">
                   Each category holds up to {{ THEME_CAT_LIMIT }} values (warning at
                   {{ THEME_CAT_WARN_AT }}+). Open a theme with
-                  <em>Browse / edit values</em> on the left.
+                  <em>Browse / edit</em> on the left.
                 </p>
                 <p class="muted tiny">
                   Active blend:
@@ -6214,8 +6478,19 @@ function tip(msg) {
             </div>
           </template>
           <template v-else-if="workspaceMode === 'templates'">
-            <div class="empty-workspace" style="padding: 1rem">
-              <p>Save and load schema templates from the left list.</p>
+            <div class="empty-workspace" style="padding: 1rem; max-width: 520px">
+              <h3 style="margin-top: 0">Templates</h3>
+              <p>
+                Snapshots of a schema design you can reload later. Use
+                <strong>Save current as template</strong> on the left, then
+                <strong>Load</strong> to open a copy in Library for edit/generate.
+              </p>
+              <p v-if="!templates.length" class="muted tiny">
+                No templates saved yet.
+              </p>
+              <p v-else class="muted tiny">
+                {{ templates.length }} template(s) in the left list.
+              </p>
             </div>
           </template>
           <template v-else-if="workspaceMode === 'archive'">
@@ -6903,6 +7178,10 @@ body.dragging-schema-float * {
 .banner.ok {
   background: rgba(74, 222, 128, 0.12);
   color: var(--success);
+}
+.banner.boot {
+  background: rgba(59, 130, 246, 0.12);
+  color: var(--muted);
 }
 .banner-timer {
   margin-left: auto;

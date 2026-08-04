@@ -73,11 +73,16 @@ GOALS.md
 CONTEXT.md
 GROK_BUILD_SETUP.md
 
-# PowerShell leftovers (bash only for run scripts)
+# PowerShell: ignore ad-hoc leftovers, keep packaging/start scripts
 *.ps1
+!scripts/build-exe.ps1
+!scripts/start-desktop.ps1
 scripts/cleanup-electron-remnants.ps1
 scripts/finalize-dataforge-path.ps1
 scripts/finalize-pv-path.ps1
 
 # NOTE: .gitlab/ and AGENTS.md ARE intended for commit (GitLab Duo + CI).
 # Do not add a blanket ".gitlab/" ignore rule.
+
+# Desktop exe packaging
+build/pyinstaller/

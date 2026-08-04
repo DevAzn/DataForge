@@ -275,6 +275,43 @@ install_backend() {
   fi
 
   ok "Backend ready ($("$venv_py" -c 'import sys; print(sys.version.split()[0])'))"
+
+  init_sqlite_db "$venv_py"
+}
+
+# Create data dirs, init SQLite schema, fail loud if not writable
+init_sqlite_db() {
+  local venv_py="$1"
+  local backend="$ROOT/backend"
+  mkdir -p "$ROOT/data/encryption" "$ROOT/data/exports"
+
+  # Write smoke (catches read-only / synced-folder permission issues)
+  local probe="$ROOT/data/.write_probe"
+  if ! (echo ok >"$probe" && rm -f "$probe"); then
+    die "cannot write to $ROOT/data — check folder permissions"
+  fi
+
+  info "Initializing SQLite (design data store)..."
+  local db_path
+  db_path="$(
+    cd "$backend" && "$venv_py" -c "
+from app.database import init_db, DB_PATH, DATA_DIR, connect
+init_db()
+# read/write smoke
+c = connect()
+try:
+    c.execute('SELECT COUNT(*) FROM settings')
+    c.execute(\"INSERT OR REPLACE INTO settings (key, value_json) VALUES ('_install_probe', '1')\")
+    c.execute(\"DELETE FROM settings WHERE key = '_install_probe'\")
+    c.commit()
+finally:
+    c.close()
+print(DB_PATH)
+"
+  )" || die "SQLite init failed — is the venv healthy? re-run: ./scripts/install.sh --force"
+
+  ok "SQLite ready: $db_path"
+  ok "Local only — this file is per machine (not shared via git)"
 }
 
 # ── frontend ───────────────────────────────────────────────────────
@@ -308,7 +345,7 @@ chmod_scripts() {
 }
 
 ensure_data_dir() {
-  mkdir -p "$ROOT/data"
+  mkdir -p "$ROOT/data/encryption" "$ROOT/data/exports"
   ok "data/ directory ready (SQLite + exports)"
 }
 
@@ -318,6 +355,7 @@ print_next_steps() {
 ${C_BOLD}DataForge install complete.${C_RESET}
 
   Project:  $ROOT
+  SQLite:   $ROOT/data/pv_dataforge.sqlite  ${C_DIM}(created on install / first API start)${C_RESET}
 
 Start (two terminals):
   ${C_CYAN}./scripts/start-backend.sh${C_RESET}
@@ -329,8 +367,11 @@ Or both in one terminal:
 URLs:
   UI          http://localhost:5173
   API health  http://127.0.0.1:8765/api/health
+  API status  http://127.0.0.1:8765/api/status   ${C_DIM}(shows dbPath + counts)${C_RESET}
   API docs    http://127.0.0.1:8765/docs
 
+${C_DIM}Persistence: schemas, themes, categories, settings live in the local SQLite file.
+Each clone has its own data/ — not shared via git. Open the UI at :5173 (proxies to the API).${C_RESET}
 ${C_DIM}Windows: use Git Bash or WSL for these scripts.${C_RESET}
 EOF
 }

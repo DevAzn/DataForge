@@ -1,6 +1,6 @@
 [project]
 name = "dataforge"
-version = "0.5.0"
+version = "0.6.0"
 description = "PV_DataForge — Python + Vue + SQLite ETL test-data generator"
 readme = "README.md"
 requires-python = ">=3.12"
