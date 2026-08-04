@@ -60,14 +60,15 @@ def main() -> int:
 
     root = project_root()
     ui = ui_dist_dir()
+    # ASCII-only banners: Windows consoles often use cp1252 and choke on arrows.
     print("")
     print("  DataForge")
-    print(f"  UI + API  →  http://{HOST}:{PORT}/")
-    print(f"  Data dir  →  {root / 'data'}")
+    print(f"  UI + API  :  http://{HOST}:{PORT}/")
+    print(f"  Data dir  :  {root / 'data'}")
     if ui:
-        print(f"  UI files  →  {ui}")
+        print(f"  UI files  :  {ui}")
     else:
-        print("  WARNING: frontend/dist not found — API only (build the UI or use Vite).")
+        print("  WARNING: frontend/dist not found - API only (build the UI or use Vite).")
     print("  Press Ctrl+C to stop.")
     print("")
 

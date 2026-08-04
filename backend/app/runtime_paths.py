@@ -29,11 +29,19 @@ def bundle_root() -> Path:
 
 def ui_dist_dir() -> Path | None:
     """Built Vue UI (frontend/dist) if present."""
+    root = project_root()
+    bundle = bundle_root()
     candidates = [
-        bundle_root() / "frontend" / "dist",
-        project_root() / "frontend" / "dist",
-        project_root() / "ui",
+        bundle / "frontend" / "dist",
+        root / "frontend" / "dist",
+        root / "_internal" / "frontend" / "dist",
+        root / "ui",
+        # Some layouts place index.html next to the exe
+        root,
     ]
+    for c in candidates:
+        if (c / "index.html").is_file() and (c / "assets").is_dir():
+            return c
     for c in candidates:
         if (c / "index.html").is_file():
             return c
