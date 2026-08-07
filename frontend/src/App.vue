@@ -30,8 +30,10 @@ import {
   mergeBootstrapPayload,
   normalizeExportFormat,
   removeById,
+  sampleTableFromPreview,
   shouldShowHeaderGenerate,
   sideNavDensityFromWidth,
+  summarizeFillSources,
   upsertById
 } from './uiHelpers.js'
 
@@ -64,6 +66,9 @@ const lastGenerated = ref(null)
 /** When true, harvest generated field tokens into value_history (off by default). */
 const recordGeneratedHistory = ref(false)
 const lastReport = ref(null)
+/** Last preview/generate payload for sample table (records or sampleRows). */
+const lastSamplePayload = ref(null)
+const previewing = ref(false)
 const previewText = ref('')
 const historyPage = ref({ items: [], total: 0, offset: 0, limit: 40 })
 const historySearch = ref('')
@@ -1247,6 +1252,30 @@ async function deleteSchema() {
   }
 }
 
+async function cloneSchema() {
+  if (!active.value?.id) return
+  if (!schemas.value.some((s) => s.id === active.value.id)) {
+    errorMsg.value = 'Save the schema to the library before duplicating.'
+    return
+  }
+  if (active.value.isMultifile || active.value.isPackageMember || active.value.packageId) {
+    errorMsg.value =
+      'Package member schemas cannot be duplicated here. Open Packages and save a member as a new schema instead.'
+    return
+  }
+  try {
+    const cloned = await api.cloneSchema(active.value.id)
+    schemas.value = upsertById(schemas.value, cloned)
+    clearSchemaUndo()
+    active.value = cloned
+    selectedId.value = active.value.root?.[0]?.id || null
+    await refreshStatusOnly()
+    flashStatus(`Duplicated as “${cloned.name}”`)
+  } catch (e) {
+    flashError(e.message)
+  }
+}
+
 async function onImport(ev) {
   const file = ev.target.files?.[0]
   ev.target.value = ''
@@ -1406,6 +1435,57 @@ function genBody(extra = {}) {
 const generateButtonLabel = computed(() =>
   generating.value ? 'Working…' : 'Generate'
 )
+
+const fillSourceMeters = computed(() => summarizeFillSources(lastReport.value))
+
+const sampleTable = computed(() => sampleTableFromPreview(lastSamplePayload.value))
+
+async function previewSamples() {
+  if (!active.value) return
+  if (active.value.isMultifile) {
+    errorMsg.value =
+      'This is a package preview schema. Open Packages and Generate variants there.'
+    return
+  }
+  previewing.value = true
+  errorMsg.value = ''
+  try {
+    // Cap for UI table; does not change user's Generate recordCount
+    const n = Math.min(20, Math.max(1, Number(recordCount.value) || 5))
+    const res = await api.generatePreview(
+      genBody({
+        recordCount: Math.min(n, 20),
+        recordHistory: false
+      })
+    )
+    lastReport.value = res.report || null
+    lastSamplePayload.value = res
+    lastGenerated.value = {
+      ...res,
+      previewOnly: true,
+      format: format.value
+    }
+    // Compact text fallback for existing preview pane
+    try {
+      const rows = res.sampleRows || res.records || []
+      previewText.value = JSON.stringify(rows, null, 2)
+    } catch {
+      previewText.value = String(res.recordCount || 0) + ' sample row(s)'
+    }
+    tab.value = 'generate'
+    if (!showRightPanel.value) {
+      layout.value.previewCollapsed = false
+      saveLayoutPrefs()
+    }
+    flashStatus(
+      `Preview ${res.recordCount} sample(s) · seed ${res.seed} · ${res.ms}ms (not downloaded)`
+    )
+  } catch (e) {
+    flashError(e.message)
+  } finally {
+    previewing.value = false
+  }
+}
 
 function sanitizeFileBase(name) {
   return (
@@ -1976,6 +2056,7 @@ async function generate() {
     } else {
       const res = await api.generate(genBody())
       lastReport.value = res.report || null
+      lastSamplePayload.value = res
       tab.value = 'generate'
       // XML: schema-shaped document (matches tree / design preview).
       // CSV/TXT: flat record list (tabular columns).
@@ -4202,10 +4283,20 @@ const selectedGenerateMode = computed(() => getSelectedGenerateMode())
 
 /** Single “More” disclosure for secondary field options */
 const propsMoreOpen = ref(false)
+/** Generate rail: power opts (stream, CSV layout, archive, CI, history) behind disclosure */
+const genMoreOpen = ref(false)
+/** Collapsed-rail / expanded nav: demoted workspaces under More */
+const navMoreOpen = ref(false)
 
 watch(selectedId, () => {
   propsMoreOpen.value = fieldHasAdvanced.value
 })
+
+function goToLibrary() {
+  sidebar.value = 'schemas'
+  layout.value.sideCollapsed = false
+  saveLayoutPrefs()
+}
 
 const enumText = computed({
   get: () => (selected.value?.enumValues || []).join('\n'),
@@ -4570,10 +4661,10 @@ function tip(msg) {
           </button>
           <button
             type="button"
-            class="rail-nav"
+            class="rail-nav rail-nav-primary"
             :class="{ on: sidebar === 'schemas' || sidebar === 'packages' }"
             :title="tip('Library')"
-            @click="sidebar = 'schemas'; layout.sideCollapsed = false; saveLayoutPrefs()"
+            @click="goToLibrary()"
           >
             Ly
           </button>
@@ -4597,7 +4688,7 @@ function tip(msg) {
           </button>
           <button
             type="button"
-            class="rail-nav"
+            class="rail-nav rail-nav-muted"
             :class="{ on: sidebar === 'templates' }"
             :title="tip('Templates')"
             @click="sidebar = 'templates'; layout.sideCollapsed = false; saveLayoutPrefs()"
@@ -4606,7 +4697,7 @@ function tip(msg) {
           </button>
           <button
             type="button"
-            class="rail-nav"
+            class="rail-nav rail-nav-muted"
             :class="{ on: sidebar === 'delivery' }"
             :title="tip('Delivery — plan chunked package dumps to disk')"
             @click="sidebar = 'delivery'; layout.sideCollapsed = false; saveLayoutPrefs(); refreshDeliveryJobs()"
@@ -4615,7 +4706,7 @@ function tip(msg) {
           </button>
           <button
             type="button"
-            class="rail-nav"
+            class="rail-nav rail-nav-muted"
             :class="{ on: sidebar === 'archive' }"
             :title="tip('Archive — browse an existing ZIP/TAR without importing')"
             @click="sidebar = 'archive'; layout.sideCollapsed = false; saveLayoutPrefs()"
@@ -4625,74 +4716,103 @@ function tip(msg) {
         </div>
         <template v-else>
         <nav class="tabs workspace-tabs" aria-label="Workspaces">
-          <button
-            type="button"
-            :class="{ on: sidebar === 'schemas' || sidebar === 'packages' }"
-            :aria-current="sidebar === 'schemas' || sidebar === 'packages' ? 'page' : undefined"
-            :title="tip('Schemas and multifile packages')"
-            @click="sidebar = 'schemas'"
-          >
-            <span class="tab-code" aria-hidden="true">Ly</span>
-            <span class="tab-short">Lib</span>
-            <span class="tab-full">Library</span>
-          </button>
-          <button
-            type="button"
-            :class="{ on: sidebar === 'history' }"
-            :title="tip('Recently used schemas and generate runs')"
-            @click="
-              sidebar = 'history';
-              loadRecentActivity();
-              loadHistory()
-            "
-          >
-            <span class="tab-code" aria-hidden="true">Re</span>
-            <span class="tab-short">Recent</span>
-            <span class="tab-full">Recent</span>
-          </button>
-          <button
-            type="button"
-            :class="{ on: sidebar === 'datapacks' || sidebar === 'themes' || sidebar === 'custom' }"
-            :title="tip('Themes (genres) and custom field values')"
-            @click="sidebar = 'datapacks'"
-          >
-            <span class="tab-code" aria-hidden="true">Dp</span>
-            <span class="tab-short">Packs</span>
-            <span class="tab-full">Data packs</span>
-          </button>
-          <button
-            type="button"
-            :class="{ on: sidebar === 'templates' }"
-            :title="tip('Schema templates')"
-            @click="sidebar = 'templates'"
-          >
-            <span class="tab-code" aria-hidden="true">Tm</span>
-            <span class="tab-short">Tmpl</span>
-            <span class="tab-full">Templates</span>
-          </button>
-          <button
-            type="button"
-            :class="{ on: sidebar === 'delivery' }"
-            :title="tip('Bulk delivery later')"
-            @click="
-              sidebar = 'delivery';
-              refreshDeliveryJobs()
-            "
-          >
-            <span class="tab-code" aria-hidden="true">Dv</span>
-            <span class="tab-short">Deliv</span>
-            <span class="tab-full">Delivery</span>
-          </button>
-          <button
-            type="button"
-            :class="{ on: sidebar === 'archive' }"
-            :title="tip('Browse an existing archive')"
-            @click="sidebar = 'archive'"
-          >
-            <span class="tab-code" aria-hidden="true">Ar</span>
-            <span class="tab-short">Arch</span>
-            <span class="tab-full">Archive</span>
-          </button>
+          <div class="nav-primary">
+            <button
+              type="button"
+              class="nav-tab-primary"
+              :class="{ on: sidebar === 'schemas' || sidebar === 'packages' }"
+              :aria-current="sidebar === 'schemas' || sidebar === 'packages' ? 'page' : undefined"
+              :title="tip('Schemas and multifile packages — edit and Generate')"
+              @click="sidebar = 'schemas'"
+            >
+              <span class="tab-code" aria-hidden="true">Ly</span>
+              <span class="tab-short">Lib</span>
+              <span class="tab-full">Library</span>
+            </button>
+          </div>
+          <div class="nav-secondary" role="group" aria-label="Supporting workspaces">
+            <button
+              type="button"
+              :class="{ on: sidebar === 'history' }"
+              :title="tip('Recently used schemas and generate runs')"
+              @click="
+                sidebar = 'history';
+                loadRecentActivity();
+                loadHistory()
+              "
+            >
+              <span class="tab-code" aria-hidden="true">Re</span>
+              <span class="tab-short">Recent</span>
+              <span class="tab-full">Recent</span>
+            </button>
+            <button
+              type="button"
+              :class="{ on: sidebar === 'datapacks' || sidebar === 'themes' || sidebar === 'custom' }"
+              :title="tip('Themes (genres) and custom field values')"
+              @click="sidebar = 'datapacks'"
+            >
+              <span class="tab-code" aria-hidden="true">Dp</span>
+              <span class="tab-short">Packs</span>
+              <span class="tab-full">Data packs</span>
+            </button>
+          </div>
+          <div class="nav-demoted">
+            <button
+              type="button"
+              class="nav-more-toggle"
+              :aria-expanded="navMoreOpen || ['templates', 'delivery', 'archive'].includes(sidebar)"
+              :title="tip('Templates, Delivery, Archive')"
+              @click="navMoreOpen = !navMoreOpen"
+            >
+              <span class="muted tiny">More</span>
+              <span class="muted tiny" aria-hidden="true">{{
+                navMoreOpen || ['templates', 'delivery', 'archive'].includes(sidebar) ? '▾' : '▸'
+              }}</span>
+            </button>
+            <div
+              v-show="navMoreOpen || ['templates', 'delivery', 'archive'].includes(sidebar)"
+              class="nav-demoted-row"
+              role="group"
+              aria-label="More tools"
+            >
+              <button
+                type="button"
+                class="nav-tab-demoted"
+                :class="{ on: sidebar === 'templates' }"
+                :title="tip('Schema templates')"
+                @click="sidebar = 'templates'"
+              >
+                <span class="tab-code" aria-hidden="true">Tm</span>
+                <span class="tab-short">Tmpl</span>
+                <span class="tab-full">Templates</span>
+              </button>
+              <button
+                type="button"
+                class="nav-tab-demoted"
+                :class="{ on: sidebar === 'delivery' }"
+                :title="tip('Bulk delivery later')"
+                @click="
+                  sidebar = 'delivery';
+                  refreshDeliveryJobs()
+                "
+              >
+                <span class="tab-code" aria-hidden="true">Dv</span>
+                <span class="tab-short">Deliv</span>
+                <span class="tab-full">Delivery</span>
+              </button>
+              <button
+                type="button"
+                class="nav-tab-demoted"
+                :class="{ on: sidebar === 'archive' }"
+                :title="tip('Browse an existing archive')"
+                @click="sidebar = 'archive'"
+              >
+                <span class="tab-code" aria-hidden="true">Ar</span>
+                <span class="tab-short">Arch</span>
+                <span class="tab-full">Archive</span>
+              </button>
+            </div>
+          </div>
         </nav>
 
         <div v-if="sidebar === 'schemas' || sidebar === 'packages'" class="side-body">
@@ -5168,6 +5288,63 @@ function tip(msg) {
       />
 
       <section v-if="workspaceMode === 'schema'" class="center panel">
+        <div
+          v-if="!active"
+          class="empty-workspace empty-cta-panel"
+        >
+          <p><strong>No schema open</strong></p>
+          <p class="muted tiny">
+            Create a blank schema or import a sample file to start editing fields and Generate.
+          </p>
+          <div class="empty-cta-row">
+            <button
+              type="button"
+              class="btn btn-primary pack-cta"
+              :title="tip('Create a blank schema in the Library')"
+              @click="newSchema"
+            >
+              + New schema
+            </button>
+            <label
+              class="btn btn-ghost pack-cta"
+              :title="tip('Import one XML, CSV, or TXT sample file and infer a field schema')"
+            >
+              Import sample file → schema
+              <input type="file" accept=".csv,.xml,.txt" hidden @change="onImport" />
+            </label>
+          </div>
+        </div>
+        <template v-if="active">
+        <div
+          v-if="
+            active &&
+            !standaloneSchemas.length &&
+            !schemas.some((s) => s.id === active.id)
+          "
+          class="empty-workspace empty-cta-panel empty-cta-banner"
+        >
+          <p>
+            <strong>Library is empty</strong> — you are editing an unsaved draft. Save it, or
+            import a sample to infer fields.
+          </p>
+          <div class="empty-cta-row">
+            <button
+              type="button"
+              class="btn btn-primary pack-cta"
+              :title="tip('Save this draft schema to the local library')"
+              @click="saveSchema"
+            >
+              Save schema
+            </button>
+            <label
+              class="btn btn-ghost pack-cta"
+              :title="tip('Import one XML, CSV, or TXT sample file and infer a field schema')"
+            >
+              Import sample file → schema
+              <input type="file" accept=".csv,.xml,.txt" hidden @change="onImport" />
+            </label>
+          </div>
+        </div>
         <div class="center-head schema-head">
           <!-- Row 1: identity + schema-level danger -->
           <div class="schema-head-row schema-head-identity">
@@ -5199,6 +5376,15 @@ function tip(msg) {
               />
             </label>
             <div class="schema-head-grow" />
+            <button
+              v-if="active?.id && schemas.some((s) => s.id === active.id)"
+              type="button"
+              class="btn btn-ghost"
+              :title="tip('Create a library copy of this schema design with a new id')"
+              @click="cloneSchema"
+            >
+              Duplicate
+            </button>
             <button
               v-if="active?.id && schemas.some((s) => s.id === active.id)"
               type="button"
@@ -6031,6 +6217,7 @@ function tip(msg) {
             </div>
           </template>
         </div>
+        </template>
       </section>
 
 
@@ -6051,13 +6238,37 @@ function tip(msg) {
             Delete package
           </button>
         </div>
-        <div v-if="!activePackage" class="empty-workspace">
-          <p>Import or select a package from the list.</p>
+        <div v-if="!activePackage" class="empty-workspace empty-cta-panel">
+          <p><strong>No package selected</strong></p>
           <p class="muted tiny">
-            Library → <strong>Import package</strong>: archive/files or folder. Nested paths show in
-            the explorer. Editable members: XML, CSV, TXT. Variants download only — not stored in
-            SQLite.
+            Import an archive, files, or folder. Nested paths show in the explorer. Editable
+            members: XML, CSV, TXT. Variants download only — not stored in SQLite.
           </p>
+          <div class="empty-cta-row">
+            <label
+              class="btn btn-primary pack-cta"
+              :class="{ disabled: packageWorking }"
+              :title="tip('Import a package from .tar / .tar.gz / .zip or multi-select XML, CSV, TXT files')"
+            >
+              Import package
+              <input
+                type="file"
+                multiple
+                accept=".zip,.tar,.tgz,.gz,.xml,.csv,.txt"
+                hidden
+                :disabled="packageWorking"
+                @change="onPackageImport"
+              />
+            </label>
+            <button
+              type="button"
+              class="btn btn-ghost"
+              :title="tip('Open Library list to pick an existing package')"
+              @click="goToLibrary()"
+            >
+              Open Library
+            </button>
+          </div>
         </div>
         <div v-else class="pkg-layout">
           <!-- Nested explorer (left of center) -->
@@ -6204,12 +6415,15 @@ function tip(msg) {
         </div>
       </section>
 
-      <!-- Delivery workspace -->
+      <!-- Delivery workspace (demoted — no feature growth) -->
       <section v-else-if="workspaceMode === 'delivery'" class="center panel workspace-panel">
         <div class="center-head">
           <strong>Plan a delivery job</strong>
         </div>
         <div class="workspace-scroll gen" style="max-width: 520px">
+          <p v-if="!deliveryJobs.length" class="muted tiny">
+            No jobs yet — fill the form below and create a plan. Artifacts go to disk only.
+          </p>
           <p class="muted tiny">
             Incremental dump: random chunk sizes (min/max each used at least once when target
             allows). Writes under <span class="mono">data/exports/delivery/</span> (or your path).
@@ -6305,7 +6519,7 @@ function tip(msg) {
                 Left list: open a schema to edit and generate. “Fill values” is optional learned
                 data used after Data packs.
               </p>
-              <ul class="schema-list" style="max-width: 520px">
+              <ul v-if="recentSchemas.length" class="schema-list" style="max-width: 520px">
                 <li
                   v-for="s in recentSchemas.slice(0, 12)"
                   :key="'c-' + s.id"
@@ -6316,6 +6530,27 @@ function tip(msg) {
                   <div class="meta">Click to open &amp; edit</div>
                 </li>
               </ul>
+              <div v-else class="empty-cta-panel" style="padding: 0; margin-top: 0.75rem">
+                <p class="muted tiny">No recent schemas yet.</p>
+                <div class="empty-cta-row">
+                  <button
+                    type="button"
+                    class="btn btn-primary pack-cta"
+                    :title="tip('Open Library to create or import a schema')"
+                    @click="goToLibrary()"
+                  >
+                    Open Library
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-ghost"
+                    :title="tip('Create a blank schema')"
+                    @click="goToLibrary(); newSchema()"
+                  >
+                    + New schema
+                  </button>
+                </div>
+              </div>
             </div>
           </template>
           <template v-else-if="workspaceMode === 'datapacks'">
@@ -6531,28 +6766,84 @@ function tip(msg) {
                       : 'none'
                   }}
                 </p>
+                <div
+                  v-if="!themes.length && !customLists.length"
+                  class="empty-cta-panel"
+                  style="margin-top: 1rem; padding: 0"
+                >
+                  <p class="muted tiny">No themes or field lists yet.</p>
+                  <div class="empty-cta-row">
+                    <button
+                      type="button"
+                      class="btn btn-primary pack-cta"
+                      :title="tip('Create a new theme pack')"
+                      @click="dataPackSubTab = 'themes'; createTheme()"
+                    >
+                      + New theme
+                    </button>
+                    <button
+                      type="button"
+                      class="btn btn-ghost"
+                      :title="tip('Create a custom field value list')"
+                      @click="dataPackSubTab = 'custom'; createCustomList()"
+                    >
+                      + New field list
+                    </button>
+                  </div>
+                </div>
               </template>
             </div>
           </template>
           <template v-else-if="workspaceMode === 'templates'">
-            <div class="empty-workspace" style="padding: 1rem; max-width: 520px">
+            <div class="empty-workspace empty-cta-panel" style="padding: 1rem; max-width: 520px">
               <h3 style="margin-top: 0">Templates</h3>
               <p>
-                Snapshots of a schema design you can reload later. Use
-                <strong>Save current as template</strong> on the left, then
+                Snapshots of a schema design you can reload later. Save the current schema, then
                 <strong>Load</strong> to open a copy in Library for edit/generate.
               </p>
-              <p v-if="!templates.length" class="muted tiny">
-                No templates saved yet.
-              </p>
+              <template v-if="!templates.length">
+                <p class="muted tiny">No templates saved yet.</p>
+                <div class="empty-cta-row">
+                  <button
+                    type="button"
+                    class="btn btn-primary pack-cta"
+                    :disabled="!active"
+                    :title="tip('Save the current schema design as a reusable template')"
+                    @click="saveAsTemplate"
+                  >
+                    Save current as template
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-ghost"
+                    :title="tip('Open Library to edit a schema first')"
+                    @click="goToLibrary()"
+                  >
+                    Open Library
+                  </button>
+                </div>
+              </template>
               <p v-else class="muted tiny">
                 {{ templates.length }} template(s) in the left list.
               </p>
             </div>
           </template>
           <template v-else-if="workspaceMode === 'archive'">
-            <pre class="code" style="margin: 0; flex: 1; width: 100%">{{
-              archivePreview || '// Open an archive and select an entry'
+            <div v-if="!archiveEntries.length" class="empty-workspace empty-cta-panel" style="padding: 1rem">
+              <p><strong>Archive browse</strong></p>
+              <p class="muted tiny">
+                Open a ZIP/TAR from the left list to preview entries. Does not import into Library.
+              </p>
+              <label
+                class="btn btn-primary pack-cta"
+                :title="tip('Open an existing ZIP/TAR without importing')"
+              >
+                Open archive
+                <input type="file" accept=".zip,.tar,.tgz,.gz" hidden @change="onArchiveOpen" />
+              </label>
+            </div>
+            <pre v-else class="code" style="margin: 0; flex: 1; width: 100%">{{
+              archivePreview || '// Select an entry from the left list'
             }}</pre>
           </template>
           <template v-else>
@@ -6595,13 +6886,13 @@ function tip(msg) {
         </div>
 
         <div class="gen">
-          <!-- 1. Run size -->
+          <!-- 1. Run size — first paint: Records -->
           <section class="gen-section">
             <header class="gen-section-head">
               <span class="gen-section-title">Run</span>
               <span class="gen-section-sub muted tiny">How much to produce</span>
             </header>
-            <div class="gen-section-body gen-row-2">
+            <div class="gen-section-body">
               <label
                 class="gen-field"
                 :title="tip('How many records (rows / XML record units) to produce in this run')"
@@ -6615,17 +6906,10 @@ function tip(msg) {
                   class="input"
                 />
               </label>
-              <label
-                class="gen-field"
-                :title="tip('Optional number for repeatable output. Leave empty for a random seed each run.')"
-              >
-                <span class="gen-field-label">Seed</span>
-                <input v-model="seed" class="input" placeholder="empty = random" />
-              </label>
             </div>
           </section>
 
-          <!-- 2. Output shape -->
+          <!-- 2. Output shape — first paint: mode only -->
           <section class="gen-section">
             <header class="gen-section-head">
               <span class="gen-section-title">Output</span>
@@ -6667,6 +6951,141 @@ function tip(msg) {
               <p v-if="outputMode === 'per-file'" class="muted tiny mono gen-hint">
                 Name pattern: {{ fileNamePattern }}
               </p>
+              <p class="muted tiny gen-hint">
+                Per-field mode / empty chance / themes → <strong>Field settings</strong>
+              </p>
+            </div>
+          </section>
+
+          <!-- 3. Actions — single primary CTA on first paint -->
+          <section class="gen-section gen-section-actions">
+            <div class="gen-section-body gen-actions">
+              <button
+                class="btn btn-primary full"
+                :disabled="generating || previewing || !active"
+                :title="tip('Generate from seed and download immediately')"
+                @click="generate"
+              >
+                {{ generateButtonLabel }}
+              </button>
+              <button
+                type="button"
+                class="btn btn-ghost full"
+                :disabled="generating || previewing || !active"
+                :title="
+                  tip(
+                    'Generate a small sample (max 20) for the table and source mix — no download, no history harvest'
+                  )
+                "
+                @click="previewSamples"
+              >
+                {{ previewing ? 'Working…' : 'Preview samples' }}
+              </button>
+              <button
+                v-if="active"
+                class="btn btn-ghost full"
+                :title="tip('Download the schema design you are editing (sample values only — not a seed Generate)')"
+                @click="downloadDesignOutput"
+              >
+                Download design sample
+              </button>
+            </div>
+            <div
+              v-if="fillSourceMeters.length"
+              class="source-mix"
+              :title="tip('Where leaf values came from on the last generate or preview')"
+            >
+              <div class="source-mix-head muted tiny">Source mix</div>
+              <div class="source-mix-bar" role="img" :aria-label="'Fill source proportions'">
+                <span
+                  v-for="seg in fillSourceMeters"
+                  :key="seg.key"
+                  class="source-mix-seg"
+                  :class="'src-' + seg.key"
+                  :style="{ width: seg.pct + '%' }"
+                  :title="seg.label + ' ' + seg.pct + '%'"
+                />
+              </div>
+              <ul class="source-mix-legend">
+                <li v-for="seg in fillSourceMeters" :key="'leg-' + seg.key">
+                  <span class="src-dot" :class="'src-' + seg.key" aria-hidden="true" />
+                  {{ seg.label }} {{ seg.pct }}%
+                </li>
+              </ul>
+            </div>
+            <div
+              v-if="lastReport"
+              class="gen-report muted tiny"
+              :title="tip('Stats from the last generate: fill sources, null rate, timing')"
+            >
+              history {{ lastReport.historyHitRate }}% · theme
+              {{ lastReport.themeHits ?? 0 }} · null {{ lastReport.nullRatePct }}% · synth
+              {{ lastReport.synthesized }} · enum {{ lastReport.enumHits }} ·
+              {{ lastReport.ms }}ms
+              <span v-if="lastGenerated?.previewOnly"> · preview</span>
+            </div>
+            <div
+              v-else-if="lastGenerated?.perFile"
+              class="gen-report muted tiny"
+              :title="tip('Summary of the last per-file generate archive')"
+            >
+              Per-file · {{ lastGenerated.written }} file(s) ·
+              {{ lastGenerated.archiveFormat || 'archive' }} · seed
+              {{ lastGenerated.seed }}
+            </div>
+            <div
+              v-if="sampleTable.rows.length"
+              class="sample-table-wrap"
+              :title="tip('Sample records from last preview or generate')"
+            >
+              <div class="source-mix-head muted tiny">
+                Sample rows ({{ sampleTable.rows.length }})
+              </div>
+              <div class="sample-table-scroll">
+                <table class="sample-table">
+                  <thead>
+                    <tr>
+                      <th v-for="col in sampleTable.columns" :key="col">{{ col }}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="(row, ri) in sampleTable.rows" :key="'sr-' + ri">
+                      <td v-for="col in sampleTable.columns" :key="col + '-' + ri">
+                        {{
+                          row[col] == null
+                            ? '—'
+                            : typeof row[col] === 'object'
+                              ? JSON.stringify(row[col])
+                              : row[col]
+                        }}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+
+          <!-- 4. Power options behind progressive disclosure -->
+          <section class="gen-section gen-section-more">
+            <button
+              type="button"
+              class="props-section-toggle gen-more-toggle"
+              :aria-expanded="genMoreOpen"
+              @click="genMoreOpen = !genMoreOpen"
+            >
+              <span class="props-chevron" aria-hidden="true">{{ genMoreOpen ? '▾' : '▸' }}</span>
+              <span class="gen-section-title">More options</span>
+              <span class="muted tiny">seed · stream · CSV · archive · sources</span>
+            </button>
+            <div v-if="genMoreOpen" class="gen-section-body gen-more-body">
+              <label
+                class="gen-field"
+                :title="tip('Optional number for repeatable output. Leave empty for a random seed each run.')"
+              >
+                <span class="gen-field-label">Seed</span>
+                <input v-model="seed" class="input" placeholder="empty = random" />
+              </label>
 
               <div class="gen-checks">
                 <label
@@ -6729,102 +7148,72 @@ function tip(msg) {
                   Nested as JSON
                 </label>
               </div>
-              <p class="muted tiny gen-hint">
-                Per-field mode / empty chance / themes → <strong>Field settings</strong>
-              </p>
-            </div>
-          </section>
 
-          <!-- 3. Data sources -->
-          <section class="gen-section">
-            <header class="gen-section-head">
-              <span class="gen-section-title">Data sources</span>
-              <span class="gen-section-sub muted tiny">What fills values (after field enums)</span>
-            </header>
-            <div class="gen-section-body gen-checks">
-              <label
-                class="chk"
-                :title="tip('Skip live history, themes, and custom lists — only enums, samples, and synthesis')"
-              >
-                <input v-model="ciMode" type="checkbox" />
-                CI mode (ignore history / themes / custom)
-              </label>
-              <label
-                class="chk"
-                :title="tip('Use Data packs themes for fields that have a Theme category')"
-              >
-                <input v-model="useDataThemes" type="checkbox" @change="persistDataThemes" />
-                Use data themes
-                <span v-if="themeBlend.length" class="muted tiny">
-                  ({{ themeBlend.map((b) => b.name || b.themeId.slice(0, 6)).join(' + ') }})
-                </span>
-              </label>
-              <label
-                class="chk"
-                :title="tip('Optional: save individual field values from this Generate into the history bank. Full rows/files are never stored. Off by default.')"
-              >
-                <input v-model="recordGeneratedHistory" type="checkbox" :disabled="ciMode" />
-                Remember field values in history bank
-              </label>
-            </div>
-          </section>
+              <header class="gen-section-head gen-more-subhead">
+                <span class="gen-section-title">Data sources</span>
+                <span class="gen-section-sub muted tiny">After field enums</span>
+              </header>
+              <div class="gen-checks">
+                <label
+                  class="chk"
+                  :title="tip('Skip live history, themes, and custom lists — only enums, samples, and synthesis')"
+                >
+                  <input v-model="ciMode" type="checkbox" />
+                  CI mode (ignore history / themes / custom)
+                </label>
+                <label
+                  class="chk"
+                  :title="tip('Use Data packs themes for fields that have a Theme category')"
+                >
+                  <input v-model="useDataThemes" type="checkbox" @change="persistDataThemes" />
+                  Use data themes
+                  <span v-if="themeBlend.length" class="muted tiny">
+                    ({{ themeBlend.map((b) => b.name || b.themeId.slice(0, 6)).join(' + ') }})
+                  </span>
+                </label>
+                <label
+                  class="chk"
+                  :title="tip('Optional: save individual field values from this Generate into the history bank. Full rows/files are never stored. Off by default.')"
+                >
+                  <input v-model="recordGeneratedHistory" type="checkbox" :disabled="ciMode" />
+                  Remember field values in history bank
+                </label>
+              </div>
 
-          <!-- 4. Archive -->
-          <section class="gen-section">
-            <header class="gen-section-head">
-              <span class="gen-section-title">Archive</span>
-              <span class="gen-section-sub muted tiny">Optional · wrap download in a folder</span>
-            </header>
-            <div class="gen-section-body gen-checks">
-              <label
-                class="chk"
-                :title="tip('Download as .tar with files under a directory named after the schema (or source folder)')"
-              >
-                <input
-                  type="checkbox"
-                  :checked="archiveTar"
-                  @change="setArchiveTar($event.target.checked)"
-                />
-                Archive (.tar)
-              </label>
-              <label
-                class="chk"
-                :title="tip('Download as .tar.gz with files under a directory named after the schema (or source folder)')"
-              >
-                <input
-                  type="checkbox"
-                  :checked="archiveTarGz"
-                  @change="setArchiveTarGz($event.target.checked)"
-                />
-                Compressed archive (.tar.gz)
-              </label>
-              <p v-if="archiveTar || archiveTarGz" class="muted tiny mono gen-hint">
-                {{ resolveArchiveDirName() }}{{ archiveTarGz ? '.tar.gz' : '.tar' }}
-                · files in
-                <strong>{{ resolveArchiveDirName() }}/</strong>
-              </p>
-            </div>
-          </section>
+              <header class="gen-section-head gen-more-subhead">
+                <span class="gen-section-title">Archive</span>
+                <span class="gen-section-sub muted tiny">Optional wrap</span>
+              </header>
+              <div class="gen-checks">
+                <label
+                  class="chk"
+                  :title="tip('Download as .tar with files under a directory named after the schema (or source folder)')"
+                >
+                  <input
+                    type="checkbox"
+                    :checked="archiveTar"
+                    @change="setArchiveTar($event.target.checked)"
+                  />
+                  Archive (.tar)
+                </label>
+                <label
+                  class="chk"
+                  :title="tip('Download as .tar.gz with files under a directory named after the schema (or source folder)')"
+                >
+                  <input
+                    type="checkbox"
+                    :checked="archiveTarGz"
+                    @change="setArchiveTarGz($event.target.checked)"
+                  />
+                  Compressed archive (.tar.gz)
+                </label>
+                <p v-if="archiveTar || archiveTarGz" class="muted tiny mono gen-hint">
+                  {{ resolveArchiveDirName() }}{{ archiveTarGz ? '.tar.gz' : '.tar' }}
+                  · files in
+                  <strong>{{ resolveArchiveDirName() }}/</strong>
+                </p>
+              </div>
 
-          <!-- 5. Actions -->
-          <section class="gen-section gen-section-actions">
-            <div class="gen-section-body gen-actions">
-              <button
-                class="btn btn-primary full"
-                :disabled="generating"
-                :title="tip('Generate from seed and download immediately')"
-                @click="generate"
-              >
-                {{ generateButtonLabel }}
-              </button>
-              <button
-                v-if="active"
-                class="btn btn-ghost full"
-                :title="tip('Download the schema design you are editing (sample values only — not a seed Generate)')"
-                @click="downloadDesignOutput"
-              >
-                Download design sample
-              </button>
               <button
                 v-if="outputMode === 'one-file' && lastGenerated?.records?.length"
                 class="btn btn-ghost full"
@@ -6833,25 +7222,6 @@ function tip(msg) {
               >
                 Multi-format archive (XML+CSV+TXT)
               </button>
-            </div>
-            <div
-              v-if="lastReport"
-              class="gen-report muted tiny"
-              :title="tip('Stats from the last generate: fill sources, null rate, timing')"
-            >
-              history {{ lastReport.historyHitRate }}% · theme
-              {{ lastReport.themeHits ?? 0 }} · null {{ lastReport.nullRatePct }}% · synth
-              {{ lastReport.synthesized }} · enum {{ lastReport.enumHits }} ·
-              {{ lastReport.ms }}ms
-            </div>
-            <div
-              v-else-if="lastGenerated?.perFile"
-              class="gen-report muted tiny"
-              :title="tip('Summary of the last per-file generate archive')"
-            >
-              Per-file · {{ lastGenerated.written }} file(s) ·
-              {{ lastGenerated.archiveFormat || 'archive' }} · seed
-              {{ lastGenerated.seed }}
             </div>
           </section>
         </div>
@@ -7656,6 +8026,31 @@ body.dragging-schema-float * {
 .empty-workspace p {
   margin: 0 0 0.5rem;
 }
+.empty-cta-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.35rem;
+}
+.empty-cta-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+}
+.empty-cta-row .btn,
+.empty-cta-row label.btn {
+  margin: 0;
+  cursor: pointer;
+}
+.empty-cta-banner {
+  margin: 0.5rem 0.75rem 0;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-2) 80%, transparent);
+}
 .main {
   display: grid;
   grid-template-columns: 280px 5px minmax(0, 1fr) 5px 360px;
@@ -7752,6 +8147,18 @@ body.resizing-cols * {
 .rail-nav:active {
   transform: scale(0.94);
 }
+.rail-nav-primary {
+  font-weight: 800;
+}
+.rail-nav-muted {
+  opacity: 0.72;
+  font-weight: 600;
+  font-size: 11px;
+  padding: 0.32rem 0;
+}
+.rail-nav-muted.on {
+  opacity: 1;
+}
 .tabs,
 .ptabs {
   display: flex;
@@ -7760,14 +8167,56 @@ body.resizing-cols * {
   border-bottom: 1px solid var(--border);
   flex-wrap: wrap;
 }
-/* Workspace nav: grid that reflows with sidebar width (never crushes words) */
+/* Workspace nav: primary Library + secondary + demoted More (not equal 6-tab weight) */
 .workspace-tabs {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  display: flex;
+  flex-direction: column;
   gap: 0.3rem;
   padding: 0.45rem;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+}
+.nav-primary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.3rem;
+}
+.nav-secondary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.3rem;
+}
+.nav-demoted {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-top: 0.1rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+}
+.nav-more-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  padding: 0.2rem 0.25rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+}
+.nav-more-toggle:hover {
+  background: color-mix(in srgb, var(--surface-2) 60%, transparent);
+  color: var(--text);
+}
+.nav-demoted-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.25rem;
 }
 .workspace-tabs button {
   display: inline-flex;
@@ -7791,6 +8240,18 @@ body.resizing-cols * {
     border-color 0.15s ease,
     color 0.15s ease;
 }
+.workspace-tabs .nav-tab-primary {
+  font-weight: 700;
+  padding: 0.48rem 0.4rem;
+  border-color: color-mix(in srgb, var(--border) 70%, transparent);
+  background: color-mix(in srgb, var(--surface-2) 45%, transparent);
+}
+.workspace-tabs .nav-tab-demoted {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 0.32rem 0.2rem;
+  opacity: 0.88;
+}
 .workspace-tabs button .tab-full,
 .workspace-tabs button .tab-short,
 .workspace-tabs button .tab-code {
@@ -7800,18 +8261,12 @@ body.resizing-cols * {
   max-width: 100%;
 }
 /* Label density driven by live side width */
-.side.nav-comfortable .workspace-tabs {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
 .side.nav-comfortable .tab-code,
 .side.nav-comfortable .tab-short {
   display: none;
 }
 .side.nav-comfortable .tab-full {
   display: inline;
-}
-.side.nav-cozy .workspace-tabs {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 .side.nav-cozy .tab-full,
 .side.nav-cozy .tab-code {
@@ -7824,8 +8279,8 @@ body.resizing-cols * {
   font-size: 11px;
   padding: 0.38rem 0.25rem;
 }
-.side.nav-compact .workspace-tabs {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+.side.nav-cozy .workspace-tabs .nav-tab-primary {
+  padding: 0.42rem 0.3rem;
 }
 .side.nav-compact .tab-full,
 .side.nav-compact .tab-short {
@@ -7838,6 +8293,9 @@ body.resizing-cols * {
 }
 .side.nav-compact .workspace-tabs button {
   padding: 0.42rem 0.15rem;
+}
+.side.nav-compact .nav-demoted-row {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 .tabs button,
 .ptabs button {
@@ -7857,9 +8315,30 @@ body.resizing-cols * {
   color: var(--text);
   border-color: var(--border);
 }
+.workspace-tabs .nav-tab-primary.on {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
+}
 .workspace-tabs button:hover:not(.on) {
   background: color-mix(in srgb, var(--surface-2) 70%, transparent);
   color: var(--text);
+}
+.gen-more-toggle {
+  width: 100%;
+  margin: 0;
+  text-align: left;
+}
+.gen-more-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  padding-top: 0.35rem;
+}
+.gen-more-subhead {
+  margin-top: 0.25rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
 }
 .side-body {
   padding: 0.5rem;
@@ -8582,6 +9061,114 @@ body.resizing-props * {
   margin-top: 0.15rem;
   line-height: 1.4;
   padding: 0.3rem 0.15rem 0;
+}
+.source-mix {
+  margin-top: 0.35rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.source-mix-head {
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  font-size: 10px;
+}
+.source-mix-bar {
+  display: flex;
+  height: 8px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--border);
+  min-width: 0;
+}
+.source-mix-seg {
+  display: block;
+  min-width: 2px;
+  height: 100%;
+}
+.source-mix-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.65rem;
+  font-size: 11px;
+  color: var(--muted);
+}
+.source-mix-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+}
+.src-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  display: inline-block;
+}
+.src-enum,
+.src-dot.src-enum {
+  background: #5b8def;
+}
+.src-theme,
+.src-dot.src-theme {
+  background: #9b6bff;
+}
+.src-custom,
+.src-dot.src-custom {
+  background: #3ecf8e;
+}
+.src-history,
+.src-dot.src-history {
+  background: #f0b429;
+}
+.src-synth,
+.src-dot.src-synth {
+  background: #8b95a8;
+}
+.src-mutate,
+.src-dot.src-mutate {
+  background: #e07a5f;
+}
+.sample-table-wrap {
+  margin-top: 0.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+.sample-table-scroll {
+  max-height: 160px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+.sample-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.sample-table th,
+.sample-table td {
+  padding: 0.22rem 0.4rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sample-table th {
+  position: sticky;
+  top: 0;
+  background: var(--surface-2, var(--surface));
+  font-weight: 600;
+  color: var(--muted);
+  z-index: 1;
 }
 @media (max-width: 720px) {
   .gen-row-2,

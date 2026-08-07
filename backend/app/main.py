@@ -105,6 +105,18 @@ class GenerateBody(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+# Sample preview caps — never large enough to act as a bulk dump path
+PREVIEW_MIN_RECORDS = 1
+PREVIEW_MAX_RECORDS = 20
+PREVIEW_DEFAULT_RECORDS = 5
+
+
+class PreviewBody(GenerateBody):
+    """Same generate knobs; recordCount clamped for lightweight FE sample table."""
+
+    recordCount: int = PREVIEW_DEFAULT_RECORDS
+
+
 class ExportBody(BaseModel):
     data: Any
     format: str = "xml"  # team UI: xml · csv · txt · xlsx; json/yaml/jsonl still accepted
@@ -547,6 +559,28 @@ def schemas_touch(schema_id: str):
     return {"ok": True}
 
 
+@app.post("/api/schemas/{schema_id}/clone")
+def schemas_clone(schema_id: str):
+    """Duplicate a schema design with a new id. Does not clone package membership."""
+    src = db.get_schema(schema_id)
+    if not src:
+        raise HTTPException(404, "Schema not found")
+    base_name = (src.get("name") or "Schema").strip() or "Schema"
+    copy = dict(src)
+    copy["id"] = str(uuid.uuid4())
+    copy["name"] = f"{base_name} (copy)"
+    # Standalone library design — drop package membership flags
+    copy["isMultifile"] = False
+    copy["isPackageMember"] = False
+    copy.pop("packageId", None)
+    saved = db.save_schema(copy)
+    db.log_interaction(
+        "schema_clone",
+        {"sourceId": schema_id, "newId": saved.get("id"), "name": saved.get("name")},
+    )
+    return saved
+
+
 @app.delete("/api/schemas/{schema_id}")
 def schemas_delete(schema_id: str):
     try:
@@ -587,6 +621,73 @@ async def schemas_import(file: UploadFile = File(...)):
 @app.post("/api/generate")
 def generate(body: GenerateBody):
     return _run_generate(body)
+
+
+def _flatten_sample_row(rec: Any, *, prefix: str = "", depth: int = 0) -> dict[str, Any]:
+    """Shallow flatten for FE table columns (depth-limited)."""
+    out: dict[str, Any] = {}
+    if not isinstance(rec, dict):
+        out[prefix or "value"] = rec
+        return out
+    if depth >= 2:
+        out[prefix or "value"] = rec
+        return out
+    for k, v in rec.items():
+        key = f"{prefix}.{k}" if prefix else str(k)
+        if isinstance(v, dict) and depth < 1:
+            out.update(_flatten_sample_row(v, prefix=key, depth=depth + 1))
+        elif isinstance(v, list):
+            out[key] = f"[{len(v)} items]" if v and isinstance(v[0], (dict, list)) else v
+        else:
+            out[key] = v
+    return out
+
+
+@app.post("/api/generate/preview")
+def generate_preview(body: PreviewBody):
+    """
+    Lightweight sample generate for UI preview.
+    Caps N, never harvests history, never stores bulk bodies.
+    """
+    schema = body.schema_
+    if not schema.get("root"):
+        raise HTTPException(400, "Schema has no fields")
+    count = int(body.recordCount or PREVIEW_DEFAULT_RECORDS)
+    count = max(PREVIEW_MIN_RECORDS, min(count, PREVIEW_MAX_RECORDS))
+    theme_lookup, theme_prefer, blend = _resolve_theme_context(body)
+    try:
+        result = generator.generate_records(
+            schema,
+            record_count=count,
+            seed=body.seed,
+            ci_mode=body.ciMode,
+            history_lookup=_history_lookup,
+            custom_lookup=_custom_lookup,
+            theme_lookup=theme_lookup,
+            theme_prefer=theme_prefer,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    # Preview never writes value history (ignore body.recordHistory)
+    result.pop("historyBuffer", None)
+    records = result.get("records") or []
+    sample_rows = [_flatten_sample_row(r) for r in records if isinstance(r, dict) or r is not None]
+    result["sampleRows"] = sample_rows
+    result["preview"] = True
+    result["recordCount"] = len(records)
+    db.log_interaction(
+        "generate_preview",
+        {
+            "count": result["recordCount"],
+            "seed": result.get("seed"),
+            "schemaId": schema.get("id"),
+            "schemaName": schema.get("name"),
+            "themeBlend": blend,
+            "themeHits": (result.get("report") or {}).get("themeHits"),
+            "customHits": (result.get("report") or {}).get("customHits"),
+        },
+    )
+    return result
 
 
 @app.post("/api/generate/stream")

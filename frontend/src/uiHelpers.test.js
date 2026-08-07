@@ -7,10 +7,13 @@ import { describe, it } from 'node:test'
 import {
   TEAM_EXPORT_FORMATS,
   createDebounced,
+  flattenSampleRecord,
   normalizeExportFormat,
   removeById,
+  sampleTableFromPreview,
   shouldShowHeaderGenerate,
   sideNavDensityFromWidth,
+  summarizeFillSources,
   upsertById
 } from './uiHelpers.js'
 import { formatApiError } from './api.js'
@@ -60,6 +63,55 @@ describe('removeById', () => {
   it('removes matching id', () => {
     assert.deepEqual(removeById([{ id: 'a' }, { id: 'b' }], 'a'), [{ id: 'b' }])
     assert.deepEqual(removeById(null, 'a'), [])
+  })
+})
+
+describe('summarizeFillSources', () => {
+  it('returns empty for null or zero hits', () => {
+    assert.deepEqual(summarizeFillSources(null), [])
+    assert.deepEqual(summarizeFillSources({ enumHits: 0, synthesized: 0 }), [])
+  })
+  it('proportions enum vs synth from real report shape', () => {
+    const segs = summarizeFillSources({
+      enumHits: 8,
+      themeHits: 0,
+      customHits: 0,
+      historyHits: 0,
+      synthesized: 2,
+      mutated: 0
+    })
+    assert.equal(segs.length, 2)
+    const enumSeg = segs.find((s) => s.key === 'enum')
+    const synthSeg = segs.find((s) => s.key === 'synth')
+    assert.ok(enumSeg)
+    assert.ok(synthSeg)
+    assert.equal(enumSeg.count, 8)
+    assert.equal(synthSeg.count, 2)
+    const sum = segs.reduce((a, s) => a + s.pct, 0)
+    assert.ok(Math.abs(sum - 100) < 0.2)
+    assert.equal(enumSeg.pct, 80)
+  })
+})
+
+describe('sampleTableFromPreview', () => {
+  it('prefers sampleRows and builds columns from shipped helper', () => {
+    const t = sampleTableFromPreview({
+      sampleRows: [
+        { code: 'A', label: 'x' },
+        { code: 'B', label: 'y' }
+      ]
+    })
+    assert.deepEqual(t.columns.sort(), ['code', 'label'].sort())
+    assert.equal(t.rows.length, 2)
+    assert.equal(t.rows[0].code, 'A')
+  })
+  it('flattens nested records when sampleRows missing', () => {
+    const flat = flattenSampleRecord({ a: 1, nest: { b: 2 } })
+    assert.equal(flat.a, 1)
+    assert.equal(flat['nest.b'], 2)
+    const t = sampleTableFromPreview({ records: [{ a: 1, nest: { b: 2 } }] })
+    assert.ok(t.columns.includes('a'))
+    assert.ok(t.columns.includes('nest.b'))
   })
 })
 

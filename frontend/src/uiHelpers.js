@@ -138,3 +138,99 @@ export function mergeBootstrapPayload(target, boot) {
   if (boot.settings && typeof boot.settings === 'object') target.settings = boot.settings
   return true
 }
+
+/**
+ * Build source-mix meter segments from a generate/preview report.
+ * Proportions sum to ~100 (largest remainder). Zero total → empty list.
+ * @param {Record<string, any>|null|undefined} report
+ * @returns {{ key: string, label: string, count: number, pct: number }[]}
+ */
+export function summarizeFillSources(report) {
+  if (!report || typeof report !== 'object') return []
+  const parts = [
+    { key: 'enum', label: 'Enum', count: Number(report.enumHits) || 0 },
+    { key: 'theme', label: 'Theme', count: Number(report.themeHits) || 0 },
+    { key: 'custom', label: 'Custom', count: Number(report.customHits) || 0 },
+    { key: 'history', label: 'History', count: Number(report.historyHits) || 0 },
+    { key: 'synth', label: 'Synth', count: Number(report.synthesized) || 0 },
+    {
+      key: 'mutate',
+      label: 'Mutate',
+      count: Number(report.mutatedFromSample ?? report.mutated) || 0
+    }
+  ]
+  const total = parts.reduce((s, p) => s + Math.max(0, p.count), 0)
+  if (total <= 0) return []
+  const withPct = parts
+    .filter((p) => p.count > 0)
+    .map((p) => ({
+      ...p,
+      pct: Math.round((p.count / total) * 1000) / 10
+    }))
+  // Fix rounding drift on largest segment
+  const sum = withPct.reduce((s, p) => s + p.pct, 0)
+  if (withPct.length && Math.abs(sum - 100) >= 0.05) {
+    let maxI = 0
+    for (let i = 1; i < withPct.length; i++) {
+      if (withPct[i].count > withPct[maxI].count) maxI = i
+    }
+    withPct[maxI] = {
+      ...withPct[maxI],
+      pct: Math.round((withPct[maxI].pct + (100 - sum)) * 10) / 10
+    }
+  }
+  return withPct
+}
+
+/**
+ * Flatten sample rows for a simple FE table (depth 1 nested objects).
+ * Uses API sampleRows when present; else maps records.
+ * @param {{ sampleRows?: any[], records?: any[] }|null|undefined} payload
+ * @returns {{ columns: string[], rows: Record<string, any>[] }}
+ */
+export function sampleTableFromPreview(payload) {
+  const raw =
+    payload && Array.isArray(payload.sampleRows) && payload.sampleRows.length
+      ? payload.sampleRows
+      : payload && Array.isArray(payload.records)
+        ? payload.records.map((r) => flattenSampleRecord(r))
+        : []
+  const rows = raw.filter((r) => r && typeof r === 'object' && !Array.isArray(r))
+  const colSet = new Set()
+  for (const r of rows) {
+    for (const k of Object.keys(r)) colSet.add(k)
+  }
+  const columns = [...colSet]
+  return { columns, rows }
+}
+
+/**
+ * @param {any} rec
+ * @param {string} [prefix]
+ * @param {number} [depth]
+ * @returns {Record<string, any>}
+ */
+export function flattenSampleRecord(rec, prefix = '', depth = 0) {
+  const out = {}
+  if (rec == null || typeof rec !== 'object' || Array.isArray(rec)) {
+    out[prefix || 'value'] = rec
+    return out
+  }
+  if (depth >= 2) {
+    out[prefix || 'value'] = rec
+    return out
+  }
+  for (const [k, v] of Object.entries(rec)) {
+    const key = prefix ? `${prefix}.${k}` : String(k)
+    if (v && typeof v === 'object' && !Array.isArray(v) && depth < 1) {
+      Object.assign(out, flattenSampleRecord(v, key, depth + 1))
+    } else if (Array.isArray(v)) {
+      out[key] =
+        v.length && typeof v[0] === 'object' ? `[${v.length} items]` : v
+    } else {
+      out[key] = v
+    }
+  }
+  return out
+}
+

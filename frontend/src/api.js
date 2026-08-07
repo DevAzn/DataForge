@@ -83,6 +83,7 @@ export const api = {
     }),
   deleteSchema: (id) => req(`/api/schemas/${id}`, { method: 'DELETE' }),
   touchSchema: (id) => req(`/api/schemas/${id}/touch`, { method: 'POST' }),
+  cloneSchema: (id) => req(`/api/schemas/${id}/clone`, { method: 'POST' }),
   importFile: async (file) => {
     const fd = new FormData()
     fd.append('file', file)
@@ -90,6 +91,13 @@ export const api = {
   },
   generate: (body) =>
     req('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }),
+  /** Small-N sample generate for UI preview (no history harvest, no bulk store). */
+  generatePreview: (body) =>
+    req('/api/generate/preview', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)

@@ -207,6 +207,9 @@ Admin checklist (protected branches, code owners, Duo enablement): `.gitlab/duo/
 | Name | File |
 |------|------|
 | full-app-quality-audit | `.grok/workflows/full-app-quality-audit.rhai` |
+| feature-team | `.grok/workflows/feature-team.rhai` (lean squad: Supervisor + BE Senior + FE Code; optional Design/Innovator) |
+
+Personas (roles): `.grok/personas/` — `elon-supervisor`, `fe-design`, `fe-code`, `be-senior`, `be-innovator`.
 
 ---
 
@@ -222,6 +225,7 @@ Admin checklist (protected branches, code owners, Duo enablement): `.gitlab/duo/
 
 ## 10. Session changelog
 
+- **2026-08-05** — **feature-team** workflow + five role personas (lean default: Supervisor / BE Senior / FE Code; optional Design + Innovator).  
 - **2026-08-04** — Skill **`pv-test-matrix`** / Duo **`test-matrix`**: full quality matrix (UI/UX, functional, system, UAT, performance, usability, compatibility, automation, regression, security).  
 - **2026-07-26** — Skill **`pv-ui-workspace`** shipped (dynamic layout, nav density, brand icon, xml/csv/txt, Library/Recent/Data packs). **pv-rules** updated: strict fill order, team formats, UI brand DataForge. Stabilization Phases A–B + UI polish in progress.  
 - **2026-07-26** — Workspace folder **`DataForge`**; product brand **DataForge**; skills `pv-*`; package `pv-dataforge`; Grok power-user OS retained.  

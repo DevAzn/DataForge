@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>DataForge — happy-path chrome v1 (exploration)</title>
+    <style>
+      :root {
+        --bg: #0f1419;
+        --surface: #1a2332;
+        --surface-2: #243044;
+        --border: #2d3a4d;
+        --text: #e7ecf3;
+        --muted: #8b9bb4;
+        --accent: #3b82f6;
+        --accent-fg: #fff;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font: 13px/1.4 system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0.5rem 0.75rem;
+        border-bottom: 1px solid var(--border);
+        background: var(--surface);
+      }
+      .main {
+        flex: 1;
+        display: grid;
+        grid-template-columns: 260px 1fr 300px;
+        min-height: 0;
+      }
+      aside,
+      main,
+      .rail {
+        border-right: 1px solid var(--border);
+        padding: 0.5rem;
+        background: var(--surface);
+      }
+      .rail {
+        border-right: none;
+      }
+      .lib {
+        width: 100%;
+        padding: 0.55rem;
+        border-radius: 7px;
+        border: 1px solid var(--accent);
+        background: var(--accent);
+        color: var(--accent-fg);
+        font-weight: 700;
+        margin-bottom: 0.35rem;
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0.3rem;
+        margin-bottom: 0.4rem;
+      }
+      .row button,
+      .more button {
+        border: 1px solid var(--border);
+        background: var(--surface-2);
+        color: var(--text);
+        border-radius: 6px;
+        padding: 0.35rem;
+        font-size: 12px;
+      }
+      .more {
+        border-top: 1px solid var(--border);
+        padding-top: 0.4rem;
+        margin-top: 0.35rem;
+      }
+      .more .label {
+        color: var(--muted);
+        font-size: 11px;
+        margin-bottom: 0.25rem;
+      }
+      .more .row3 {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        gap: 0.25rem;
+      }
+      .more button {
+        opacity: 0.85;
+        font-size: 11px;
+      }
+      .empty {
+        border: 1px dashed var(--border);
+        border-radius: 8px;
+        padding: 1rem;
+        max-width: 28rem;
+      }
+      .cta {
+        display: inline-block;
+        margin-top: 0.5rem;
+        padding: 0.4rem 0.75rem;
+        background: var(--accent);
+        color: var(--accent-fg);
+        border-radius: 6px;
+        font-weight: 600;
+        border: none;
+      }
+      .gen-primary {
+        width: 100%;
+        margin: 0.5rem 0;
+        padding: 0.5rem;
+        background: var(--accent);
+        color: var(--accent-fg);
+        border: none;
+        border-radius: 6px;
+        font-weight: 700;
+      }
+      .muted {
+        color: var(--muted);
+        font-size: 11px;
+      }
+      h1 {
+        font-size: 14px;
+        margin: 0;
+        font-weight: 600;
+      }
+      note {
+        display: block;
+        padding: 0.5rem 0.75rem;
+        background: #1e2a14;
+        color: #b7d48a;
+        font-size: 12px;
+        border-bottom: 1px solid var(--border);
+      }
+    </style>
+  </head>
+  <body>
+    <note>
+      Exploration mock only — not production. Documents Library-primary nav + Generate first paint.
+    </note>
+    <header>
+      <h1>DataForge · happy path</h1>
+      <span class="muted">Header Generate hidden when rail open</span>
+    </header>
+    <div class="main">
+      <aside>
+        <button class="lib" type="button">Library</button>
+        <div class="row">
+          <button type="button">Recent</button>
+          <button type="button">Data packs</button>
+        </div>
+        <div class="more">
+          <div class="label">More ▾</div>
+          <div class="row3">
+            <button type="button">Tmpl</button>
+            <button type="button">Deliv</button>
+            <button type="button">Arch</button>
+          </div>
+        </div>
+        <p class="muted" style="margin-top: 1rem">+ New schema · Import…</p>
+      </aside>
+      <main>
+        <div class="empty">
+          <strong>Library is empty</strong>
+          <p class="muted">Unsaved draft open — next click is named.</p>
+          <button class="cta" type="button">Save schema</button>
+          <button class="cta" type="button" style="background: var(--surface-2); color: var(--text)">
+            Import sample file → schema
+          </button>
+        </div>
+      </main>
+      <div class="rail">
+        <div class="muted">Generate</div>
+        <label class="muted">Records <input type="number" value="10" style="width: 100%" /></label>
+        <p class="muted">Output: one file · per-file</p>
+        <button class="gen-primary" type="button">Generate</button>
+        <p class="muted">▸ More options (seed · stream · CSV · archive · sources)</p>
+      </div>
+    </div>
+  </body>
+</html>
