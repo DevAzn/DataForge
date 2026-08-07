@@ -8,7 +8,13 @@ __pycache__/
 *.egg-info/
 .eggs/
 # Only app build outputs — never strip package trees under node_modules
-/dist/
+# Un-ignore shippable desktop zip + notes (parent /dist/* must be listed first)
+/dist/*
+!/dist/DataForge-windows-x64.zip
+!/dist/DataForge-v*.zip
+!/dist/release-notes*.md
+!/dist/DataForge/
+/dist/DataForge/*
 !/dist/DataForge/DataForge.exe
 /build/
 frontend/dist/
