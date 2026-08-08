@@ -16,11 +16,11 @@ description: >
 | # | Check | Pass criteria |
 |---|--------|----------------|
 | 0 | Health / status | `ok`, `app` = **DataForge** |
-| 1 | Generate + export | `POST /api/generate`; export **xml, csv, txt** |
+| 1 | Generate + export | `POST /api/generate`; export **xml, csv, txt, xlsx** |
 | 2 | Per-file archive | N=3 → **tar.gz**; N=1 → **zip** |
 | 3 | Packages (if any) | estimate + generate variants |
 | 4 | Stream | large json/xml/yaml → **400**; csv stream non-empty, no `ERROR:` prefix |
-| 5 | UI | Library / generate / formats dropdown xml·csv·txt |
+| 5 | UI | Library / generate / formats dropdown xml·csv·txt·xlsx |
 
 Unit (no server):
 

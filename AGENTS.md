@@ -56,7 +56,7 @@ When running under /goal:
 **DataForge** is the **primary** local ETL **test-data generator** (browser UI + Python API):
 
 - Design / import schemas; generate realistic records (history, custom lists, data themes)
-- Export **XML / CSV / TXT** (UI); archives; **multifile package variants**
+- Export **XML / CSV / TXT / XLSX** (UI); archives; **multifile package variants**
 - **Delivery jobs** for chunked high-volume package dumps to disk
 - Persist **only design & curated data** in SQLite — never bulk generated file bodies
 
@@ -227,6 +227,7 @@ Personas (roles): `.grok/personas/` — `elon-supervisor`, `fe-design`, `fe-code
 
 ## 10. Session changelog
 
+- **2026-08-07** — Quality-audit fixes: delivery path jail, `recordHistory` default false, 508 UI, **xlsx** in product-rules/pv-rules.  
 - **2026-08-07** — Skill-evolve: **`pv-ui-workspace`** gains 508/inline-edit/transpose; new **`pv-feature-team`**, **`pv-desktop-exe`**; Duo **`ui-workspace`** synced.  
 - **2026-08-05** — **feature-team** workflow + five role personas (lean default: Supervisor / BE Senior / FE Code; optional Design + Innovator).  
 - **2026-08-04** — Skill **`pv-test-matrix`** / Duo **`test-matrix`**: full quality matrix (UI/UX, functional, system, UAT, performance, usability, compatibility, automation, regression, security).  
