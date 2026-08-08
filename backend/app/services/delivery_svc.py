@@ -150,6 +150,49 @@ def _rebalance(chunks: list[int], target: int) -> list[int]:
     return chunks
 
 
+def delivery_exports_root() -> Path:
+    """Allowlisted root for all delivery artifacts (under app data dir)."""
+    return (db.DATA_DIR / "exports" / "delivery").resolve()
+
+
+def validate_destination_path(
+    raw: str | None,
+    *,
+    job_id: str,
+) -> Path:
+    """
+    Resolve a safe delivery output directory.
+
+    - Empty/None → ``{DATA_DIR}/exports/delivery/{job_id}``
+    - Relative paths are anchored under the delivery exports root
+    - Absolute paths must stay under that root after resolve (no ``..`` escape)
+    """
+    root = delivery_exports_root()
+    jid = (job_id or "").strip() or "_unset"
+    if not raw or not str(raw).strip():
+        return (root / jid).resolve()
+
+    text = str(raw).strip()
+    # Reject null bytes / obvious garbage
+    if "\x00" in text:
+        raise ValueError("destinationPath contains invalid characters")
+
+    p = Path(text).expanduser()
+    if not p.is_absolute():
+        # Treat as subpath of the jail root (never of process CWD)
+        p = (root / p).resolve()
+    else:
+        p = p.resolve()
+
+    try:
+        p.relative_to(root)
+    except ValueError as e:
+        raise ValueError(
+            f"destinationPath must be under {root} (resolved to {p})"
+        ) from e
+    return p
+
+
 def create_job(data: dict[str, Any]) -> dict[str, Any]:
     target = max(1, int(data.get("targetTotal") or 100))
     chunk_min = max(1, int(data.get("chunkMin") or 1))
@@ -163,13 +206,33 @@ def create_job(data: dict[str, Any]) -> dict[str, Any]:
     plan = build_chunk_plan(target, chunk_min, chunk_max, seed=seed)
     job_id = str(uuid.uuid4())
     name = (data.get("name") or "").strip() or f"delivery-{job_id[:8]}"
-    dest_type = data.get("destinationType") or "local_dir"
-    dest_path = (data.get("destinationPath") or "").strip() or None
+    dest_type = (data.get("destinationType") or "local_dir").strip() or "local_dir"
+    if dest_type not in ("local_dir", "local"):
+        raise ValueError("destinationType must be local_dir (only supported type)")
+    dest_type = "local_dir"
     package_id = data.get("packageId")
     if not package_id:
         raise ValueError("packageId is required")
     if not db.get_package(package_id):
         raise ValueError("Package not found")
+
+    # Validate and normalize path at create time so bad jobs never persist
+    raw_dest = (data.get("destinationPath") or "").strip() or None
+    try:
+        resolved = validate_destination_path(raw_dest, job_id=job_id)
+    except ValueError:
+        raise
+    # Store path relative to jail when possible (portable); absolute only if custom subpath
+    root = delivery_exports_root()
+    try:
+        rel = resolved.relative_to(root)
+        dest_path = str(rel).replace("\\", "/") if str(rel) != "." else None
+        # Default job folder: store None so runtime always uses job_id default
+        if dest_path == job_id:
+            dest_path = None
+    except ValueError:
+        # Should not happen after validate
+        dest_path = str(resolved)
 
     doc = {
         "id": job_id,
@@ -302,11 +365,10 @@ def run_next_chunk(
 
 
 def _resolve_dest_dir(job: dict[str, Any]) -> Path:
-    custom = (job.get("destinationPath") or "").strip()
-    if custom:
-        return Path(custom).expanduser()
-    base = db.DATA_DIR / "exports" / "delivery" / job["id"]
-    return base
+    """Resolve job output dir under the delivery jail (re-validates stored path)."""
+    jid = str(job.get("id") or "").strip() or "_unknown"
+    custom = (job.get("destinationPath") or "").strip() or None
+    return validate_destination_path(custom, job_id=jid)
 
 
 def job_summary(job: dict[str, Any]) -> dict[str, Any]:

@@ -2,8 +2,11 @@
 /**
  * Center-panel editor for a custom Field values list (Data packs).
  * Left rail stays list navigation; this is the primary edit surface.
+ * Value edits are inline (colored textbox) — no browser prompts.
  */
-defineProps({
+import { nextTick, ref, watch } from 'vue'
+
+const props = defineProps({
   list: { type: Object, default: null },
   listName: { type: String, default: '' },
   listKeys: { type: String, default: '' },
@@ -17,20 +20,62 @@ const emit = defineEmits([
   'update:bulkValues',
   'save',
   'add-values',
-  'edit-value',
+  'commit-value',
   'remove-value',
   'delete-list',
   'close'
 ])
+
+/** @type {import('vue').Ref<{ id: string, draft: string } | null>} */
+const editing = ref(null)
+
+watch(
+  () => props.list?.id,
+  () => {
+    editing.value = null
+  }
+)
+
+async function startEdit(v) {
+  if (!v?.id) return
+  editing.value = { id: v.id, draft: v.value == null ? '' : String(v.value) }
+  await nextTick()
+  const el = document.getElementById('fvc-edit-' + v.id)
+  el?.focus?.()
+  el?.select?.()
+}
+
+function cancelEdit() {
+  editing.value = null
+}
+
+function commitEdit() {
+  if (!editing.value) return
+  const id = editing.value.id
+  const draft = String(editing.value.draft ?? '').trim()
+  editing.value = null
+  if (!draft) return
+  emit('commit-value', { id, value: draft })
+}
+
+function onEditKeydown(ev) {
+  if (ev.key === 'Escape') {
+    ev.preventDefault()
+    cancelEdit()
+  } else if (ev.key === 'Enter') {
+    ev.preventDefault()
+    commitEdit()
+  }
+}
 </script>
 
 <template>
-  <div class="field-values-center">
+  <div class="field-values-center" role="region" aria-label="Field values editor">
     <template v-if="list">
       <header class="fvc-head">
         <div>
-          <h3 class="fvc-title">{{ list.name || 'Field list' }}</h3>
-          <p class="muted tiny fvc-sub">
+          <h3 class="fvc-title" id="fvc-heading">{{ list.name || 'Field list' }}</h3>
+          <p class="muted tiny fvc-sub" id="fvc-desc">
             Curated values for schema tags/columns ·
             {{ (list.values || []).length }} value(s) in this list
           </p>
@@ -38,12 +83,13 @@ const emit = defineEmits([
         <button type="button" class="btn btn-ghost" @click="emit('close')">Done</button>
       </header>
 
-      <div class="fvc-grid">
+      <div class="fvc-grid" role="group" aria-labelledby="fvc-heading">
         <label class="gen-field">
           <span class="gen-field-label">Name</span>
           <input
             class="input"
             :value="listName"
+            :aria-describedby="'fvc-desc'"
             @input="emit('update:listName', $event.target.value)"
           />
         </label>
@@ -65,9 +111,11 @@ const emit = defineEmits([
         <span class="gen-field-label">Add values (one per line)</span>
         <textarea
           class="input mono"
+          :class="{ 'is-adding': !!(bulkValues && bulkValues.trim()) }"
           rows="5"
           :value="bulkValues"
           placeholder="Alice&#10;Bob&#10;Carol"
+          aria-label="New values to add, one per line"
           @input="emit('update:bulkValues', $event.target.value)"
         />
       </label>
@@ -76,26 +124,54 @@ const emit = defineEmits([
       </button>
 
       <div class="fvc-values">
-        <div class="label muted tiny">Values in pool</div>
-        <ul v-if="(list.values || []).length" class="pack-value-list">
+        <div class="label muted tiny" id="fvc-values-label">Values in pool</div>
+        <ul
+          v-if="(list.values || []).length"
+          class="pack-value-list"
+          aria-labelledby="fvc-values-label"
+        >
           <li v-for="v in list.values || []" :key="v.id" class="pack-value-row">
-            <span class="v mono">{{ v.value }}</span>
-            <div class="pack-value-actions">
-              <button
-                type="button"
-                class="btn btn-outline pack-action-sm"
-                @click="emit('edit-value', v)"
-              >
-                Edit
-              </button>
-              <button
-                type="button"
-                class="btn btn-outline-danger pack-action-sm"
-                @click="emit('remove-value', v.id)"
-              >
-                Del
-              </button>
-            </div>
+            <template v-if="editing && editing.id === v.id">
+              <div class="inline-edit-row">
+                <label class="visually-hidden" :for="'fvc-edit-' + v.id">Edit value</label>
+                <input
+                  :id="'fvc-edit-' + v.id"
+                  class="input mono is-editing"
+                  type="text"
+                  :value="editing.draft"
+                  aria-label="Editing list value"
+                  @input="editing.draft = $event.target.value"
+                  @keydown="onEditKeydown"
+                />
+                <button type="button" class="btn btn-primary pack-action-sm" @click="commitEdit">
+                  Save
+                </button>
+                <button type="button" class="btn btn-ghost pack-action-sm" @click="cancelEdit">
+                  Cancel
+                </button>
+              </div>
+            </template>
+            <template v-else>
+              <span class="v mono">{{ v.value }}</span>
+              <div class="pack-value-actions">
+                <button
+                  type="button"
+                  class="btn btn-outline pack-action-sm"
+                  :aria-label="`Edit value ${v.value}`"
+                  @click="startEdit(v)"
+                >
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-outline-danger pack-action-sm"
+                  :aria-label="`Delete value ${v.value}`"
+                  @click="emit('remove-value', v.id)"
+                >
+                  Del
+                </button>
+              </div>
+            </template>
           </li>
         </ul>
         <p v-else class="muted tiny">No values yet — add some above.</p>
@@ -119,59 +195,47 @@ const emit = defineEmits([
       <p class="muted tiny">
         Create or open a list on the left — the full editor opens here in the center panel.
       </p>
-      <p class="muted tiny">
-        {{ listCount ? listCount + ' list(s) available.' : 'No field lists yet.' }}
-      </p>
+      <p v-if="listCount === 0" class="muted tiny">No lists yet.</p>
     </template>
   </div>
 </template>
 
 <style scoped>
 .field-values-center {
-  padding: 1rem;
-  max-width: 720px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 0;
 }
 .fvc-head {
   display: flex;
-  align-items: flex-start;
   justify-content: space-between;
+  align-items: flex-start;
   gap: 0.75rem;
-  margin-bottom: 0.85rem;
 }
 .fvc-title {
-  margin: 0 0 0.2rem;
+  margin: 0;
   font-size: 1.05rem;
 }
 .fvc-sub {
-  margin: 0;
+  margin: 0.2rem 0 0;
 }
 .fvc-grid {
   display: grid;
-  gap: 0.55rem;
-  margin-bottom: 0.75rem;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 0.5rem 0.65rem;
+  align-items: end;
 }
-.fvc-save {
-  justify-self: start;
+@media (max-width: 720px) {
+  .fvc-grid {
+    grid-template-columns: 1fr;
+  }
 }
 .fvc-bulk {
-  display: block;
-  margin-bottom: 0.45rem;
+  width: 100%;
 }
 .fvc-values {
-  margin: 1rem 0 0.85rem;
-}
-.fvc-delete {
-  margin-top: 0.5rem;
-}
-.gen-field {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-}
-.gen-field-label {
-  font-size: 0.75rem;
-  color: var(--muted);
-  font-weight: 600;
+  margin-top: 0.25rem;
 }
 .pack-value-list {
   list-style: none;
@@ -185,12 +249,38 @@ const emit = defineEmits([
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
-  padding: 0.3rem 0;
+  padding: 0.35rem 0.25rem;
   border-bottom: 1px solid var(--border);
+}
+.pack-value-row .v {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
 }
 .pack-value-actions {
   display: flex;
   gap: 0.25rem;
   flex-shrink: 0;
+}
+.inline-edit-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  width: 100%;
+}
+.inline-edit-row .input {
+  flex: 1 1 10rem;
+  min-width: 0;
+}
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
 }
 </style>

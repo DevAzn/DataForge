@@ -31,7 +31,7 @@ from app.services import (
 )
 from app.services import file_naming
 
-APP_VERSION = "0.6.1"
+APP_VERSION = "0.6.2"
 APP_NAME = "DataForge"
 
 
@@ -96,7 +96,15 @@ class GenerateBody(BaseModel):
     recordCount: int = 10
     seed: int | None = None
     ciMode: bool = False
-    recordHistory: bool = True
+    # Default False matches UI (opt-in field-token harvest only; never full rows)
+    recordHistory: bool = Field(
+        default=False,
+        description=(
+            "When true and ciMode is false, harvest individual field tokens into "
+            "the value history bank. Default false (same as UI). Never stores full "
+            "generated record bodies in SQLite."
+        ),
+    )
     # Optional override of settings.dataThemes for this run
     useDataThemes: bool | None = None
     themeBlend: list[ThemeBlendEntry] | None = None
@@ -1495,7 +1503,13 @@ class PackageGenerateBody(BaseModel):
     recordCount: int = 10
     seed: int | None = None
     ciMode: bool = False
-    recordHistory: bool = True
+    recordHistory: bool = Field(
+        default=False,
+        description=(
+            "Opt-in field-token history harvest (default false, matches UI). "
+            "Never stores package variant bodies in SQLite."
+        ),
+    )
     defaultFieldMode: str = "random"  # same | random | unique
     fieldModes: dict[str, dict[str, str]] | None = None
     useDataThemes: bool | None = None

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   api,
   downloadBase64,
@@ -23,7 +23,7 @@ import {
   serializeFieldClip,
   walkDisplay
 } from './schemaTree.js'
-import { askConfirm, askPrompt } from './dialogController.js'
+import { askConfirm } from './dialogController.js'
 import {
   TEAM_EXPORT_FORMATS,
   createDebounced,
@@ -208,6 +208,135 @@ const tabularRowCount = computed(() => {
 const tabularRowIndexes = computed(() =>
   Array.from({ length: tabularRowCount.value }, (_, i) => i)
 )
+
+/**
+ * Tabular orientation for CSV/TXT/XLSX schema samples:
+ * - 'fields-as-columns' (default): classic wide table
+ * - 'fields-as-rows': inverted — fields stack vertically, sample indices are columns
+ *   (better when many columns / limited width; 508-friendly single-scroll focus)
+ */
+const TABULAR_ORIENT_KEY = 'dataforge.tabularOrientation.v1'
+const tabularOrientation = ref(
+  (() => {
+    try {
+      const v = localStorage.getItem(TABULAR_ORIENT_KEY)
+      if (v === 'fields-as-rows' || v === 'fields-as-columns') return v
+    } catch {
+      /* ignore */
+    }
+    return 'fields-as-columns'
+  })()
+)
+const isTabularTall = computed(() => tabularOrientation.value === 'fields-as-rows')
+
+function setTabularOrientation(mode) {
+  if (mode !== 'fields-as-rows' && mode !== 'fields-as-columns') return
+  tabularOrientation.value = mode
+  try {
+    localStorage.setItem(TABULAR_ORIENT_KEY, mode)
+  } catch {
+    /* ignore */
+  }
+}
+
+function toggleTabularOrientation() {
+  setTabularOrientation(isTabularTall.value ? 'fields-as-columns' : 'fields-as-rows')
+}
+
+/** Keyboard grid navigation for tabular sample cells */
+function onTabularCellKeydown(ev, colIndex, rowIndex) {
+  const key = ev.key
+  if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key)) return
+  const cols = tabularColumns.value
+  const rows = tabularRowCount.value
+  if (!cols.length || !rows) return
+  let ci = colIndex
+  let ri = rowIndex
+  if (isTabularTall.value) {
+    // In tall mode: row = field (colIndex), col = sample (rowIndex)
+    if (key === 'ArrowUp') ci = Math.max(0, ci - 1)
+    else if (key === 'ArrowDown') ci = Math.min(cols.length - 1, ci + 1)
+    else if (key === 'ArrowLeft') ri = Math.max(0, ri - 1)
+    else if (key === 'ArrowRight') ri = Math.min(rows - 1, ri + 1)
+    else if (key === 'Home') ri = 0
+    else if (key === 'End') ri = rows - 1
+  } else {
+    if (key === 'ArrowLeft') ci = Math.max(0, ci - 1)
+    else if (key === 'ArrowRight') ci = Math.min(cols.length - 1, ci + 1)
+    else if (key === 'ArrowUp') ri = Math.max(0, ri - 1)
+    else if (key === 'ArrowDown') ri = Math.min(rows - 1, ri + 1)
+    else if (key === 'Home') ci = 0
+    else if (key === 'End') ci = cols.length - 1
+  }
+  if (ci === colIndex && ri === rowIndex) return
+  ev.preventDefault()
+  const sel = `[data-tab-cell="${ci}:${ri}"]`
+  const el = document.querySelector(sel)
+  if (el) {
+    el.focus()
+    if (typeof el.select === 'function') el.select()
+  }
+}
+
+/** Inline value edit (theme / history) — no browser prompt */
+const inlineValueEdit = ref(/** @type {{ scope: string, id: string, draft: string } | null} */ (null))
+
+function isInlineEditing(scope, id) {
+  return inlineValueEdit.value?.scope === scope && inlineValueEdit.value?.id === id
+}
+
+async function startInlineValueEdit(scope, id, current) {
+  inlineValueEdit.value = {
+    scope,
+    id: String(id),
+    draft: current == null ? '' : String(current)
+  }
+  await nextTick()
+  const el = document.querySelector(`[data-inline-edit="${scope}:${id}"]`)
+  el?.focus?.()
+  el?.select?.()
+}
+
+function cancelInlineValueEdit() {
+  inlineValueEdit.value = null
+}
+
+function onInlineEditKeydown(ev, commitFn) {
+  if (ev.key === 'Escape') {
+    ev.preventDefault()
+    cancelInlineValueEdit()
+  } else if (ev.key === 'Enter') {
+    ev.preventDefault()
+    commitFn()
+  }
+}
+
+/**
+ * Inline name create panel (list / theme / template) — replaces modal prompts for names.
+ * @type {import('vue').Ref<{ kind: string, draft: string, extra?: string } | null>}
+ */
+const nameCreate = ref(null)
+
+function openNameCreate(kind, defaultValue = '', extra = '') {
+  nameCreate.value = { kind, draft: defaultValue || '', extra: extra || '' }
+  nextTick(() => {
+    document.querySelector('[data-name-create-input]')?.focus?.()
+  })
+}
+
+function cancelNameCreate() {
+  nameCreate.value = null
+}
+
+const nameCreateTitle = computed(() => {
+  const k = nameCreate.value?.kind
+  if (k === 'custom-list') return 'New field list name'
+  if (k === 'theme') return 'New theme name'
+  if (k === 'template') return 'Template name'
+  if (k === 'category') return 'New theme category'
+  if (k === 'package-member') return 'New schema name for member'
+  return 'Name'
+})
 
 function padSampleValues(row, len) {
   const vals = fieldSampleValues(row)
@@ -2989,25 +3118,36 @@ async function downloadArchiveMulti() {
   }
 }
 
-async function saveAsTemplate() {
+function saveAsTemplate() {
   if (!active.value) return
-  const name = await askPrompt('Template name', active.value.name + ' template', {
-    title: 'Save template'
-  })
-  if (!name?.trim()) return
-  const saved = await api.saveTemplate({
-    name: name.trim(),
-    schema: active.value,
-    schemaJson: JSON.stringify(active.value)
-  })
-  statusMsg.value = `Template “${name.trim()}” saved`
-  if (saved?.id) templates.value = upsertById(templates.value, saved)
-  else {
-    try {
-      templates.value = await api.listTemplates()
-    } catch {
-      /* ignore */
+  openNameCreate('template', (active.value.name || 'Schema') + ' template')
+}
+
+async function commitSaveAsTemplate() {
+  if (!active.value || nameCreate.value?.kind !== 'template') return
+  const name = String(nameCreate.value.draft || '').trim()
+  if (!name) {
+    flashError('Enter a template name')
+    return
+  }
+  try {
+    const saved = await api.saveTemplate({
+      name,
+      schema: active.value,
+      schemaJson: JSON.stringify(active.value)
+    })
+    nameCreate.value = null
+    flashStatus(`Template “${name}” saved`)
+    if (saved?.id) templates.value = upsertById(templates.value, saved)
+    else {
+      try {
+        templates.value = await api.listTemplates()
+      } catch {
+        /* ignore */
+      }
     }
+  } catch (e) {
+    flashError(e.message || 'Could not save template')
   }
 }
 
@@ -3116,11 +3256,18 @@ async function openCustomList(id) {
   customListKeys.value = (activeCustomList.value.keys || []).join(', ')
 }
 
-async function createCustomList() {
-  const name = await askPrompt('List name (e.g. Heroes, Cities)', '', {
-    title: 'New field list'
-  })
-  if (!name?.trim()) return
+function createCustomList() {
+  openNameCreate('custom-list', '')
+}
+
+async function commitCreateCustomList() {
+  if (nameCreate.value?.kind !== 'custom-list') return
+  const name = String(nameCreate.value.draft || '').trim()
+  if (!name) {
+    flashError('Enter a list name')
+    return
+  }
+  nameCreate.value = null
   const saved = await api.saveCustomList({ name: name.trim(), keys: [] })
   await refreshDataPackLists()
   await openCustomList(saved.id)
@@ -3164,11 +3311,17 @@ async function addBulkCustomValues() {
   statusMsg.value = `Added ${res.inserted} value(s)`
 }
 
-async function editCustomValue(v) {
-  const next = await askPrompt('Edit value', v.value, { title: 'Edit list value' })
-  if (next == null || !next.trim()) return
-  await api.updateCustomValue(v.id, next.trim())
-  await openCustomList(activeCustomList.value.id)
+async function commitCustomValueEdit(payload) {
+  if (!payload?.id || !activeCustomList.value) return
+  const next = String(payload.value || '').trim()
+  if (!next) return
+  try {
+    await api.updateCustomValue(payload.id, next)
+    await openCustomList(activeCustomList.value.id)
+    flashStatus('Value updated')
+  } catch (e) {
+    flashError(e.message || 'Could not update value')
+  }
 }
 
 async function removeCustomValue(id) {
@@ -3195,16 +3348,23 @@ async function removeCustomList() {
   await refreshStatusOnly()
 }
 
-async function createTheme() {
-  const name = await askPrompt('Theme name (e.g. Star Wars, Westeros)', '', {
-    title: 'New theme'
-  })
-  if (!name?.trim()) return
+function createTheme() {
+  openNameCreate('theme', '')
+}
+
+async function commitCreateTheme() {
+  if (nameCreate.value?.kind !== 'theme') return
+  const name = String(nameCreate.value.draft || '').trim()
+  if (!name) {
+    flashError('Enter a theme name')
+    return
+  }
   try {
-    await api.saveTheme({ name: name.trim() })
+    await api.saveTheme({ name })
+    nameCreate.value = null
     await refreshDataPackLists()
     await reloadFieldThemeCategories()
-    flashStatus(`Theme “${name.trim()}” created`)
+    flashStatus(`Theme “${name}” created`)
   } catch (e) {
     flashError(e.message || 'Could not create theme')
   }
@@ -3334,15 +3494,17 @@ const themeEditorCatStat = computed(() =>
  * Create / switch to a category under the open theme.
  * Categories are registered in SQLite immediately (even with zero values).
  */
-async function addThemeCategory() {
+function addThemeCategory() {
   if (!themeEditor.value?.theme) return
-  const raw = await askPrompt(
-    'New category name (e.g. names, ships, lightsabers, codes)',
-    '',
-    { title: 'Add category' }
-  )
-  if (raw == null) return
-  const name = String(raw).trim().replace(/\s+/g, '_').toLowerCase()
+  openNameCreate('category', '')
+}
+
+async function commitCreateCategory() {
+  if (!themeEditor.value?.theme || nameCreate.value?.kind !== 'category') return
+  const name = String(nameCreate.value.draft || '')
+    .trim()
+    .replace(/\s+/g, '_')
+    .toLowerCase()
   if (!name) {
     flashError('Category name is required')
     return
@@ -3356,6 +3518,7 @@ async function addThemeCategory() {
     (s) => String(s.category).toLowerCase() === name.toLowerCase()
   )
   try {
+    nameCreate.value = null
     if (!exists) {
       const res = await api.ensureThemeCategory(themeEditor.value.theme.id, name)
       themeEditor.value = {
@@ -3525,14 +3688,23 @@ async function deleteThemeValueRow(row) {
   }
 }
 
-async function editThemeValueRow(row) {
+function editThemeValueRow(row) {
   if (!themeEditor.value?.theme || !row?.id) return
-  const next = await askPrompt('Edit value', row.value, { title: 'Edit theme value' })
-  if (next == null) return
-  const v = String(next).trim()
-  if (!v || v === row.value) return
+  void startInlineValueEdit('theme', row.id, row.value)
+}
+
+async function commitThemeValueEdit() {
+  if (!inlineValueEdit.value || inlineValueEdit.value.scope !== 'theme') return
+  if (!themeEditor.value?.theme) return
+  const id = inlineValueEdit.value.id
+  const v = String(inlineValueEdit.value.draft || '').trim()
+  if (!v) {
+    flashError('Value cannot be empty')
+    return
+  }
   try {
-    await api.updateThemeValue(themeEditor.value.theme.id, row.id, v)
+    await api.updateThemeValue(themeEditor.value.theme.id, id, v)
+    cancelInlineValueEdit()
     await loadThemeEditorValues()
     await refreshDataPackLists()
     await reloadFieldThemeCategories()
@@ -4050,18 +4222,20 @@ async function savePackageMemberSchemaAs() {
     errorMsg.value = 'Only XML, CSV, and TXT members support save-as from content'
     return
   }
-  const name = await askPrompt(
-    'Save schema as (new name, inferred from current editor content):',
-    `${m.name || 'member'} schema copy`,
-    { title: 'Save member schema as' }
-  )
-  if (name == null) return
+  openNameCreate('package-member', `${m.name || 'member'} schema copy`)
+}
+
+async function commitPackageMemberName() {
+  if (nameCreate.value?.kind !== 'package-member') return
+  if (!activePackage.value || !packageMemberPath.value) return
+  const name = String(nameCreate.value.draft || '').trim()
+  nameCreate.value = null
   packageWorking.value = true
   errorMsg.value = ''
   try {
     const res = await api.savePackageMemberAs(activePackage.value.id, {
       memberPath: packageMemberPath.value,
-      newSchemaName: name.trim() || undefined,
+      newSchemaName: name || undefined,
       content: packageEditContent.value,
       reinferFromContent: true,
       linkToPackage: true
@@ -4229,11 +4403,36 @@ async function deleteHist(id) {
   await loadHistory()
 }
 
-async function editHist(h) {
-  const v = await askPrompt('Edit value', h.value, { title: 'Edit fill value' })
-  if (v == null) return
-  await api.historyUpdate(h.id, v)
-  await loadHistory()
+function editHist(h) {
+  if (!h?.id) return
+  void startInlineValueEdit('history', h.id, h.value)
+}
+
+async function commitHistEdit() {
+  if (!inlineValueEdit.value || inlineValueEdit.value.scope !== 'history') return
+  const id = inlineValueEdit.value.id
+  const v = String(inlineValueEdit.value.draft || '').trim()
+  if (!v) {
+    flashError('Value cannot be empty')
+    return
+  }
+  try {
+    await api.historyUpdate(id, v)
+    cancelInlineValueEdit()
+    await loadHistory()
+    flashStatus('Fill value updated')
+  } catch (e) {
+    flashError(e.message || 'Could not update value')
+  }
+}
+
+async function commitNameCreate() {
+  const kind = nameCreate.value?.kind
+  if (kind === 'custom-list') return commitCreateCustomList()
+  if (kind === 'theme') return commitCreateTheme()
+  if (kind === 'template') return commitSaveAsTemplate()
+  if (kind === 'category') return commitCreateCategory()
+  if (kind === 'package-member') return commitPackageMemberName()
 }
 
 const kindOptions = computed(() => {
@@ -4322,7 +4521,8 @@ function tip(msg) {
 
 <template>
   <div class="shell" :aria-busy="bootLoading ? 'true' : undefined">
-    <header class="top">
+    <a class="skip-link" href="#main-workspace">Skip to main content</a>
+    <header class="top" role="banner">
       <div class="brand">
         <div class="brand-row">
           <BrandIcon :size="30" />
@@ -4452,6 +4652,33 @@ function tip(msg) {
       {{ statusMsg }}
       <button class="btn btn-ghost" type="button" @click="statusMsg = ''">Dismiss</button>
       <span class="banner-timer muted tiny" aria-hidden="true">auto-hides</span>
+    </div>
+
+    <!-- Inline name create (replaces browser-style prompts for new names) -->
+    <div
+      v-if="nameCreate"
+      class="inline-create-panel name-create-bar"
+      role="region"
+      :aria-label="nameCreateTitle"
+    >
+      <label class="gen-field">
+        <span class="gen-field-label">{{ nameCreateTitle }}</span>
+        <input
+          class="input is-adding"
+          type="text"
+          data-name-create-input
+          :value="nameCreate.draft"
+          :aria-label="nameCreateTitle"
+          autocomplete="off"
+          @input="nameCreate.draft = $event.target.value"
+          @keydown.enter.prevent="commitNameCreate"
+          @keydown.escape.prevent="cancelNameCreate"
+        />
+      </label>
+      <div class="inline-create-actions">
+        <button type="button" class="btn btn-primary" @click="commitNameCreate">Save</button>
+        <button type="button" class="btn btn-ghost" @click="cancelNameCreate">Cancel</button>
+      </div>
     </div>
 
     <!-- Settings drawer -->
@@ -4645,7 +4872,15 @@ function tip(msg) {
       </div>
     </div>
 
-    <div class="main" :class="mainLayoutClass" :style="mainLayoutStyle">
+    <div
+      id="main-workspace"
+      class="main"
+      :class="mainLayoutClass"
+      :style="mainLayoutStyle"
+      tabindex="-1"
+      role="main"
+      aria-label="Workspace"
+    >
       <aside
         class="side panel"
         :class="[{ collapsed: layout.sideCollapsed }, 'nav-' + sideNavDensity]"
@@ -5051,22 +5286,55 @@ function tip(msg) {
               </button>
             </div>
             <p class="muted tiny">{{ historyPage.total }} entries</p>
-            <ul class="hist-list">
+            <ul class="hist-list" aria-label="Fill value history">
               <li v-for="h in historyPage.items" :key="h.id">
                 <span class="k">{{ h.keyName }}</span>
-                <span class="v">{{ h.value }}</span>
-                <div class="hist-row-actions">
-                  <button type="button" class="btn btn-ghost tiny-btn" @click="editHist(h)">
-                    Edit
-                  </button>
-                  <button
-                    type="button"
-                    class="btn btn-ghost tiny-btn danger"
-                    @click="deleteHist(h.id)"
-                  >
-                    Del
-                  </button>
-                </div>
+                <template v-if="isInlineEditing('history', h.id)">
+                  <div class="inline-edit-row">
+                    <label class="visually-hidden" :for="'hist-edit-' + h.id">Edit fill value</label>
+                    <input
+                      :id="'hist-edit-' + h.id"
+                      class="input mono is-editing"
+                      type="text"
+                      :data-inline-edit="'history:' + h.id"
+                      :value="inlineValueEdit.draft"
+                      aria-label="Editing fill value"
+                      @input="inlineValueEdit.draft = $event.target.value"
+                      @keydown="onInlineEditKeydown($event, commitHistEdit)"
+                    />
+                    <button type="button" class="btn btn-primary tiny-btn" @click="commitHistEdit">
+                      Save
+                    </button>
+                    <button
+                      type="button"
+                      class="btn btn-ghost tiny-btn"
+                      @click="cancelInlineValueEdit"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </template>
+                <template v-else>
+                  <span class="v">{{ h.value }}</span>
+                  <div class="hist-row-actions">
+                    <button
+                      type="button"
+                      class="btn btn-ghost tiny-btn"
+                      :aria-label="`Edit fill value ${h.value}`"
+                      @click="editHist(h)"
+                    >
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      class="btn btn-ghost tiny-btn danger"
+                      :aria-label="`Delete fill value ${h.value}`"
+                      @click="deleteHist(h.id)"
+                    >
+                      Del
+                    </button>
+                  </div>
+                </template>
               </li>
             </ul>
           </template>
@@ -5501,20 +5769,186 @@ function tip(msg) {
           </div>
         </div>
 
-        <!-- CSV / TXT: header = columns, body = sample data rows -->
+        <!-- CSV / TXT / XLSX: sample grid (wide or tall / transposed) -->
         <div
           v-if="isTabularFormat"
           class="rows tabular-schema"
-          :class="{ 'with-props': selected }"
+          :class="{ 'with-props': selected, 'tabular-tall': isTabularTall }"
         >
-          <p class="muted tiny tabular-hint">
-            <strong>{{ format === 'csv' ? 'CSV' : 'TXT' }}:</strong>
-            header = column names; data rows = sample templates. Drag the
-            <strong>⋮⋮</strong> handle to reorder rows; drag a column’s
-            <strong>right edge</strong> to resize width.
-          </p>
+          <div class="tabular-toolbar">
+            <p class="muted tiny tabular-hint">
+              <strong>{{ String(format).toUpperCase() }}:</strong>
+              <template v-if="!isTabularTall">
+                header = column names; data rows = sample templates. Drag
+                <strong>⋮⋮</strong> to reorder rows; drag a column’s
+                <strong>right edge</strong> to resize. Arrow keys move between cells.
+              </template>
+              <template v-else>
+                fields are <strong>rows</strong>, sample indices are
+                <strong>columns</strong> (inverted layout for more fields on screen). Arrow keys
+                move between cells.
+              </template>
+            </p>
+            <div class="tabular-orient" role="group" aria-label="Table orientation">
+              <button
+                type="button"
+                class="btn btn-ghost tiny-btn"
+                :class="{ on: !isTabularTall }"
+                :aria-pressed="!isTabularTall"
+                title="Fields as columns (wide)"
+                @click="setTabularOrientation('fields-as-columns')"
+              >
+                Wide
+              </button>
+              <button
+                type="button"
+                class="btn btn-ghost tiny-btn"
+                :class="{ on: isTabularTall }"
+                :aria-pressed="isTabularTall"
+                title="Fields as rows (tall / inverted)"
+                @click="setTabularOrientation('fields-as-rows')"
+              >
+                Tall
+              </button>
+              <button
+                type="button"
+                class="btn btn-ghost tiny-btn"
+                :title="tip('Flip between wide and tall sample layout')"
+                @click="toggleTabularOrientation"
+              >
+                Transpose
+              </button>
+            </div>
+          </div>
           <div class="table-scroll">
-            <table class="schema-table" role="grid" aria-label="Column and value editor">
+            <!-- TALL: fields as rows, samples as columns -->
+            <table
+              v-if="isTabularTall"
+              class="schema-table schema-table-tall"
+              role="grid"
+              aria-label="Field and sample editor, fields as rows"
+            >
+              <thead>
+                <tr>
+                  <th scope="col" class="row-gutter">Field</th>
+                  <th
+                    v-for="ri in tabularRowIndexes"
+                    :key="'th-s-' + ri"
+                    scope="col"
+                    class="tab-col"
+                  >
+                    <span class="col-label muted tiny">Sample {{ ri + 1 }}</span>
+                    <button
+                      type="button"
+                      class="btn btn-ghost tiny-btn danger"
+                      :disabled="tabularRowCount <= 1"
+                      :aria-label="`Remove sample column ${ri + 1}`"
+                      :title="tip('Remove this sample column')"
+                      @click="removeTabularRow(ri)"
+                    >
+                      Del
+                    </button>
+                  </th>
+                  <th scope="col" class="add-col-cell">
+                    <button
+                      type="button"
+                      class="btn btn-ghost tiny-btn"
+                      :disabled="!active || !tabularColumns.length"
+                      :title="tip('Add sample column')"
+                      @click="addTabularRow"
+                    >
+                      + Sample
+                    </button>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="(col, ci) in tabularColumns"
+                  :key="'tall-' + col.id"
+                  :class="{ sel: selectedId === col.id }"
+                >
+                  <th scope="row" class="row-gutter tall-field-head">
+                    <label class="col-label muted tiny" :for="'tall-key-' + col.id">Column</label>
+                    <input
+                      :id="'tall-key-' + col.id"
+                      class="input key mono"
+                      :class="{ 'is-editing': selectedId === col.id }"
+                      :value="col.key"
+                      :aria-label="`Field name ${col.key || 'untitled'}`"
+                      placeholder="column"
+                      @focus="beginFieldEdit(col.id, col.id)"
+                      @blur="endFieldEdit"
+                      @pointerdown="selectField(col.id)"
+                      @input="
+                        (e) =>
+                          updateColumnField(col.id, { key: e.target.value }, { undo: false })
+                      "
+                    />
+                    <div class="col-actions">
+                      <button
+                        type="button"
+                        class="btn btn-ghost tiny-btn"
+                        :aria-label="`Copy field ${col.key || ''}`"
+                        @click.stop="copyField(col.id)"
+                      >
+                        Copy
+                      </button>
+                      <button
+                        type="button"
+                        class="btn btn-ghost tiny-btn danger"
+                        :aria-label="`Delete field ${col.key || ''}`"
+                        @click.stop="removeColumn(col.id)"
+                      >
+                        Del
+                      </button>
+                    </div>
+                  </th>
+                  <td
+                    v-for="ri in tabularRowIndexes"
+                    :key="'tall-c-' + col.id + '-' + ri"
+                    class="tab-col"
+                    :class="{ sel: selectedId === col.id }"
+                    @pointerdown="selectField(col.id)"
+                  >
+                    <input
+                      class="input sample mono"
+                      :class="{ 'is-editing': selectedId === col.id }"
+                      :value="getTabularCell(col, ri)"
+                      :data-tab-cell="`${ci}:${ri}`"
+                      :aria-label="`Sample ${ri + 1} for ${col.key || 'field'}`"
+                      placeholder="sample"
+                      @focus="beginFieldEdit(`${col.id}:r${ri}`, col.id)"
+                      @blur="endFieldEdit"
+                      @pointerdown="selectField(col.id)"
+                      @input="(e) => setTabularCellLive(col.id, ri, e.target.value)"
+                      @keydown="onTabularCellKeydown($event, ci, ri)"
+                    />
+                  </td>
+                  <td class="add-col-cell" />
+                </tr>
+                <tr class="add-row-tr">
+                  <td :colspan="Math.max(tabularRowCount, 1) + 2">
+                    <button
+                      type="button"
+                      class="btn btn-ghost tiny-btn"
+                      :disabled="!active"
+                      :title="tip('Add field row')"
+                      @click="addColumn"
+                    >
+                      + Field
+                    </button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <!-- WIDE: fields as columns (default) -->
+            <table
+              v-else
+              class="schema-table"
+              role="grid"
+              aria-label="Column and value editor"
+            >
               <colgroup>
                 <col class="col-gutter" />
                 <col
@@ -5634,7 +6068,7 @@ function tip(msg) {
                     </button>
                   </td>
                   <td
-                    v-for="col in tabularColumns"
+                    v-for="(col, ci) in tabularColumns"
                     :key="'v-' + col.id + '-' + ri"
                     class="tab-col"
                     :class="{ sel: selectedId === col.id }"
@@ -5646,13 +6080,16 @@ function tip(msg) {
                     </label>
                     <input
                       class="input sample mono"
+                      :class="{ 'is-editing': selectedId === col.id }"
                       :value="getTabularCell(col, ri)"
+                      :data-tab-cell="`${ci}:${ri}`"
                       :aria-label="`Sample row ${ri + 1} for ${col.key || 'field'}`"
                       placeholder="sample value"
                       @focus="beginFieldEdit(`${col.id}:r${ri}`, col.id)"
                       @blur="endFieldEdit"
                       @pointerdown="selectField(col.id)"
                       @input="(e) => setTabularCellLive(col.id, ri, e.target.value)"
+                      @keydown="onTabularCellKeydown($event, ci, ri)"
                     />
                     <span
                       class="tab-col-resizer"
@@ -6678,25 +7115,64 @@ function tip(msg) {
                     Values
                     <span v-if="themeEditor.loading">· loading…</span>
                   </div>
-                  <ul v-if="themeEditor.values?.length" class="pack-value-list theme-values-ul">
+                  <ul
+                    v-if="themeEditor.values?.length"
+                    class="pack-value-list theme-values-ul"
+                    aria-label="Theme category values"
+                  >
                     <li v-for="row in themeEditor.values" :key="row.id" class="pack-value-row">
-                      <span class="v mono">{{ row.value }}</span>
-                      <div class="pack-value-actions">
-                        <button
-                          type="button"
-                          class="btn btn-outline pack-action-sm"
-                          @click="editThemeValueRow(row)"
-                        >
-                          Edit
-                        </button>
-                        <button
-                          type="button"
-                          class="btn btn-outline-danger pack-action-sm"
-                          @click="deleteThemeValueRow(row)"
-                        >
-                          Remove
-                        </button>
-                      </div>
+                      <template v-if="isInlineEditing('theme', row.id)">
+                        <div class="inline-edit-row">
+                          <label class="visually-hidden" :for="'theme-edit-' + row.id"
+                            >Edit theme value</label
+                          >
+                          <input
+                            :id="'theme-edit-' + row.id"
+                            class="input mono is-editing"
+                            type="text"
+                            :data-inline-edit="'theme:' + row.id"
+                            :value="inlineValueEdit.draft"
+                            aria-label="Editing theme value"
+                            @input="inlineValueEdit.draft = $event.target.value"
+                            @keydown="onInlineEditKeydown($event, commitThemeValueEdit)"
+                          />
+                          <button
+                            type="button"
+                            class="btn btn-primary pack-action-sm"
+                            @click="commitThemeValueEdit"
+                          >
+                            Save
+                          </button>
+                          <button
+                            type="button"
+                            class="btn btn-ghost pack-action-sm"
+                            @click="cancelInlineValueEdit"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </template>
+                      <template v-else>
+                        <span class="v mono">{{ row.value }}</span>
+                        <div class="pack-value-actions">
+                          <button
+                            type="button"
+                            class="btn btn-outline pack-action-sm"
+                            :aria-label="`Edit theme value ${row.value}`"
+                            @click="editThemeValueRow(row)"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            class="btn btn-outline-danger pack-action-sm"
+                            :aria-label="`Remove theme value ${row.value}`"
+                            @click="deleteThemeValueRow(row)"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </template>
                     </li>
                   </ul>
                   <p v-else-if="!themeEditor.loading" class="muted tiny">
@@ -6739,7 +7215,7 @@ function tip(msg) {
                   @update:bulk-values="customBulkValues = $event"
                   @save="saveActiveCustomList"
                   @add-values="addBulkCustomValues"
-                  @edit-value="editCustomValue"
+                  @commit-value="commitCustomValueEdit"
                   @remove-value="removeCustomValue"
                   @delete-list="removeCustomList"
                   @close="activeCustomList = null"
@@ -8576,6 +9052,43 @@ body.resizing-cols * {
   min-width: 0;
   font-size: 12px;
   box-sizing: border-box;
+}
+.tabular-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  margin-bottom: 0.35rem;
+}
+.tabular-toolbar .tabular-hint {
+  flex: 1 1 14rem;
+  margin: 0;
+}
+.tabular-orient {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  align-items: center;
+}
+.tabular-orient .btn.on {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface));
+  color: var(--text);
+}
+.name-create-bar {
+  margin: 0.35rem 0.75rem 0.5rem;
+  max-width: 36rem;
+}
+.schema-table-tall .tall-field-head {
+  min-width: 8.5rem;
+  max-width: 12rem;
+  text-align: left;
+  vertical-align: top;
+}
+.schema-table .input.is-editing {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
 }
 .schema-table .input.sample {
   resize: none;

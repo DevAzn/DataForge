@@ -180,7 +180,7 @@ Details: **[GROK_BUILD_SETUP.md](./GROK_BUILD_SETUP.md)**.
 | **product-rules** | Generate, package, persistence, formats |
 | **test-pass** | Smoke before done |
 | **test-matrix** | Full UI/UX · functional · system · UAT · perf · compatibility matrix |
-| **ui-workspace** | App.vue layout / brand / workspaces |
+| **ui-workspace** | App.vue layout / brand / workspaces / 508 / inline edit / transpose |
 | **quality-audit** | Read-only readiness pass |
 
 Admin checklist (protected branches, code owners, Duo enablement): `.gitlab/duo/README.md`
@@ -193,7 +193,9 @@ Admin checklist (protected branches, code owners, Duo enablement): `.gitlab/duo/
 | **pv-rules** | Shipped | Product non-negotiables |
 | **pv-test-pass** | Shipped | Ordered smoke |
 | **pv-test-matrix** | Shipped | Full test matrix (UI/UX, UAT, perf, automation, …) |
-| **pv-ui-workspace** | Shipped | Dynamic layout, nav density, brand, formats |
+| **pv-ui-workspace** | Shipped | Dynamic layout, nav density, brand, formats, 508, inline edit, tabular transpose |
+| **pv-feature-team** | Shipped | Multi-agent squad: backlog → freeze → build → matrix |
+| **pv-desktop-exe** | Shipped | Rebuild Windows onedir + zip + push |
 | **skill-evolve** | Shipped | Promote loops → skills |
 | **skillify-helper** | Shipped | Power-user skillify |
 | **full-feature-scaffold** | Shipped | Feature E2E scaffold |
@@ -225,6 +227,7 @@ Personas (roles): `.grok/personas/` — `elon-supervisor`, `fe-design`, `fe-code
 
 ## 10. Session changelog
 
+- **2026-08-07** — Skill-evolve: **`pv-ui-workspace`** gains 508/inline-edit/transpose; new **`pv-feature-team`**, **`pv-desktop-exe`**; Duo **`ui-workspace`** synced.  
 - **2026-08-05** — **feature-team** workflow + five role personas (lean default: Supervisor / BE Senior / FE Code; optional Design + Innovator).  
 - **2026-08-04** — Skill **`pv-test-matrix`** / Duo **`test-matrix`**: full quality matrix (UI/UX, functional, system, UAT, performance, usability, compatibility, automation, regression, security).  
 - **2026-07-26** — Skill **`pv-ui-workspace`** shipped (dynamic layout, nav density, brand icon, xml/csv/txt, Library/Recent/Data packs). **pv-rules** updated: strict fill order, team formats, UI brand DataForge. Stabilization Phases A–B + UI polish in progress.  
