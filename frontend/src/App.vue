@@ -13,6 +13,7 @@ import {
 import BrandIcon from './components/BrandIcon.vue'
 import AppDialog from './components/AppDialog.vue'
 import FieldValuesCenter from './components/FieldValuesCenter.vue'
+import ValueUploadPanel from './components/ValueUploadPanel.vue'
 import {
   buildSelfClosingMap,
   insertAsChild,
@@ -3308,7 +3309,119 @@ async function addBulkCustomValues() {
   await openCustomList(activeCustomList.value.id)
   await refreshDataPackLists()
   await refreshStatusOnly()
-  statusMsg.value = `Added ${res.inserted} value(s)`
+  const msg = `Added ${res.inserted} value(s)` +
+    (res.total != null && res.limit != null ? ` (${res.total}/${res.limit})` : '')
+  flashStatus(msg)
+  if (res.warning) flashError(res.warning)
+}
+
+/**
+ * Import values from a dropped/parsed file into the open Field values list.
+ * Multi-category packs are flattened into this single list.
+ * @param {{ values?: string[], byCategory?: Record<string, string[]>, format?: string, warnings?: string[], fileName?: string }} result
+ */
+async function onCustomListUpload(result) {
+  if (!activeCustomList.value) {
+    flashError('Open a field values list first')
+    return
+  }
+  let values = Array.isArray(result?.values) ? result.values.slice() : []
+  if (!values.length && result?.byCategory) {
+    values = Object.values(result.byCategory).flat()
+  }
+  values = values.map((s) => String(s ?? '').trim()).filter(Boolean)
+  if (!values.length) {
+    flashError('No values found in upload')
+    return
+  }
+  try {
+    const res = await api.addCustomValues(activeCustomList.value.id, values)
+    await openCustomList(activeCustomList.value.id)
+    await refreshDataPackLists()
+    await refreshStatusOnly()
+    const parseWarn = (result.warnings || []).filter(Boolean).join(' ')
+    const msg =
+      `Imported ${res.inserted} value(s) from ${result.fileName || result.format || 'file'}` +
+      (res.total != null && res.limit != null ? ` (${res.total}/${res.limit})` : '') +
+      (parseWarn ? ` · ${parseWarn}` : '')
+    flashStatus(msg)
+    if (res.warning) flashError(res.warning)
+  } catch (e) {
+    flashError(e.message || 'Upload import failed')
+  }
+}
+
+/**
+ * Import values from a dropped/parsed file into the open theme editor.
+ * Multi-category maps fill each category; flat files use the active category.
+ * @param {{ values?: string[], byCategory?: Record<string, string[]>, format?: string, warnings?: string[], fileName?: string }} result
+ */
+async function onThemeValuesUpload(result) {
+  if (!themeEditor.value?.theme) {
+    flashError('Open a theme first')
+    return
+  }
+  const theme = themeEditor.value.theme
+  const byCat = result?.byCategory && typeof result.byCategory === 'object' ? result.byCategory : null
+  const catKeys = byCat ? Object.keys(byCat).filter((k) => (byCat[k] || []).length) : []
+
+  try {
+    let inserted = 0
+    let lastLimit = null
+    const warnings = [...(result.warnings || [])]
+
+    if (catKeys.length) {
+      for (const cat of catKeys) {
+        const vals = (byCat[cat] || []).map((s) => String(s ?? '').trim()).filter(Boolean)
+        if (!vals.length) continue
+        const res = await api.addThemeValues(theme.id, { category: cat, values: vals })
+        inserted += Number(res.inserted) || 0
+        lastLimit = res
+        if (res.warning) warnings.push(res.warning)
+      }
+      // Switch UI to first imported category
+      themeEditor.value = {
+        ...themeEditor.value,
+        category: catKeys[0],
+        bulk: ''
+      }
+    } else {
+      const category = String(themeEditor.value.category || '').trim()
+      if (!category) {
+        flashError('Select or create a category before uploading a flat file')
+        return
+      }
+      const values = (result.values || []).map((s) => String(s ?? '').trim()).filter(Boolean)
+      if (!values.length) {
+        flashError('No values found in upload')
+        return
+      }
+      const res = await api.addThemeValues(theme.id, { category, values })
+      inserted = Number(res.inserted) || 0
+      lastLimit = res
+      if (res.warning) warnings.push(res.warning)
+      themeEditor.value = { ...themeEditor.value, bulk: '' }
+    }
+
+    await refreshDataPackLists()
+    await refreshStatusOnly()
+    await loadThemeEditorValues()
+    await reloadFieldThemeCategories()
+    const warn = warnings.filter(Boolean).join(' ')
+    const scope =
+      catKeys.length > 1
+        ? `${catKeys.length} categories`
+        : `“${catKeys[0] || themeEditor.value.category}”`
+    const base =
+      `Theme “${theme.name}”: +${inserted} from ${result.fileName || result.format || 'file'} → ${scope}` +
+      (lastLimit?.total != null ? ` (${lastLimit.total}/${lastLimit.limit})` : '')
+    // Cap/full warnings stay as error banner; soft parse notes ride on status
+    const hard = warnings.find((w) => /full|max/i.test(String(w)))
+    flashStatus(base + (warn && !hard ? ` · ${warn}` : ''))
+    if (hard) flashError(hard)
+  } catch (e) {
+    flashError(e.message || 'Upload import failed')
+  }
 }
 
 async function commitCustomValueEdit(payload) {
@@ -7110,6 +7223,15 @@ function tip(msg) {
                   in “{{ themeEditor.category || '…' }}”
                 </p>
 
+                <ValueUploadPanel
+                  mode="theme"
+                  :theme-name="themeEditor.theme?.name || ''"
+                  :category="themeEditor.category || ''"
+                  :disabled="themeEditorCatStat.full"
+                  @parsed="onThemeValuesUpload"
+                  @error="flashError"
+                />
+
                 <div class="theme-value-list">
                   <div class="label muted tiny">
                     Values
@@ -7219,6 +7341,8 @@ function tip(msg) {
                   @remove-value="removeCustomValue"
                   @delete-list="removeCustomList"
                   @close="activeCustomList = null"
+                  @upload-values="onCustomListUpload"
+                  @upload-error="flashError"
                 />
               </template>
               <template v-else>

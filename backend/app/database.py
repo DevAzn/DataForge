@@ -1738,15 +1738,39 @@ def delete_custom_list(list_id: str) -> bool:
         conn.close()
 
 
-def add_custom_values(list_id: str, values: list[str]) -> int:
-    """Add unique values to a list. Returns number inserted."""
+def add_custom_values(list_id: str, values: list[str]) -> dict[str, Any]:
+    """
+    Add unique values to a list.
+
+    Caps at MAX_FIELD_VALUES_PER_TAG (same as field-tag pools).
+    Returns dict with inserted/total/limit/warning (inserted=-1 if list missing).
+    """
+    from app.defaults import FIELD_VALUES_WARN_AT, MAX_FIELD_VALUES_PER_TAG
+
     conn = connect()
     try:
         if not conn.execute(
             "SELECT 1 FROM custom_lists WHERE id = ?", (list_id,)
         ).fetchone():
-            return -1
+            return {
+                "inserted": -1,
+                "total": 0,
+                "limit": MAX_FIELD_VALUES_PER_TAG,
+                "skippedCap": 0,
+                "skippedDup": 0,
+                "warning": None,
+                "error": "List not found",
+            }
+        current = int(
+            conn.execute(
+                "SELECT COUNT(*) AS n FROM custom_values WHERE list_id = ?",
+                (list_id,),
+            ).fetchone()["n"]
+        )
+        room = max(0, MAX_FIELD_VALUES_PER_TAG - current)
         n = 0
+        skipped_cap = 0
+        skipped_dup = 0
         ts = now_iso()
         max_ord = conn.execute(
             "SELECT COALESCE(MAX(sort_order), 0) AS m FROM custom_values WHERE list_id = ?",
@@ -1755,6 +1779,9 @@ def add_custom_values(list_id: str, values: list[str]) -> int:
         for raw in values:
             val = (raw or "").strip()
             if not val:
+                continue
+            if n >= room:
+                skipped_cap += 1
                 continue
             max_ord += 1
             try:
@@ -1767,12 +1794,33 @@ def add_custom_values(list_id: str, values: list[str]) -> int:
                 )
                 n += 1
             except sqlite3.IntegrityError:
-                pass
-        conn.execute(
-            "UPDATE custom_lists SET updated_at = ? WHERE id = ?", (ts, list_id)
-        )
+                skipped_dup += 1
+                max_ord -= 1  # unused sort slot
+        if n:
+            conn.execute(
+                "UPDATE custom_lists SET updated_at = ? WHERE id = ?", (ts, list_id)
+            )
         conn.commit()
-        return n
+        total = current + n
+        warning = None
+        if total >= FIELD_VALUES_WARN_AT:
+            warning = (
+                f"List has {total}/{MAX_FIELD_VALUES_PER_TAG} values "
+                f"(warn at {FIELD_VALUES_WARN_AT}+)."
+            )
+        if skipped_cap:
+            warning = (
+                f"List is full ({MAX_FIELD_VALUES_PER_TAG} max). "
+                f"Inserted {n}; skipped {skipped_cap} over cap."
+            )
+        return {
+            "inserted": n,
+            "total": total,
+            "limit": MAX_FIELD_VALUES_PER_TAG,
+            "skippedCap": skipped_cap,
+            "skippedDup": skipped_dup,
+            "warning": warning,
+        }
     finally:
         conn.close()
 
@@ -2200,6 +2248,11 @@ def add_theme_values(
         ).fetchone():
             return {"inserted": -1, "error": "Theme not found"}
         cat = _normalize_theme_category(category)
+        if not re.match(r"^[a-z0-9][a-z0-9_-]{0,47}$", cat):
+            return {
+                "inserted": -1,
+                "error": "Use letters, numbers, underscore, or hyphen (max 48 chars)",
+            }
         ts = now_iso()
         conn.execute(
             """

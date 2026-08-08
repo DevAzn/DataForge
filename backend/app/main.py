@@ -1358,10 +1358,17 @@ def custom_list_delete(list_id: str):
 
 @app.post("/api/custom-lists/{list_id}/values")
 def custom_list_add_values(list_id: str, body: CustomValuesBody):
-    n = db.add_custom_values(list_id, body.values)
-    if n < 0:
+    result = db.add_custom_values(list_id, body.values)
+    if result.get("inserted", 0) < 0:
         raise HTTPException(404, "List not found")
-    return {"inserted": n, "list": db.get_custom_list(list_id)}
+    return {
+        "inserted": result.get("inserted", 0),
+        "total": result.get("total"),
+        "limit": result.get("limit"),
+        "skippedCap": result.get("skippedCap", 0),
+        "warning": result.get("warning"),
+        "list": db.get_custom_list(list_id),
+    }
 
 
 @app.put("/api/custom-values/{value_id}")
@@ -1473,7 +1480,9 @@ def themes_delete_category(theme_id: str, category: str):
 def themes_add_values(theme_id: str, body: ThemeValuesBody):
     result = db.add_theme_values(theme_id, body.category, body.values, body.weight)
     if result.get("inserted") == -1 or result.get("error"):
-        raise HTTPException(404, result.get("error") or "Theme not found")
+        err = result.get("error") or "Theme not found"
+        code = 404 if "not found" in str(err).lower() else 400
+        raise HTTPException(code, err)
     return {
         **result,
         "values": db.get_theme_values(theme_id, body.category),

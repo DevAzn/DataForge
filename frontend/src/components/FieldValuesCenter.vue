@@ -5,6 +5,7 @@
  * Value edits are inline (colored textbox) — no browser prompts.
  */
 import { nextTick, ref, watch } from 'vue'
+import ValueUploadPanel from './ValueUploadPanel.vue'
 
 const props = defineProps({
   list: { type: Object, default: null },
@@ -23,7 +24,9 @@ const emit = defineEmits([
   'commit-value',
   'remove-value',
   'delete-list',
-  'close'
+  'close',
+  'upload-values',
+  'upload-error'
 ])
 
 /** @type {import('vue').Ref<{ id: string, draft: string } | null>} */
@@ -106,6 +109,14 @@ function onEditKeydown(ev) {
           Save list
         </button>
       </div>
+
+      <ValueUploadPanel
+        mode="field"
+        :list-name="listName || list?.name || ''"
+        :field-keys="listKeys"
+        @parsed="emit('upload-values', $event)"
+        @error="emit('upload-error', $event)"
+      />
 
       <label class="gen-field fvc-bulk">
         <span class="gen-field-label">Add values (one per line)</span>
