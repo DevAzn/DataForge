@@ -89,21 +89,22 @@ Or both in one terminal (Ctrl+C stops both):
 
 Double-click launcher — starts **API + UI** on one port and opens your browser.
 
+**Download (recommended):** [GitHub Releases](https://github.com/DevAzn/DataForge/releases) — grab **DataForge-v\*-windows-x64.zip**, extract the **whole** folder (`DataForge.exe` + `_internal\`), then run the exe.
+
 **Build** (from repo root, Windows PowerShell):
 
 ```powershell
 .\scripts\build-exe.ps1
-# optional single-file bundle (slower start):
-.\scripts\build-exe.ps1 -OneFile
+# package + publish helper (needs gh auth):
+.\scripts\publish-desktop-release.ps1 -Version 0.6.2
 ```
 
 | Output | Path |
 |--------|------|
-| Recommended | `dist\DataForge\DataForge.exe` |
-| One-file | `dist\DataForge.exe` |
+| Recommended | `dist\DataForge\DataForge.exe` (+ `_internal\`) |
+| Zip for Releases | `dist\DataForge-vX.Y.Z-windows-x64.zip` |
 
 **Use:** run `DataForge.exe`. Browser opens **http://127.0.0.1:8765/** (UI and `/api` same origin). SQLite lives in a `data\` folder next to the exe. Stop with Ctrl+C in the console window.
-
 **Without packaging** (still one process, needs Python + a built UI):
 
 ```powershell

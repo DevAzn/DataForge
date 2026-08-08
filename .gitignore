@@ -8,14 +8,9 @@ __pycache__/
 *.egg-info/
 .eggs/
 # Only app build outputs — never strip package trees under node_modules
-# Un-ignore shippable desktop zip + notes (parent /dist/* must be listed first)
+# Desktop zips ship via GitHub Releases (not git history). Optional notes stay trackable.
 /dist/*
-!/dist/DataForge-windows-x64.zip
-!/dist/DataForge-v*.zip
 !/dist/release-notes*.md
-!/dist/DataForge/
-/dist/DataForge/*
-!/dist/DataForge/DataForge.exe
 /build/
 frontend/dist/
 .pytest_cache/
@@ -84,6 +79,7 @@ GROK_BUILD_SETUP.md
 *.ps1
 !scripts/build-exe.ps1
 !scripts/start-desktop.ps1
+!scripts/publish-desktop-release.ps1
 scripts/cleanup-electron-remnants.ps1
 scripts/finalize-dataforge-path.ps1
 scripts/finalize-pv-path.ps1
