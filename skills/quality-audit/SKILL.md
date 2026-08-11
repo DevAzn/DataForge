@@ -9,11 +9,11 @@ description: >
 
 ## Scope
 
-1. **Product rules** — persistence, package = record, tar.gz multi, fill order, formats  
-2. **API** — health app DataForge, generate, export, stream, packages  
-3. **UI** — workspaces, Generate label, brand, no blank errors  
-4. **Hygiene** — secrets, dead code paths, version alignment  
-5. **Risk** — delivery only as light note (backlog)
+1. **Product rules** — persistence, package = record, structural scramble, nested archives, tar.gz multi, fill order, formats (xml/csv/txt/xlsx), data-pack caps  
+2. **API** — health app DataForge, generate, export, stream, packages, nested pack  
+3. **UI** — workspaces, Generate label, brand, Data packs centers, no blank errors  
+4. **Hygiene** — secrets, dead code paths, version alignment (`APP_VERSION` / `pyproject.toml`)  
+5. **Risk** — delivery only as light note (backlog) unless MR is delivery-focused  
 
 ## Method
 

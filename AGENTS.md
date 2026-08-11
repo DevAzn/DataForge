@@ -17,7 +17,7 @@ Used by Grok Build agents and **GitLab Duo** (Agentic Chat / agents / flows).
 | **[CONTEXT.md](./CONTEXT.md)** | Product intent (local; may be gitignored) |
 | **[GROK_BUILD_SETUP.md](./GROK_BUILD_SETUP.md)** | Grok slash commands (local) |
 
-**Last updated:** 2026-07-27  
+**Last updated:** 2026-08-10  
 **Primary path:** project root **DataForge**  
 **Brand:** **DataForge**
 
@@ -119,13 +119,17 @@ DataForge/                    # primary workspace path
 
 ### Product non-negotiables
 
-1. SQLite = design + curated data only  
+1. SQLite = design + curated data only (no original structural bodies)  
 2. Package generate: **whole package = one record**  
-3. Multi-file bundles: **tar.gz if count > 1**, else ZIP  
-4. Delivery v1: plan in DB, artifacts on disk; **no Redis**  
-5. Fill order: **enums → theme → custom → history → synthesize**  
+3. Package schema members: **xml · csv · txt · json · yaml · xlsx**; non-schema = **structural** (scramble, no body stored)  
+4. Nested archives: **expand** / **opaque**; re-pack + outer **itself** preserves type  
+5. Multi-file bundles: **tar.gz if count > 1**, else ZIP  
+6. UI export: **xml · csv · txt · xlsx** only  
+7. Delivery v1: plan in DB, artifacts on disk; **no Redis**; path jail  
+8. Fill order: **enums → theme → custom → history → synthesize**  
+9. Data packs: custom pool cap **1000**; value upload via ValueUploadPanel  
 
-Skill: **`pv-rules`**.
+Skills: Grok **`pv-rules`**; Duo **`product-rules`** (`skills/` + `.gitlab/duo/skills/`).
 
 ---
 
@@ -227,6 +231,7 @@ Personas (roles): `.grok/personas/` — `elon-supervisor`, `fe-design`, `fe-code
 
 ## 10. Session changelog
 
+- **2026-08-10** — Duo agent configs refreshed: chat-rules, MR review, skills (package structural/nested, xlsx, data packs / ThemeValuesCenter, bootstrap Windows paths); both skill trees kept in sync.  
 - **2026-08-07** — Quality-audit fixes: delivery path jail, `recordHistory` default false, 508 UI, **xlsx** in product-rules/pv-rules.  
 - **2026-08-07** — Skill-evolve: **`pv-ui-workspace`** gains 508/inline-edit/transpose; new **`pv-feature-team`**, **`pv-desktop-exe`**; Duo **`ui-workspace`** synced.  
 - **2026-08-05** — **feature-team** workflow + five role personas (lean default: Supervisor / BE Senior / FE Code; optional Design + Innovator).  

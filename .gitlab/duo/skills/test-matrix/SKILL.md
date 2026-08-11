@@ -30,10 +30,10 @@ description: >
    node --test frontend/src/uiHelpers.test.js frontend/src/dialogController.test.js
    cd frontend && npm run build
    ```
-3. **Functional** — generate; export xml/csv/txt/**xlsx**; per-file tar.gz/zip; stream csv; themes extend; packages/delivery as available  
-4. **System** — Library lists after boot; Generate download; SQLite design-only; restart persistence  
-5. **UAT** — first open (builtin themes); Excel path; import CSV; package; field lists; theme map; save/restart; dialog cancel  
-6. **UI/UX** — brand `/favicon.svg`; formats xml·csv·txt·xlsx; Generate label; workspaces; banners; dialogs; center Field values; a11y basics  
+3. **Functional** — generate; export xml/csv/txt/**xlsx**; per-file tar.gz/zip; stream csv; themes extend; packages (schema + structural + nested); delivery as available  
+4. **System** — Library lists after boot; Generate download; SQLite design-only (no structural bodies); restart persistence  
+5. **UAT** — first open (builtin themes); Excel path; import CSV; package import/generate; field lists; theme values center + upload; save/restart; dialog cancel  
+6. **UI/UX** — brand `/favicon.svg`; formats xml·csv·txt·xlsx; Generate label; workspaces; banners; dialogs; FieldValuesCenter + ThemeValuesCenter; a11y basics  
 7. **Usability** — heuristics 1–5; list top fixes (don’t expand scope)  
 8. **Performance** — N=100 generate; bootstrap timing; stream safety caps (no OOM)  
 9. **Compatibility** — Windows/Python/browser/xlsx OOXML; multi→tar.gz  
@@ -62,8 +62,10 @@ List **blockers / majors / minors** and evidence (commands + key output).
 - Export chrome: **xml / csv / txt / xlsx**  
 - Generate label: **Generate**  
 - Multi-file archives: **tar.gz** when count &gt; 1  
-- SQLite: design + curated only  
+- Package: whole package = one record; structural scramble; nested expand/opaque  
+- SQLite: design + curated only (no original structural bodies)  
 - Builtin themes: seed additive; user categories/values persist  
+- Custom-list pool cap: **1000**  
 
 ## Agent rules
 

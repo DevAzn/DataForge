@@ -44,15 +44,26 @@ repo:hygiene:
   script:
     - |
       set -e
-      # Fail if runtime junk was committed
-      if git ls-files | grep -E '(^|/)\.env($|\.)|(^|/)data/.*\.sqlite|(^|/)node_modules/|(^|/)\.venv/' ; then
+      # Fail if runtime junk was committed (frontend/node_modules + dist/DataForge onedir may be tracked by design)
+      if git ls-files | grep -E '(^|/)\.env($|\.)|(^)data/.*\.sqlite$|(^|/)\.venv/|(^|/)backend/\.venv/' ; then
         echo "ERROR: forbidden runtime/secret paths are tracked" >&2
         exit 1
       fi
-      # Duo skill trees must stay in sync (same skill names)
-      for s in minimal-change bootstrap product-rules test-pass ui-workspace quality-audit; do
+      # Versioned desktop zips must not re-enter git history
+      if git ls-files | grep -E '^dist/.*\.zip$' ; then
+        echo "ERROR: desktop zip packages must ship via Releases, not git" >&2
+        exit 1
+      fi
+      # Duo skill trees must stay in sync (same skill names + identical bodies)
+      for s in minimal-change bootstrap product-rules test-pass test-matrix ui-workspace quality-audit; do
         test -f "skills/$s/SKILL.md"
         test -f ".gitlab/duo/skills/$s/SKILL.md"
+        if command -v cmp >/dev/null 2>&1; then
+          cmp -s "skills/$s/SKILL.md" ".gitlab/duo/skills/$s/SKILL.md" || {
+            echo "ERROR: skill trees out of sync for $s" >&2
+            exit 1
+          }
+        fi
       done
       echo "hygiene OK"
   interruptible: true

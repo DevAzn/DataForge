@@ -16,12 +16,18 @@ instructions:
       - "frontend/**/*"
     instructions: |
       Verify product rules were not broken:
-      - SQLite must not store bulk generated record bodies or export binaries.
-      - Package generate still means whole package = one record.
+      - SQLite must not store bulk generated record bodies, export binaries, or package variant contents.
+      - Package generate still means whole package = one record (one variant).
+      - Schema package members: xml/csv/txt/json/yaml/xlsx (infer + regenerate).
+      - Non-schema members are structural: same path, scrambled same-size content; no original bodies in SQLite.
+      - Nested archives: expand (default) or opaque; re-pack format override is intentional; outer "itself" preserves import type.
       - Multi-file archives should remain tar.gz by default when count > 1.
       - Fill order remains enums → theme → custom → history → synthesize.
-      - UI formats should stay limited to xml/csv/txt unless the MR explicitly expands them.
+      - UI export formats: xml/csv/txt/xlsx only (JSON/YAML not in UI chrome).
+      - recordHistory default remains false (opt-in).
+      - Custom-list pool cap remains 1000 unless the MR documents a deliberate change.
       - Do not require Delivery feature work unless the MR is about Delivery.
+      - Delivery destinationPath must stay jailed under the delivery root.
 
   - name: backend_python
     fileFilters:
@@ -35,11 +41,24 @@ instructions:
     fileFilters:
       - "frontend/**/*.{vue,js,css}"
     instructions: |
-      Prefer extending App.vue / api.js rather than introducing a new UI framework.
+      Prefer extending App.vue / api.js / existing components (FieldValuesCenter, ThemeValuesCenter, ValueUploadPanel)
+      rather than introducing a new UI framework.
       Flag dead UI controls and unexplained large template rewrites.
       Generate button label should remain "Generate".
+      Prefer inline edit / in-app dialogs over window.prompt / confirm / alert.
 
   - name: secrets_and_runtime
     instructions: |
-      Reject committing secrets, .env files, data/*.sqlite, node_modules, or .venv.
+      Reject committing secrets and .env files (except .env.example).
       Flag hard-coded absolute machine paths that break Linux/macOS.
+      Versioned desktop zips (dist/*.zip) should not land in git; onedir under dist/DataForge may be intentional.
+      Project may track frontend/node_modules by design — do not demand deleting it; still flag accidental .venv or secrets.
+
+  - name: duo_instructions
+    fileFilters:
+      - "AGENTS.md"
+      - "skills/**/*"
+      - ".gitlab/duo/**/*"
+    instructions: |
+      When skills change, both skills/ and .gitlab/duo/skills/ must stay identical.
+      chat-rules.md product bullets should match product-rules skill.

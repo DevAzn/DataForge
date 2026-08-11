@@ -7,11 +7,11 @@ Thin, request-scoped skills. **Pick one skill per task.** Do not invent extra wo
 | Skill | When to use |
 |-------|-------------|
 | [minimal-change](./minimal-change/SKILL.md) | Default for every coding request |
-| [bootstrap](./bootstrap/SKILL.md) | Start / verify local stack |
-| [product-rules](./product-rules/SKILL.md) | Generate, package, persistence, formats |
+| [bootstrap](./bootstrap/SKILL.md) | Start / verify local stack (Windows PowerShell preferred) |
+| [product-rules](./product-rules/SKILL.md) | Generate, package (structural/nested), persistence, formats, data-pack caps |
 | [test-pass](./test-pass/SKILL.md) | Smoke / verify before calling done |
 | [test-matrix](./test-matrix/SKILL.md) | Full UI/UX · functional · system · UAT · perf · compatibility |
-| [ui-workspace](./ui-workspace/SKILL.md) | App.vue workspaces, layout, brand |
+| [ui-workspace](./ui-workspace/SKILL.md) | App.vue workspaces, layout, brand, Data packs centers, 508 |
 | [quality-audit](./quality-audit/SKILL.md) | Read-only production readiness pass |
 
 Also always follow:

@@ -275,13 +275,15 @@ This repo is set up for **GitLab Duo** with **strict minimal-change** rules:
 | Path | Purpose |
 |------|---------|
 | `AGENTS.md` | Project conventions for Duo Chat / agents / flows |
-| `.gitlab/duo/chat-rules.md` | Auto-loaded Duo rules (no over-engineering) |
+| `.gitlab/duo/chat-rules.md` | Auto-loaded Duo rules (minimal-change + product non-negotiables) |
 | `skills/` | **Agent Skills discovery** (GitLab project layout) |
-| `.gitlab/duo/skills/` | Same skills for chat-rules paths (keep in sync) |
+| `.gitlab/duo/skills/` | Same skills for chat-rules paths (**keep identical**) |
 | `.gitlab/duo/mr-review-instructions.yaml` | Duo MR review guidance (**advisory**, not a security control) |
-| `.gitlab/duo/README.md` | Setup + **admin checklist** (protected branches, code owners) |
-| `.gitlab-ci.yml` | Minimal CI (unit tests + frontend build + hygiene) |
+| `.gitlab/duo/README.md` | Setup + skill map + **admin checklist** |
+| `.gitlab-ci.yml` | Minimal CI (unit tests + frontend build + skill-tree hygiene) |
 | `.gitlab/CODEOWNERS` | Protect instruction files (**set real @username**) |
+
+Skills: `minimal-change`, `bootstrap`, `product-rules`, `test-pass`, `test-matrix`, `ui-workspace`, `quality-audit`.
 
 After changing those files, **start a new Duo conversation** so rules reload.
 

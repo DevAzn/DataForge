@@ -22,6 +22,18 @@ Committed instruction set so Duo stays **minimal**, **request-scoped**, and **pr
 | `CONTEXT.md`, `GROK_BUILD_SETUP.md` | Local agent context |
 | `data/`, `.env`, secrets | Runtime / secrets |
 
+## Skill map (current)
+
+| Skill | Focus |
+|-------|--------|
+| `minimal-change` | Default smallest correct diff |
+| `bootstrap` | Start API `:8765` + UI `:5173` |
+| `product-rules` | Persistence, packages (schema/structural/nested), fill order, xlsx, data-pack caps |
+| `test-pass` | Ordered smoke before done |
+| `test-matrix` | Full quality matrix / release readiness |
+| `ui-workspace` | Workspaces, brand, 508, Field/Theme value centers |
+| `quality-audit` | Read-only production pass |
+
 ## Admin checklist (GitLab UI — do once)
 
 These **cannot** be enforced by files alone:
@@ -30,7 +42,7 @@ These **cannot** be enforced by files alone:
 2. **Code Owner approval** (Premium/Ultimate): enable “Require approval from Code Owners” on the protected branch so `.gitlab/CODEOWNERS` actually blocks merges.
 3. **CODEOWNERS**: replace `@your-gitlab-username` with real user/group handles.
 4. **GitLab Duo**: enable Agent Platform / Agentic Chat for the group or project as needed.
-5. **Context exclusions** (Project → Settings → General → GitLab Duo): exclude `data/**`, `**/.env*`, `**/node_modules/**`, `**/.venv/**` if they ever appear tracked.
+5. **Context exclusions** (Project → Settings → General → GitLab Duo): exclude `data/**`, `**/.env*`, `**/node_modules/**`, `**/.venv/**`, and optionally large desktop trees `dist/DataForge/_internal/**` if context size is an issue.
 6. After changing Duo instruction files: **start a new Duo conversation** so rules reload.
 
 ## Important limitations
@@ -46,4 +58,4 @@ When you edit a skill, update **both**:
 - `skills/<name>/SKILL.md` (Duo Agent Skills discovery)
 - `.gitlab/duo/skills/<name>/SKILL.md` (chat-rules paths)
 
-Keep content identical.
+Keep content identical. CI checks that both trees list the same skill folders.
