@@ -332,6 +332,108 @@ def test_archive_svc_pack_formats():
         assert media
 
 
+def test_output_format_itself_preserves_outer_tar():
+    """Import plain .tar → generate itself → variants are .tar (not forced zip)."""
+    raw = _make_tar([("a.xml", XML), ("b.csv", CSV)], gzip=False)
+    pkg = package_svc.import_uploaded_archive("plain.tar", raw)
+    assert pkg["outerFormat"] == "tar"
+    result = package_svc.generate_package_variants(
+        pkg["id"],
+        record_count=1,
+        seed=11,
+        ci_mode=True,
+        record_history=False,
+        output_format="itself",
+    )
+    # Single variant of a multi-member package: outer is tar; download may be bare variant or zip wrap
+    assert result["variantFormat"] == "tar" or (result.get("fileName") or "").endswith(".tar")
+    variants = _decode_bundle(result)
+    assert variants
+    # The package variant itself should be tar when itself
+    if result["archiveFormat"] == "tar" and result["written"] == 1:
+        assert result["fileName"].endswith(".tar")
+    else:
+        for vname, _ in variants:
+            assert vname.endswith(".tar"), vname
+
+
+def test_structural_member_emitted_scrambled():
+    secret = b"ORIGINAL_SECRET_BYTES_XX"
+    pkg = package_svc.import_package_from_bytes(
+        package_name="with-struct",
+        file_entries=[
+            ("data.xml", XML),
+            ("noise.bin", secret),
+        ],
+        source_kind="files",
+        outer_format="folder",
+    )
+    structural = [m for m in pkg["members"] if m["kind"] == "structural"]
+    assert len(structural) == 1
+    assert structural[0]["byteSize"] == len(secret)
+    assert not structural[0].get("content")
+    result = package_svc.generate_package_variants(
+        pkg["id"],
+        record_count=1,
+        seed=99,
+        ci_mode=True,
+        record_history=False,
+        output_format="zip",
+        bundle_format="zip",
+    )
+    variants = _decode_bundle(result)
+    assert variants
+    vname, vbytes = variants[0]
+    with zipfile.ZipFile(io.BytesIO(vbytes)) as zf:
+        names = zf.namelist()
+        bin_name = next(n for n in names if n.endswith("noise.bin"))
+        payload = zf.read(bin_name)
+    assert len(payload) == len(secret)
+    assert payload != secret
+
+
+def test_nested_pack_format_override():
+    import zipfile as zfmod
+
+    inner = io.BytesIO()
+    with zfmod.ZipFile(inner, "w") as zf:
+        zf.writestr("inner.xml", XML)
+    nested_zip = inner.getvalue()
+    raw = _make_tar(
+        [("wrap/inner.zip", nested_zip), ("top.xml", XML)],
+        gzip=True,
+    )
+    pkg = package_svc.import_uploaded_archive(
+        "nest.tar.gz", raw, nested_archive_mode="expand"
+    )
+    assert pkg["nestedArchives"]
+    folder = pkg["nestedArchives"][0]["folderPath"]
+    # Default pack format is zip (from nested zip)
+    assert (pkg["nestedArchives"][0].get("packFormat") or pkg["nestedArchives"][0]["format"]) in (
+        "zip",
+    )
+    # Override to tar
+    updated = package_svc.update_nested_pack(pkg["id"], folder, pack_format="tar")
+    nest = updated["nestedArchives"][0]
+    assert nest["packFormat"] == "tar"
+    assert nest["originalArchivePath"].endswith(".tar")
+    result = package_svc.generate_package_variants(
+        pkg["id"],
+        record_count=1,
+        seed=5,
+        ci_mode=True,
+        record_history=False,
+        output_format="tar.gz",
+        bundle_format="tar.gz",
+    )
+    variants = _decode_bundle(result)
+    assert variants
+    _, vbytes = variants[0]
+    with tarfile.open(fileobj=io.BytesIO(vbytes), mode="r:gz") as tar:
+        names = [m.name for m in tar.getmembers() if m.isfile()]
+    assert any(n.endswith(".tar") for n in names), names
+
+
 if __name__ == "__main__":
     test_resolve_variant_format()
     test_archive_svc_pack_formats()
@@ -340,4 +442,7 @@ if __name__ == "__main__":
     test_output_format_tar_gz()
     test_same_mode_immutable_across_variants()
     test_generated_not_written_to_sqlite()
+    test_output_format_itself_preserves_outer_tar()
+    test_structural_member_emitted_scrambled()
+    test_nested_pack_format_override()
     print("ok test_package_generate")

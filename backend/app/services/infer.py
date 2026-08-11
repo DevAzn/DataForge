@@ -22,6 +22,8 @@ def new_id() -> str:
 
 def detect_format(file_name: str, text: str) -> str:
     lower = file_name.lower()
+    if lower.endswith(".xlsx") or lower.endswith(".xls"):
+        return "xlsx"
     if lower.endswith(".json") or lower.endswith(".jsonl") or lower.endswith(".ndjson"):
         return "json"
     if lower.endswith((".yml", ".yaml")):
@@ -39,6 +41,104 @@ def detect_format(file_name: str, text: str) -> str:
         return "csv"
     return "txt"
 
+
+def infer_schema_from_xlsx(file_name: str, raw: bytes) -> dict:
+    """
+    Infer a flat tabular schema from the first non-empty sheet of an .xlsx workbook.
+    Header row → value fields with sample cells from the first data row.
+    """
+    from openpyxl import load_workbook
+
+    wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+    try:
+        ws = None
+        for sheet in wb.worksheets:
+            # pick first sheet that has any cell
+            for row in sheet.iter_rows(max_row=5, values_only=True):
+                if any(c is not None and str(c).strip() != "" for c in row):
+                    ws = sheet
+                    break
+            if ws is not None:
+                break
+        if ws is None:
+            ws = wb.active
+        rows_iter = ws.iter_rows(values_only=True)
+        header = next(rows_iter, None)
+        if not header:
+            raise ValueError("Empty workbook")
+        keys: list[str] = []
+        for i, h in enumerate(header):
+            label = str(h).strip() if h is not None else ""
+            keys.append(label or f"col_{i + 1}")
+        # de-dupe keys
+        seen: dict[str, int] = {}
+        uniq: list[str] = []
+        for k in keys:
+            n = seen.get(k, 0)
+            seen[k] = n + 1
+            uniq.append(k if n == 0 else f"{k}_{n + 1}")
+        keys = uniq
+        data_rows: list[tuple] = []
+        for row in rows_iter:
+            if row is None:
+                continue
+            if all(c is None or str(c).strip() == "" for c in row):
+                continue
+            data_rows.append(row)
+            if len(data_rows) >= 20:
+                break
+        first = data_rows[0] if data_rows else tuple()
+        root_rows = []
+        for i, key in enumerate(keys):
+            sample = first[i] if i < len(first) else None
+            root_rows.append(
+                {
+                    "id": new_id(),
+                    "key": key,
+                    "kind": "value",
+                    "sampleValue": "" if sample is None else str(sample),
+                    "isPrimary": False,
+                    "isUnique": False,
+                    "children": [],
+                    "sortOrder": i,
+                }
+            )
+        if not root_rows:
+            root_rows = [
+                {
+                    "id": new_id(),
+                    "key": "field",
+                    "kind": "value",
+                    "sampleValue": "",
+                    "isPrimary": False,
+                    "isUnique": False,
+                    "children": [],
+                    "sortOrder": 0,
+                }
+            ]
+        base = re.sub(r"\.[^.\\/]+$", "", file_name.replace("\\", "/").split("/")[-1]) or "Imported"
+        history = []
+        for row in data_rows[:5]:
+            for i, key in enumerate(keys):
+                if i < len(row) and row[i] is not None:
+                    history.append(
+                        {"categoryName": key, "keyName": key, "value": str(row[i])}
+                    )
+        return {
+            "schema": {
+                "id": new_id(),
+                "name": base,
+                "root": root_rows,
+                "sourceFileName": file_name.replace("\\", "/").split("/")[-1],
+                "sourceFormat": "xlsx",
+            },
+            "format": "xlsx",
+            "recordHint": max(1, len(data_rows)),
+            "scannedRecords": len(data_rows),
+            "historySamples": history,
+        }
+    finally:
+        wb.close()
 
 def _sample_str(v: Any) -> str | None:
     if v is None:

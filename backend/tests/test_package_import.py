@@ -49,7 +49,7 @@ def test_build_path_tree_nested():
     assert any(c["name"] == "a.xml" for c in inner["children"])
 
 
-def test_import_tar_gz_nested_supported_and_skip():
+def test_import_tar_gz_schema_and_structural():
     raw = _make_tar(
         [
             ("pkg/data/person.xml", SAMPLE_XML),
@@ -63,21 +63,25 @@ def test_import_tar_gz_nested_supported_and_skip():
     result = package_svc.import_uploaded_archive("sample-pkg.tar.gz", raw)
     assert result["outerFormat"] == "tar.gz"
     text = [m for m in result["members"] if m["kind"] == "text"]
+    structural = [m for m in result["members"] if m["kind"] == "structural"]
     paths = {m["path"] for m in text}
     assert "pkg/data/person.xml" in paths
     assert "pkg/data/rows.csv" in paths
     assert "pkg/notes.txt" in paths
-    # unsupported skipped with reason
-    skipped = " ".join(result.get("skipped") or [])
-    assert "blob.bin" in skipped
-    assert "legacy.json" in skipped
-    assert "unsupported" in skipped.lower() or "xml/csv/txt" in skipped.lower()
+    assert "pkg/legacy.json" in paths  # json is now a schema member
+    # binary companions kept as structural (no original content stored)
+    struct_paths = {m["path"] for m in structural}
+    assert "pkg/blob.bin" in struct_paths
+    blob = next(m for m in structural if m["path"] == "pkg/blob.bin")
+    assert blob.get("byteSize") == len(SAMPLE_BIN)
+    assert not blob.get("content")
     # schemas present for text members
     for m in text:
         assert m.get("schemaId")
-        assert m.get("content") is not None
-    # nested tree from members
-    tree = package_svc.build_path_tree([m["path"] for m in text])
+        if (m.get("format") or "") != "xlsx":
+            assert m.get("content") is not None
+    # nested tree from all members
+    tree = package_svc.build_path_tree([m["path"] for m in result["members"] if m["kind"] != "nested_archive_folder"])
     assert any(n["name"] == "pkg" for n in tree)
 
 
@@ -156,11 +160,61 @@ def test_save_member_schema_as():
     assert m["schemaId"] == out["schema"]["id"]
 
 
+def test_import_json_yaml_schema():
+    files = [
+        ("data/a.json", b'{"name":"Ada","city":"London"}'),
+        ("data/b.yaml", b"name: Bob\ncity: Paris\n"),
+        ("data/readme.md", b"# notes\nsecret"),
+    ]
+    result = package_svc.import_uploaded_files(files)
+    text = {m["path"]: m for m in result["members"] if m["kind"] == "text"}
+    structural = {m["path"]: m for m in result["members"] if m["kind"] == "structural"}
+    assert "data/a.json" in text
+    assert text["data/a.json"]["format"] == "json"
+    assert "data/b.yaml" in text
+    assert text["data/b.yaml"]["format"] == "yaml"
+    assert "data/readme.md" in structural
+    assert structural["data/readme.md"]["byteSize"] == len(b"# notes\nsecret")
+    assert not structural["data/readme.md"].get("content")
+
+
+def test_nested_opaque_keeps_archive_structural():
+    import zipfile
+
+    inner_buf = io.BytesIO()
+    with zipfile.ZipFile(inner_buf, "w") as zf:
+        zf.writestr("inner.xml", SAMPLE_XML)
+    inner_zip = inner_buf.getvalue()
+    raw = _make_tar([("outer/nested.zip", inner_zip), ("outer/a.xml", SAMPLE_XML)], gzip=True)
+    expanded = package_svc.import_uploaded_archive(
+        "pack.tar.gz", raw, nested_archive_mode="expand"
+    )
+    assert any(m["kind"] == "nested_archive_folder" for m in expanded["members"])
+    opaque = package_svc.import_uploaded_archive(
+        "pack.tar.gz", raw, nested_archive_mode="opaque"
+    )
+    struct = [m for m in opaque["members"] if m["kind"] == "structural"]
+    assert any(m["path"].endswith("nested.zip") for m in struct)
+    assert not any(m["kind"] == "nested_archive_folder" for m in opaque["members"])
+
+
+def test_scrambled_bytes_no_original():
+    secret = b"TOP_SECRET_PAYLOAD"
+    out = package_svc.scrambled_bytes("x.bin", len(secret), seed=42)
+    assert len(out) == len(secret)
+    assert out != secret
+    out2 = package_svc.scrambled_bytes("x.bin", len(secret), seed=42)
+    assert out == out2  # deterministic with seed
+
+
 if __name__ == "__main__":
     test_build_path_tree_nested()
-    test_import_tar_gz_nested_supported_and_skip()
+    test_import_tar_gz_schema_and_structural()
     test_import_plain_tar()
     test_import_multi_file_preserves_relative_paths()
     test_member_rename_and_content_update()
     test_save_member_schema_as()
+    test_import_json_yaml_schema()
+    test_nested_opaque_keeps_archive_structural()
+    test_scrambled_bytes_no_original()
     print("ok test_package_import")

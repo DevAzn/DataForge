@@ -17,7 +17,10 @@ description: >
 ## Packages
 
 - Whole package = **one record** (one variant)
-- Nested archives → folder without extensions
+- Schema members: **xml · csv · txt · json · yaml · xlsx** (infer + regenerate)
+- Non-schema files: **structural** — keep path/name, scramble same-size content on generate (never store original bodies)
+- Nested archives: import **expand** (default) or **opaque**; on generate re-pack as original **tar / zip / tar.gz** by default (user may override pack format)
+- Outer **itself** preserves import archive type (tar stays tar, etc.)
 - Estimate ≈ N × files-per-package
 - Bundle: **tar.gz if count > 1**, else ZIP
 

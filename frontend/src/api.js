@@ -227,7 +227,7 @@ export const api = {
   getPackage: (id) => req(`/api/packages/${id}`),
   estimatePackage: (id, recordCount = 1) =>
     req(`/api/packages/${id}/estimate?recordCount=${recordCount}`),
-  importPackage: async (fileList) => {
+  importPackage: async (fileList, opts = {}) => {
     const fd = new FormData()
     for (const f of fileList) {
       // Preserve webkitRelativePath for folder uploads (nested explorer paths)
@@ -236,6 +236,7 @@ export const api = {
         f.name
       fd.append('files', f, rel)
     }
+    fd.append('nestedArchiveMode', opts.nestedArchiveMode || 'expand')
     return req('/api/packages/import', { method: 'POST', body: fd })
   },
   deletePackage: (id) => req(`/api/packages/${id}`, { method: 'DELETE' }),
@@ -247,6 +248,12 @@ export const api = {
     }),
   updatePackageMember: (id, body) =>
     req(`/api/packages/${id}/members`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }),
+  updatePackageNested: (id, body) =>
+    req(`/api/packages/${id}/nested`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)

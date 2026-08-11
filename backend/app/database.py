@@ -190,6 +190,7 @@ def init_db() -> None:
               schema_id TEXT,
               verified INTEGER NOT NULL DEFAULT 0,
               sort_order INTEGER NOT NULL DEFAULT 0,
+              byte_size INTEGER,
               FOREIGN KEY (package_id) REFERENCES package_import(id) ON DELETE CASCADE,
               UNIQUE(package_id, path)
             );
@@ -245,6 +246,14 @@ def init_db() -> None:
         if "source_key" not in cat_cols:
             try:
                 conn.execute("ALTER TABLE categories ADD COLUMN source_key TEXT")
+            except sqlite3.OperationalError:
+                pass
+        pkg_member_cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(package_member)").fetchall()
+        }
+        if "byte_size" not in pkg_member_cols:
+            try:
+                conn.execute("ALTER TABLE package_member ADD COLUMN byte_size INTEGER")
             except sqlite3.OperationalError:
                 pass
         row = conn.execute("SELECT 1 FROM settings WHERE key = 'app'").fetchone()
@@ -1215,8 +1224,9 @@ def save_package(doc: dict[str, Any]) -> dict[str, Any]:
                 """
                 INSERT INTO package_member
                   (id, package_id, path, name, kind, format, nested_archive_path,
-                   nested_archive_format, content, schema_id, verified, sort_order)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   nested_archive_format, content, schema_id, verified, sort_order,
+                   byte_size)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     m.get("id") or str(uuid.uuid4()),
@@ -1231,6 +1241,7 @@ def save_package(doc: dict[str, Any]) -> dict[str, Any]:
                     m.get("schemaId"),
                     1 if m.get("verified") else 0,
                     i,
+                    m.get("byteSize"),
                 ),
             )
         conn.commit()
@@ -1261,7 +1272,7 @@ def _package_from_id(conn: sqlite3.Connection, pid: str) -> dict[str, Any] | Non
     members = conn.execute(
         """
         SELECT id, path, name, kind, format, nested_archive_path, nested_archive_format,
-               content, schema_id, verified, sort_order
+               content, schema_id, verified, sort_order, byte_size
         FROM package_member WHERE package_id = ? ORDER BY sort_order, path
         """,
         (pid,),
@@ -1289,6 +1300,8 @@ def _package_from_id(conn: sqlite3.Connection, pid: str) -> dict[str, Any] | Non
                 "content": m["content"],
                 "schemaId": m["schema_id"],
                 "verified": bool(m["verified"]),
+                "byteSize": m["byte_size"],
+                "scrambled": (m["kind"] == "structural"),
             }
             for m in members
         ],
@@ -2321,8 +2334,13 @@ def add_theme_values(
 
 
 def get_theme_values(
-    theme_id: str, category: str | None = None, limit: int = 500
+    theme_id: str, category: str | None = None, limit: int = 10_000
 ) -> list[dict[str, Any]]:
+    """
+    List theme values. Default limit is high enough for multi-category
+    browser UIs (100/category × many cats); pass a lower limit if needed.
+    """
+    lim = max(1, min(int(limit or 10_000), 20_000))
     conn = connect()
     try:
         if category:
@@ -2332,7 +2350,7 @@ def get_theme_values(
                 WHERE theme_id = ? AND category = ? COLLATE NOCASE
                 ORDER BY category, value LIMIT ?
                 """,
-                (theme_id, category, limit),
+                (theme_id, category, lim),
             ).fetchall()
         else:
             rows = conn.execute(
@@ -2340,7 +2358,7 @@ def get_theme_values(
                 SELECT id, category, value, weight FROM theme_values
                 WHERE theme_id = ? ORDER BY category, value LIMIT ?
                 """,
-                (theme_id, limit),
+                (theme_id, lim),
             ).fetchall()
         return [
             {

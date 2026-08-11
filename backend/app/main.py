@@ -8,7 +8,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Callable
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -1551,6 +1551,15 @@ class PackageMemberSaveAsBody(BaseModel):
     reinferFromContent: bool = True
 
 
+class PackageNestedPackBody(BaseModel):
+    """How to re-pack an expanded nested archive folder on generate."""
+
+    folderPath: str
+    packFormat: str | None = None  # tar | zip | tar.gz | original
+    packEnabled: bool | None = None
+    originalArchivePath: str | None = None
+
+
 @app.get("/api/packages")
 def packages_list():
     return db.list_packages()
@@ -1574,13 +1583,20 @@ def packages_estimate(package_id: str, recordCount: int = 1):
 
 
 @app.post("/api/packages/import")
-async def packages_import(files: list[UploadFile] = File(...)):
+async def packages_import(
+    files: list[UploadFile] = File(...),
+    nestedArchiveMode: str = Form("expand"),
+):
     """
-    Upload one archive (zip/tar/tar.gz) or multiple text files.
-    Nested archives expand into named folders. 2+ text files → Multifile schema.
+    Upload one archive (zip/tar/tar.gz), a folder tree, or multiple files.
+    Schema: xml/csv/txt/json/yaml/xlsx. Other files kept as structural (scrambled on generate).
+    nestedArchiveMode: expand (default) | opaque.
     """
     if not files:
         raise HTTPException(400, "No files uploaded")
+    mode = (nestedArchiveMode or "expand").lower().strip()
+    if mode not in ("expand", "opaque"):
+        mode = "expand"
     loaded: list[tuple[str, bytes]] = []
     total = 0
     for f in files:
@@ -1591,13 +1607,16 @@ async def packages_import(files: list[UploadFile] = File(...)):
         loaded.append((f.filename or "upload.bin", raw))
     try:
         if len(loaded) == 1:
-            result = package_svc.import_uploaded_archive(loaded[0][0], loaded[0][1])
+            result = package_svc.import_uploaded_archive(
+                loaded[0][0], loaded[0][1], nested_archive_mode=mode
+            )
         else:
-            result = package_svc.import_uploaded_files(loaded)
+            result = package_svc.import_uploaded_files(
+                loaded, nested_archive_mode=mode
+            )
     except Exception as e:
         raise HTTPException(400, f"Package import failed: {e}") from e
     return result
-
 
 @app.delete("/api/packages/{package_id}")
 def packages_delete(package_id: str):
@@ -1626,6 +1645,23 @@ def packages_update_member(package_id: str, body: PackageMemberUpdateBody):
             new_path=body.newPath,
             new_name=body.newName,
             content=body.content,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.patch("/api/packages/{package_id}/nested")
+def packages_update_nested(package_id: str, body: PackageNestedPackBody):
+    """Set re-pack format (tar/zip/tar.gz) or disable packing for a nested archive folder."""
+    if not db.get_package(package_id):
+        raise HTTPException(404, "Package not found")
+    try:
+        return package_svc.update_nested_pack(
+            package_id,
+            body.folderPath,
+            pack_format=body.packFormat,
+            pack_enabled=body.packEnabled,
+            original_archive_path=body.originalArchivePath,
         )
     except ValueError as e:
         raise HTTPException(400, str(e)) from e

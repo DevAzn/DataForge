@@ -2,11 +2,13 @@
 Package / multifile import + variant generate.
 
 Whole package = one record unit. Nested zip/tar/tar.gz expand into a folder
-named after the archive (extensions stripped). Generated variants are returned
-as archive bytes (not stored in SQLite — only layout + schemas + sample text).
+named after the archive (extensions stripped) unless opaque mode. Generated
+variants are returned as archive bytes (not stored in SQLite — only layout,
+schemas, design samples, and structural size metadata).
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import re
 import tarfile
@@ -20,20 +22,24 @@ from app.services import export_fmt, generator, infer
 
 MAX_TEXT = 25 * 1024 * 1024
 MAX_NEST = 6
+# Max scrambled structural size per file on generate (presence for ETL, not multi-GB blobs).
+MAX_STRUCTURAL_BYTES = 1 * 1024 * 1024
 
-# Product surface (import/edit): XML, CSV, TXT only.
-SUPPORTED_TEXT_EXTS = {".xml", ".csv", ".txt"}
-
-# Legacy extensions still recognized by detect_format helpers elsewhere; not imported as members.
-LEGACY_TEXT_EXTS = {
+# Schema members: infer + regenerate. Structural: path/name only, scrambled content on emit.
+SCHEMA_EXTS = {
+    ".xml",
+    ".csv",
+    ".txt",
     ".json",
     ".jsonl",
     ".ndjson",
     ".yml",
     ".yaml",
+    ".xlsx",
 }
-
-TEXT_EXTS = SUPPORTED_TEXT_EXTS | LEGACY_TEXT_EXTS
+SUPPORTED_TEXT_EXTS = SCHEMA_EXTS  # editable package members
+LEGACY_TEXT_EXTS: set[str] = set()  # kept for callers; package import no longer skips these
+TEXT_EXTS = SCHEMA_EXTS
 
 
 def now_iso() -> str:
@@ -91,27 +97,105 @@ def detect_nested_format(name: str) -> str | None:
     return None
 
 
-def is_supported_text(name: str) -> bool:
-    """Product-supported editable members: xml / csv / txt only."""
+def is_schema_file(name: str) -> bool:
+    """True if extension is a regenerable schema member (json/xml/txt/yaml/csv/xlsx)."""
     lower = name.lower()
-    return any(lower.endswith(e) for e in SUPPORTED_TEXT_EXTS)
+    return any(lower.endswith(e) for e in SCHEMA_EXTS)
+
+
+def is_supported_text(name: str) -> bool:
+    """Editable package members — all schema formats (binary xlsx content not text-edited)."""
+    return is_schema_file(name)
 
 
 def is_likely_text(name: str) -> bool:
-    """Backward-compat alias — product import uses supported extensions only."""
-    return is_supported_text(name)
+    """Backward-compat alias."""
+    return is_schema_file(name)
+
+
+def schema_format_from_name(name: str) -> str | None:
+    lower = (name or "").lower()
+    if lower.endswith(".xlsx"):
+        return "xlsx"
+    if lower.endswith((".jsonl", ".ndjson")):
+        return "json"
+    if lower.endswith(".json"):
+        return "json"
+    if lower.endswith((".yml", ".yaml")):
+        return "yaml"
+    if lower.endswith(".xml"):
+        return "xml"
+    if lower.endswith(".csv"):
+        return "csv"
+    if lower.endswith(".txt"):
+        return "txt"
+    return None
+
+
+def structural_format_label(name: str) -> str:
+    lower = (name or "").lower()
+    nest = detect_nested_format(name)
+    if nest:
+        return nest
+    if "." in lower:
+        return lower.rsplit(".", 1)[-1] or "binary"
+    return "binary"
+
+
+def clamp_structural_size(n: int) -> tuple[int, bool]:
+    size = max(0, int(n or 0))
+    if size > MAX_STRUCTURAL_BYTES:
+        return MAX_STRUCTURAL_BYTES, True
+    return size, False
+
+
+def scrambled_bytes(path: str, size: int, *, seed: int | None = None) -> bytes:
+    """
+    Random-looking bytes of exact `size` with no original content.
+    Deterministic when seed is provided (path + seed).
+    """
+    n = max(0, int(size or 0))
+    if n == 0:
+        return b""
+    if seed is None:
+        import os
+
+        return os.urandom(n)
+    # Expand a deterministic stream from seed+path
+    out = bytearray()
+    counter = 0
+    key = f"{seed}:{path}".encode("utf-8", errors="replace")
+    while len(out) < n:
+        block = hashlib.sha256(key + counter.to_bytes(4, "big")).digest()
+        out.extend(block)
+        counter += 1
+    return bytes(out[:n])
 
 
 def skip_reason_for_name(name: str, *, too_large: bool = False) -> str:
     if too_large:
         return "too large"
-    lower = name.lower()
-    if any(lower.endswith(e) for e in LEGACY_TEXT_EXTS):
-        return "unsupported format (xml/csv/txt only)"
     if detect_nested_format(name):
         return "archive expand failed"
-    return "unsupported format (xml/csv/txt only)"
+    return "unsupported or unreadable"
 
+
+def archive_ext_for_format(fmt: str) -> str:
+    f = (fmt or "zip").lower()
+    if f in ("tar.gz", "tgz"):
+        return ".tar.gz"
+    if f == "tar":
+        return ".tar"
+    return ".zip"
+
+
+def with_archive_extension(path: str, fmt: str) -> str:
+    """Rewrite leaf extension to match pack format (tar / zip / tar.gz)."""
+    p = normalize_path(path)
+    parent = dirname_posix(p)
+    stem = strip_archive_extensions(basename(p)) or "archive"
+    leaf = stem + archive_ext_for_format(fmt)
+    return join_path(parent, leaf) if parent else leaf
 
 def build_path_tree(paths: list[str]) -> list[dict[str, Any]]:
     """
@@ -212,16 +296,49 @@ def read_archive_bytes(raw: bytes, fmt: str) -> list[tuple[str, bytes]]:
     return read_tar_bytes(raw, gzip=(fmt == "tar.gz"))
 
 
+def _add_structural(
+    structural: list[dict[str, Any]],
+    warnings: list[str],
+    full: str,
+    content_len: int,
+    fmt_label: str,
+) -> None:
+    size, clamped = clamp_structural_size(content_len)
+    if clamped:
+        warnings.append(f"{full} (structural size clamped to {MAX_STRUCTURAL_BYTES})")
+    structural.append(
+        {
+            "path": full,
+            "byteSize": size,
+            "format": fmt_label or structural_format_label(full),
+        }
+    )
+
+
 def expand_files(
     files: list[tuple[str, bytes]],
     path_prefix: str,
     depth: int,
-    nested: list[dict[str, str]],
-    skipped: list[str],
+    nested: list[dict[str, Any]],
+    warnings: list[str],
+    structural: list[dict[str, Any]],
+    *,
+    nested_archive_mode: str = "expand",
 ) -> list[tuple[str, bytes]]:
+    """
+    Classify tree into schema candidates (returned with bytes) and structural
+    placeholders (size only). Nested archives expand or stay opaque per mode.
+    """
+    mode = (nested_archive_mode or "expand").lower().strip()
+    if mode not in ("expand", "opaque"):
+        mode = "expand"
     if depth > MAX_NEST:
-        for p, _ in files:
-            skipped.append(join_path(path_prefix, p))
+        for p, content in files:
+            full = join_path(path_prefix, p)
+            warnings.append(f"{full} (nest depth exceeded)")
+            _add_structural(
+                structural, warnings, full, len(content), structural_format_label(p)
+            )
         return []
     result: list[tuple[str, bytes]] = []
     for rel, content in files:
@@ -229,32 +346,52 @@ def expand_files(
         name = basename(rel)
         nest_fmt = detect_nested_format(name)
         if nest_fmt:
+            if mode == "opaque":
+                _add_structural(structural, warnings, full, len(content), nest_fmt)
+                continue
             folder_name = strip_archive_extensions(name)
-            folder_path = join_path(path_prefix, join_path(dirname_posix(rel), folder_name))
+            folder_path = join_path(
+                path_prefix, join_path(dirname_posix(rel), folder_name)
+            )
             nested.append(
                 {
                     "folderPath": folder_path,
                     "originalArchivePath": full,
                     "format": nest_fmt,
+                    "packFormat": nest_fmt,
+                    "packEnabled": True,
                 }
             )
             try:
                 inner = read_archive_bytes(content, nest_fmt)
                 result.extend(
-                    expand_files(inner, folder_path, depth + 1, nested, skipped)
+                    expand_files(
+                        inner,
+                        folder_path,
+                        depth + 1,
+                        nested,
+                        warnings,
+                        structural,
+                        nested_archive_mode=mode,
+                    )
                 )
             except Exception:
-                skipped.append(full)
+                warnings.append(f"{full} (archive expand failed)")
+                _add_structural(structural, warnings, full, len(content), nest_fmt)
             continue
-        if not is_supported_text(name):
-            skipped.append(f"{full} ({skip_reason_for_name(name)})")
+        if not is_schema_file(name):
+            _add_structural(
+                structural, warnings, full, len(content), structural_format_label(name)
+            )
             continue
         if len(content) > MAX_TEXT:
-            skipped.append(f"{full} ({skip_reason_for_name(name, too_large=True)})")
+            warnings.append(f"{full} (schema file too large; kept structural)")
+            _add_structural(
+                structural, warnings, full, len(content), structural_format_label(name)
+            )
             continue
         result.append((full, content))
     return result
-
 
 def _clone_rows(rows: list[dict]) -> list[dict]:
     out = []
@@ -279,6 +416,43 @@ def _unique_multifile_name(base: str) -> str:
     return f"{preferred} ({n})"
 
 
+def _try_infer_schema_member(
+    path: str, raw: bytes
+) -> dict[str, Any] | None:
+    """Return pending schema item or None (caller may keep as structural)."""
+    file_name = basename(path)
+    lower = file_name.lower()
+    if lower.endswith(".xlsx"):
+        try:
+            inferred = infer.infer_schema_from_xlsx(file_name, raw)
+            return {
+                "path": path,
+                "fileName": file_name,
+                "text": "",  # binary workbook — sample lives in schema fields
+                "format": "xlsx",
+                "root": inferred["schema"]["root"],
+                "historySamples": inferred.get("historySamples") or [],
+            }
+        except Exception:
+            return None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("utf-8", errors="replace")
+    try:
+        inferred = infer.infer_schema_from_file(file_name, text)
+        return {
+            "path": path,
+            "fileName": file_name,
+            "text": text,
+            "format": inferred["format"],
+            "root": inferred["schema"]["root"],
+            "historySamples": inferred.get("historySamples") or [],
+        }
+    except Exception:
+        return None
+
+
 def import_package_from_bytes(
     *,
     package_name: str,
@@ -286,13 +460,24 @@ def import_package_from_bytes(
     source_kind: str = "files",
     outer_format: str = "folder",
     outer_extension: str | None = None,
+    nested_archive_mode: str = "expand",
 ) -> dict[str, Any]:
     """
-    file_entries: list of (relative_path, bytes) — either archive members or multi-upload.
+    file_entries: list of (relative_path, bytes) — archive members or multi-upload.
+    Schema formats → text members + schemas. Other files → structural (size only).
     """
-    nested: list[dict[str, str]] = []
-    skipped: list[str] = []
-    expanded = expand_files(file_entries, "", 0, nested, skipped)
+    nested: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    structural_meta: list[dict[str, Any]] = []
+    expanded = expand_files(
+        file_entries,
+        "",
+        0,
+        nested,
+        warnings,
+        structural_meta,
+        nested_archive_mode=nested_archive_mode,
+    )
 
     package_id = str(uuid.uuid4())
     members: list[dict[str, Any]] = []
@@ -300,6 +485,7 @@ def import_package_from_bytes(
     pending: list[dict[str, Any]] = []
 
     for n in nested:
+        pack_fmt = n.get("packFormat") or n.get("format") or "zip"
         members.append(
             {
                 "id": str(uuid.uuid4()),
@@ -307,38 +493,48 @@ def import_package_from_bytes(
                 "name": basename(n["folderPath"]),
                 "kind": "nested_archive_folder",
                 "nestedArchivePath": n["originalArchivePath"],
-                "nestedArchiveFormat": n["format"],
+                "nestedArchiveFormat": n.get("format") or pack_fmt,
                 "verified": True,
             }
         )
+        n.setdefault("packFormat", pack_fmt)
+        n.setdefault("packEnabled", True)
 
     for path, raw in expanded:
-        file_name = basename(path)
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            text = raw.decode("utf-8", errors="replace")
-        try:
-            inferred = infer.infer_schema_from_file(file_name, text)
-            pending.append(
-                {
-                    "path": path,
-                    "fileName": file_name,
-                    "text": text,
-                    "format": inferred["format"],
-                    "root": inferred["schema"]["root"],
-                    "historySamples": inferred.get("historySamples") or [],
-                }
+        item = _try_infer_schema_member(path, raw)
+        if item:
+            pending.append(item)
+        else:
+            _add_structural(
+                structural_meta,
+                warnings,
+                path,
+                len(raw),
+                structural_format_label(path),
             )
-        except Exception:
-            skipped.append(path)
 
-    if not pending:
-        reasons = ", ".join(skipped[:12]) if skipped else "no supported files found"
-        more = f" (+{len(skipped) - 12} more)" if len(skipped) > 12 else ""
+    for s in structural_meta:
+        members.append(
+            {
+                "id": str(uuid.uuid4()),
+                "path": s["path"],
+                "name": basename(s["path"]),
+                "kind": "structural",
+                "format": s.get("format") or "binary",
+                "byteSize": int(s.get("byteSize") or 0),
+                "content": None,
+                "schemaId": None,
+                "verified": True,
+                "scrambled": True,
+            }
+        )
+
+    if not pending and not structural_meta and not nested:
+        reasons = ", ".join(warnings[:12]) if warnings else "no files found"
+        more = f" (+{len(warnings) - 12} more)" if len(warnings) > 12 else ""
         raise ValueError(
-            f"Package import produced no text members ({reasons}{more}). "
-            "Import XML/CSV/TXT files or a .tar / .tar.gz archive that contains them."
+            f"Package import produced no members ({reasons}{more}). "
+            "Import a folder, archive, or files (xml/csv/txt/json/yaml/xlsx and companions)."
         )
 
     is_multifile = len(pending) > 1
@@ -366,7 +562,6 @@ def import_package_from_bytes(
             "packageId": package_id if is_multifile else None,
         }
         saved = db.save_schema(schema_doc)
-        # harvest samples into history (ensure) — not generated files
         if item["historySamples"]:
             db.record_values(item["historySamples"], mode="ensure")
         members.append(
@@ -376,7 +571,7 @@ def import_package_from_bytes(
                 "name": item["fileName"],
                 "kind": "text",
                 "format": item["format"],
-                "content": item["text"],
+                "content": item["text"] if item["format"] != "xlsx" else None,
                 "schemaId": saved["id"],
                 "verified": False,
             }
@@ -384,7 +579,14 @@ def import_package_from_bytes(
         schemas[item["path"]] = saved
 
     members.sort(
-        key=lambda m: (0 if m["kind"] == "nested_archive_folder" else 1, m["path"])
+        key=lambda m: (
+            0
+            if m["kind"] == "nested_archive_folder"
+            else 1
+            if m["kind"] == "text"
+            else 2,
+            m["path"],
+        )
     )
 
     multifile_schema_id = None
@@ -413,7 +615,7 @@ def import_package_from_bytes(
                 "id": str(uuid.uuid4()),
                 "name": display,
                 "description": (
-                    f"Multifile package ({len(pending)} files): "
+                    f"Multifile package ({len(pending)} schema files): "
                     + ", ".join(p["path"] for p in pending)
                 ),
                 "root": multifile_root,
@@ -425,15 +627,19 @@ def import_package_from_bytes(
         multifile_schema_id = multi["id"]
         schemas["__multifile__"] = multi
 
+    # Structural-only: still a valid package for presence testing
+    if not pending and not is_multifile:
+        display = package_name or "Package"
+
     doc = {
         "id": package_id,
-        "name": display,
+        "name": display if pending else (package_name or "Package"),
         "sourceKind": source_kind,
         "outerFormat": outer_format,
         "outerExtension": outer_extension,
         "members": members,
         "nestedArchives": nested,
-        "skipped": skipped,
+        "skipped": warnings,  # warnings / clamp notes (compat field name)
         "multifileSchemaId": multifile_schema_id,
         "createdAt": now_iso(),
         "updatedAt": now_iso(),
@@ -441,19 +647,22 @@ def import_package_from_bytes(
     saved_pkg = db.save_package(doc)
     return {**saved_pkg, "schemas": schemas}
 
-
-def import_uploaded_archive(file_name: str, raw: bytes) -> dict[str, Any]:
+def import_uploaded_archive(
+    file_name: str,
+    raw: bytes,
+    *,
+    nested_archive_mode: str = "expand",
+) -> dict[str, Any]:
     outer_fmt, outer_ext = outer_from_name(file_name)
     name = strip_archive_extensions(file_name)
     if outer_fmt == "folder":
-        # single loose file
-        if not is_likely_text(file_name):
-            raise ValueError("Unsupported file type")
+        # single loose file (schema or structural)
         return import_package_from_bytes(
             package_name=name,
             file_entries=[(basename(file_name), raw)],
             source_kind="files",
             outer_format="folder",
+            nested_archive_mode=nested_archive_mode,
         )
     nest = "zip" if outer_fmt == "zip" else "tar" if outer_fmt == "tar" else "tar.gz"
     entries = read_archive_bytes(raw, nest)
@@ -463,8 +672,8 @@ def import_uploaded_archive(file_name: str, raw: bytes) -> dict[str, Any]:
         source_kind="archive",
         outer_format=outer_fmt,
         outer_extension=outer_ext,
+        nested_archive_mode=nested_archive_mode,
     )
-
 
 def estimate_output(package: dict[str, Any], record_count: int) -> dict[str, Any]:
     """
@@ -483,41 +692,50 @@ def estimate_output(package: dict[str, Any], record_count: int) -> dict[str, Any
         return False
 
     text_members = [m for m in members if m.get("kind") == "text"]
+    structural_members = [m for m in members if m.get("kind") == "structural"]
     text_count = len(text_members)
+    structural_count = len(structural_members)
     top_level_text = sum(1 for m in text_members if not under_nested(m.get("path") or ""))
+    top_level_structural = sum(
+        1 for m in structural_members if not under_nested(m.get("path") or "")
+    )
     nested_archive_count = len(nested)
-    # After re-pack: top-level text files + one file per nested archive
-    top_level_entries = top_level_text + nested_archive_count
+    packed_nested = sum(
+        1 for x in nested if x.get("packEnabled", True) is not False
+    )
+    # After re-pack: top-level files + one file per nested archive that packs
+    top_level_entries = top_level_text + top_level_structural + packed_nested
     outer_format = package.get("outerFormat") or "zip"
 
     return {
         "recordCount": n,
         "recordMeans": "one full package variant",
         "textFilesPerPackage": text_count,
+        "structuralFilesPerPackage": structural_count,
         "topLevelTextFilesPerPackage": top_level_text,
         "nestedArchivesPerPackage": nested_archive_count,
         "topLevelEntriesPerPackage": top_level_entries,
         "outerFormat": outer_format,
         "estimatedOuterPackages": n,
-        # Content files regenerated across all variants (text members × N)
         "estimatedLogicalContentFiles": n * text_count,
-        # Top-level entries inside all outer packages (text + re-packed nested archives)
         "estimatedTopLevelEntriesTotal": n * top_level_entries,
-        # UI download: one bundle (tar.gz when N>1 for space, else zip)
         "downloadBundles": 1,
         "downloadContainsPackages": n,
         "downloadBundleFormat": "tar.gz" if n > 1 else "zip",
         "summary": (
             f"{n} package variant(s) × {top_level_entries} top-level entr"
             f"{'y' if top_level_entries == 1 else 'ies'} "
-            f"({text_count} text file(s) regenerated per package) "
-            f"≈ {n * text_count} content file(s) + {n * nested_archive_count} nested archive(s); "
+            f"({text_count} schema file(s) + {structural_count} structural; "
+            f"{packed_nested} nested pack(s)); "
             f"download: 1 {'tar.gz' if n > 1 else 'ZIP'} with {n} package(s)"
         ),
     }
 
-
-def import_uploaded_files(files: list[tuple[str, bytes]]) -> dict[str, Any]:
+def import_uploaded_files(
+    files: list[tuple[str, bytes]],
+    *,
+    nested_archive_mode: str = "expand",
+) -> dict[str, Any]:
     """
     Multi-file upload (flat names or relative paths from folder picker)
     or single archive.
@@ -526,7 +744,9 @@ def import_uploaded_files(files: list[tuple[str, bytes]]) -> dict[str, Any]:
         name, raw = files[0]
         outer_fmt, _ = outer_from_name(name)
         if outer_fmt != "folder":
-            return import_uploaded_archive(name, raw)
+            return import_uploaded_archive(
+                name, raw, nested_archive_mode=nested_archive_mode
+            )
     # Preserve nested relative paths (webkitdirectory / multi-select with paths).
     entries = [(normalize_path(n) or basename(n), b) for n, b in files]
     # Common root folder name when all paths share a top segment
@@ -541,8 +761,8 @@ def import_uploaded_files(files: list[tuple[str, bytes]]) -> dict[str, Any]:
         file_entries=entries,
         source_kind="files",
         outer_format="folder",
+        nested_archive_mode=nested_archive_mode,
     )
-
 
 def _write_archive_bytes(
     fmt: str, entries: list[tuple[str, bytes | str]]
@@ -617,19 +837,23 @@ def emit_variant_bytes(
     *,
     outer_format: str,
     outer_extension: str | None,
-    text_entries: list[tuple[str, str]],
-    nested: list[dict[str, str]],
+    text_entries: list[tuple[str, str | bytes]],
+    nested: list[dict[str, Any]],
     package_name: str,
     index: int,
 ) -> tuple[str, bytes]:
-    """Return (file_name, archive_or_file_bytes)."""
+    """Return (file_name, archive_or_file_bytes). Preserves nested pack formats."""
     files: dict[str, bytes | str] = {p: c for p, c in text_entries}
     nested_sorted = sorted(
-        nested, key=lambda n: -len(n.get("folderPath", "").split("/"))
+        nested, key=lambda n: -len((n.get("folderPath") or "").split("/"))
     )
 
     for nest in nested_sorted:
         folder = nest.get("folderPath") or ""
+        pack_enabled = nest.get("packEnabled", True) is not False
+        if not pack_enabled:
+            # Leave children as loose paths under the folder (no archive file).
+            continue
         children: list[tuple[str, bytes | str]] = []
         for p, content in list(files.items()):
             if _is_under(p, folder) and p != folder:
@@ -638,9 +862,18 @@ def emit_variant_bytes(
             if _is_under(p, folder) and p != folder:
                 del files[p]
         files.pop(folder, None)
-        nest_fmt = nest.get("format") or "zip"
+        # packFormat overrides original format; default = original archive type
+        nest_fmt = (
+            nest.get("packFormat") or nest.get("format") or "zip"
+        ).lower().strip()
+        if nest_fmt in ("tgz",):
+            nest_fmt = "tar.gz"
+        if nest_fmt not in ("tar", "tar.gz", "zip"):
+            nest_fmt = "zip"
         nested_bytes = _write_archive_bytes(nest_fmt, children)
-        orig = nest.get("originalArchivePath") or f"{folder}.zip"
+        orig = nest.get("originalArchivePath") or f"{folder}{archive_ext_for_format(nest_fmt)}"
+        # Keep emit path extension aligned with pack format
+        orig = with_archive_extension(orig, nest_fmt)
         files[orig] = nested_bytes
 
     flat = list(files.items())
@@ -653,28 +886,30 @@ def emit_variant_bytes(
             path, content = flat[0]
             data = content if isinstance(content, bytes) else content.encode("utf-8")
             base = basename(path) or f"{safe}_{pad}.txt"
-            # Keep original name; for multi-variant distinguish by prefix
             stem, dot, ext = base.rpartition(".")
             if dot:
                 out_name = f"{stem}_{pad}.{ext}"
             else:
                 out_name = f"{base}_{pad}"
             return out_name, data
-        # Fall through to zip folder if unexpected multi-file
         outer_format = "folder"
 
     if outer_format == "folder":
-        # Zip of folder tree as package_NNNN/
         entries = [(f"{safe}_{pad}/{p}", c) for p, c in flat]
         return f"{safe}_{pad}.zip", _write_archive_bytes("zip", entries)
 
     ext = outer_extension or (
         ".tar.gz" if outer_format == "tar.gz" else ".tar" if outer_format == "tar" else ".zip"
     )
-    pack_fmt = "tar.gz" if outer_format == "tar.gz" else outer_format if outer_format in ("tar", "zip") else "zip"
+    pack_fmt = (
+        "tar.gz"
+        if outer_format == "tar.gz"
+        else outer_format
+        if outer_format in ("tar", "zip")
+        else "zip"
+    )
     name = f"{safe}_{pad}{ext}"
     return name, _write_archive_bytes(pack_fmt, flat)
-
 
 def generate_package_variants(
     package_id: str,
@@ -701,9 +936,14 @@ def generate_package_variants(
     hydrated = db.get_package_hydrated(package_id)
     if not hydrated:
         raise ValueError("Package not found")
-    text_members = [m for m in hydrated["members"] if m.get("kind") == "text" and m.get("schemaId")]
-    if not text_members:
-        raise ValueError("Package has no text members with schemas")
+    text_members = [
+        m for m in hydrated["members"] if m.get("kind") == "text" and m.get("schemaId")
+    ]
+    structural_members = [
+        m for m in hydrated["members"] if m.get("kind") == "structural"
+    ]
+    if not text_members and not structural_members:
+        raise ValueError("Package has no members to generate")
 
     count = max(1, min(int(record_count or 1), 10_000))
     settings = settings or db.get_settings()
@@ -712,12 +952,16 @@ def generate_package_variants(
     hist_lookup = history_lookup or (lambda _k: [])
     cust_lookup = custom_lookup or (lambda _k: [])
 
+    # Bare single-file only when exactly one schema member and no structural companions
+    leaf_count = len(text_members) + len(structural_members)
     v_outer, v_ext = resolve_variant_format(
         hydrated.get("outerFormat") or "folder",
         hydrated.get("outerExtension"),
         output_format,
-        text_member_count=len(text_members),
+        text_member_count=leaf_count,
     )
+    if v_outer == "file" and leaf_count != 1:
+        v_outer, v_ext = "folder", None
 
     # Prepare schemas with modes
     prepared = []
@@ -735,18 +979,23 @@ def generate_package_variants(
                 "format": m.get("format") or schema.get("sourceFormat") or "xml",
             }
         )
-    if not prepared:
+    if not prepared and not structural_members:
         raise ValueError("No valid member schemas available for this package")
 
     # Generate all variants into memory as named files
     variant_files: list[tuple[str, bytes]] = []
-    seed_used = seed
+    seed_used = seed if seed is not None else 0
     theme_hits_total = 0
 
     # Shared unique sets across variants via one generator context per member
     contexts = []
     for p in prepared:
-        from app.services.generator import Generator, build_tied_template, merge_missing_tied, apply_tied
+        from app.services.generator import (
+            Generator,
+            build_tied_template,
+            merge_missing_tied,
+            apply_tied,
+        )
 
         root = p["schema"].get("root") or []
         gen = Generator(
@@ -765,7 +1014,7 @@ def generate_package_variants(
         contexts.append({**p, "gen": gen, "template": template})
 
     for i in range(count):
-        text_entries: list[tuple[str, str]] = []
+        file_entries: list[tuple[str, str | bytes]] = []
         for ctx in contexts:
             rec = ctx["gen"].one_record()
             if ctx["template"] is not None:
@@ -783,20 +1032,30 @@ def generate_package_variants(
                 xml_record_tag=settings.get("xmlRecordTag") or "record",
                 xml_self_closing=settings.get("xmlSelfClosing", True) is not False,
             )
-            text_entries.append((ctx["member"]["path"], content))
+            file_entries.append((ctx["member"]["path"], content))
             theme_hits_total += ctx["gen"].stats.get("themeHits", 0)
+
+        # Structural companions: same size, no original content
+        for sm in structural_members:
+            path = sm.get("path") or sm.get("name") or "file.bin"
+            size = int(sm.get("byteSize") or 0)
+            file_entries.append(
+                (
+                    path,
+                    scrambled_bytes(path, size, seed=(seed_used or 0) + i),
+                )
+            )
 
         vname, vbytes = emit_variant_bytes(
             outer_format=v_outer,
             outer_extension=v_ext,
-            text_entries=text_entries,
+            text_entries=file_entries,
             nested=hydrated.get("nestedArchives") or [],
             package_name=hydrated.get("name") or "package",
             index=i + 1,
         )
         variant_files.append((vname, vbytes))
-
-    if record_history and not ci_mode:
+    if record_history and not ci_mode and contexts:
         for ctx in contexts:
             buf = ctx["gen"].history_buffer
             if buf:
@@ -992,7 +1251,7 @@ def update_package_member(
         raise ValueError(f"Member not found: {member_path}")
     m = dict(members[idx])
     if m.get("kind") != "text":
-        raise ValueError("Only text members can be renamed or edited")
+        raise ValueError("Only schema (text) members can be renamed or edited")
 
     target_path = normalize_path(new_path) if new_path is not None else m["path"]
     if not target_path:
@@ -1001,14 +1260,18 @@ def update_package_member(
         # Rename leaf while keeping parent dirs when new_path not fully supplied
         parent = dirname_posix(target_path)
         leaf = basename(new_name) or new_name
-        if not is_supported_text(leaf):
-            raise ValueError("File name must end with .xml, .csv, or .txt")
+        if not is_schema_file(leaf):
+            raise ValueError(
+                "File name must end with .xml, .csv, .txt, .json, .yaml, or .xlsx"
+            )
         target_path = join_path(parent, leaf) if parent else leaf
         m["name"] = leaf
     elif new_path is not None:
         leaf = basename(target_path)
-        if not is_supported_text(leaf):
-            raise ValueError("File name must end with .xml, .csv, or .txt")
+        if not is_schema_file(leaf):
+            raise ValueError(
+                "File name must end with .xml, .csv, .txt, .json, .yaml, or .xlsx"
+            )
         m["name"] = leaf
 
     if target_path != member_path:
@@ -1020,18 +1283,15 @@ def update_package_member(
 
     content_changed = content is not None
     if content is not None:
+        if (m.get("format") or "").lower() == "xlsx":
+            raise ValueError("XLSX members are not text-editable; re-import to change design")
         if len(content.encode("utf-8")) > MAX_TEXT:
             raise ValueError("Content too large")
         m["content"] = content
         # Keep format in sync with extension when renamed
-        lower = (m.get("name") or "").lower()
-        if lower.endswith(".xml"):
-            m["format"] = "xml"
-        elif lower.endswith(".csv"):
-            m["format"] = "csv"
-        elif lower.endswith(".txt"):
-            m["format"] = "txt"
-
+        fmt = schema_format_from_name(m.get("name") or "")
+        if fmt:
+            m["format"] = fmt
     members[idx] = m
     pkg["members"] = members
 
@@ -1067,6 +1327,71 @@ def update_package_member(
                     schema["name"] = re.sub(r"\.[^.]+$", "", m["name"]) or m["name"]
             db.save_schema(schema)
 
+    saved = db.save_package(pkg)
+    return db.get_package_hydrated(saved["id"])  # type: ignore[return-value]
+
+
+def update_nested_pack(
+    package_id: str,
+    folder_path: str,
+    *,
+    pack_format: str | None = None,
+    pack_enabled: bool | None = None,
+    original_archive_path: str | None = None,
+) -> dict[str, Any]:
+    """
+    Edit how an expanded nested archive directory is re-packed on generate.
+    pack_format: tar | zip | tar.gz | original (alias for stored format)
+    pack_enabled: False leaves children as loose files under the folder.
+    """
+    pkg = db.get_package(package_id)
+    if not pkg:
+        raise ValueError("Package not found")
+    folder = normalize_path(folder_path)
+    nested = list(pkg.get("nestedArchives") or [])
+    idx = next(
+        (i for i, n in enumerate(nested) if normalize_path(n.get("folderPath") or "") == folder),
+        None,
+    )
+    if idx is None:
+        raise ValueError(f"Nested archive folder not found: {folder_path}")
+    n = dict(nested[idx])
+    original_fmt = (n.get("format") or "zip").lower()
+    if pack_format is not None:
+        pf = pack_format.lower().strip()
+        if pf in ("original", "itself", ""):
+            pf = original_fmt
+        if pf in ("tgz",):
+            pf = "tar.gz"
+        if pf not in ("tar", "tar.gz", "zip"):
+            raise ValueError("packFormat must be tar, zip, tar.gz, or original")
+        n["packFormat"] = pf
+        # Align emit path extension with pack format
+        orig = n.get("originalArchivePath") or f"{folder}{archive_ext_for_format(pf)}"
+        n["originalArchivePath"] = with_archive_extension(orig, pf)
+    if pack_enabled is not None:
+        n["packEnabled"] = bool(pack_enabled)
+    if original_archive_path is not None:
+        ap = normalize_path(original_archive_path)
+        if not ap:
+            raise ValueError("Invalid archive path")
+        pf = n.get("packFormat") or n.get("format") or "zip"
+        n["originalArchivePath"] = with_archive_extension(ap, pf)
+    nested[idx] = n
+    pkg["nestedArchives"] = nested
+
+    # Keep nested_archive_folder member path pointer in sync
+    members = list(pkg.get("members") or [])
+    for i, m in enumerate(members):
+        if m.get("kind") == "nested_archive_folder" and normalize_path(
+            m.get("path") or ""
+        ) == folder:
+            mm = dict(m)
+            mm["nestedArchivePath"] = n.get("originalArchivePath")
+            mm["nestedArchiveFormat"] = n.get("packFormat") or n.get("format")
+            members[i] = mm
+            break
+    pkg["members"] = members
     saved = db.save_package(pkg)
     return db.get_package_hydrated(saved["id"])  # type: ignore[return-value]
 

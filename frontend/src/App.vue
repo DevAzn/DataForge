@@ -13,7 +13,7 @@ import {
 import BrandIcon from './components/BrandIcon.vue'
 import AppDialog from './components/AppDialog.vue'
 import FieldValuesCenter from './components/FieldValuesCenter.vue'
-import ValueUploadPanel from './components/ValueUploadPanel.vue'
+import ThemeValuesCenter from './components/ThemeValuesCenter.vue'
 import {
   buildSelfClosingMap,
   insertAsChild,
@@ -3508,9 +3508,10 @@ async function deleteTheme(theme) {
 }
 
 async function openThemeValuesEditor(theme, categoryHint) {
+  // Empty category → Overview cards; explicit hint (Field settings) opens that pool
   themeEditor.value = {
     theme,
-    category: categoryHint || 'names',
+    category: categoryHint ? String(categoryHint) : '',
     bulk: '',
     values: [],
     stats: [],
@@ -3527,20 +3528,11 @@ async function loadThemeEditorValues() {
   if (!themeEditor.value?.theme) return
   themeEditor.value = { ...themeEditor.value, loading: true }
   try {
-    const cat = (themeEditor.value.category || '').trim()
-    const res = await api.getThemeValues(
-      themeEditor.value.theme.id,
-      cat || undefined
-    )
+    // Load all values for the theme so overview cards + category switches are snappy
+    const res = await api.getThemeValues(themeEditor.value.theme.id)
     // API returns { values, categories, count } (legacy list still handled)
     const values = Array.isArray(res) ? res : res.values || []
     const stats = Array.isArray(res) ? [] : res.categories || []
-    let filtered = values
-    if (cat) {
-      filtered = values.filter(
-        (v) => String(v.category || '').toLowerCase() === cat.toLowerCase()
-      )
-    }
     // Drop local stubs once the category exists in DB stats
     const dbCats = new Set(stats.map((s) => String(s.category).toLowerCase()))
     const localCategories = (themeEditor.value.localCategories || []).filter(
@@ -3548,7 +3540,7 @@ async function loadThemeEditorValues() {
     )
     themeEditor.value = {
       ...themeEditor.value,
-      values: filtered,
+      values,
       stats,
       localCategories,
       loading: false
@@ -3561,19 +3553,22 @@ async function loadThemeEditorValues() {
 
 function themeCatStat(category) {
   const stats = themeEditor.value?.stats || []
-  const hit = stats.find(
-    (s) => String(s.category).toLowerCase() === String(category || '').toLowerCase()
-  )
-  return (
-    hit || {
-      category,
-      count: themeEditor.value?.values?.length || 0,
-      limit: THEME_CAT_LIMIT,
-      warnAt: THEME_CAT_WARN_AT,
-      nearLimit: false,
-      full: false
-    }
-  )
+  const cat = String(category || '').toLowerCase()
+  const hit = stats.find((s) => String(s.category || '').toLowerCase() === cat)
+  if (hit) return hit
+  const count = cat
+    ? (themeEditor.value?.values || []).filter(
+        (v) => String(v.category || '').toLowerCase() === cat
+      ).length
+    : 0
+  return {
+    category,
+    count,
+    limit: THEME_CAT_LIMIT,
+    warnAt: THEME_CAT_WARN_AT,
+    nearLimit: count >= THEME_CAT_WARN_AT,
+    full: count >= THEME_CAT_LIMIT
+  }
 }
 
 /** Chips: DB categories + empty local ones the user just created. */
@@ -3663,8 +3658,9 @@ async function commitCreateCategory() {
 
 function selectThemeCategory(name) {
   if (!themeEditor.value) return
-  themeEditor.value = { ...themeEditor.value, category: name, bulk: '' }
-  void loadThemeEditorValues()
+  // Values already loaded for all categories — switch filter without full reload
+  themeEditor.value = { ...themeEditor.value, category: name || '', bulk: '' }
+  cancelInlineValueEdit()
 }
 
 /** Delete a theme category pool (all values) or a local empty chip. */
@@ -4007,14 +4003,48 @@ const fieldThemeCategoryOptions = computed(() => {
   return out
 })
 
-const PACKAGE_SUPPORTED_EXTS = ['.xml', '.csv', '.txt']
+const PACKAGE_SUPPORTED_EXTS = [
+  '.xml',
+  '.csv',
+  '.txt',
+  '.json',
+  '.jsonl',
+  '.ndjson',
+  '.yml',
+  '.yaml',
+  '.xlsx'
+]
 
 function isPackageSupportedMember(m) {
   if (!m || m.kind !== 'text') return false
   const fmt = (m.format || '').toLowerCase()
-  if (fmt === 'xml' || fmt === 'csv' || fmt === 'txt') return true
+  if (
+    fmt === 'xml' ||
+    fmt === 'csv' ||
+    fmt === 'txt' ||
+    fmt === 'json' ||
+    fmt === 'yaml' ||
+    fmt === 'xlsx'
+  ) {
+    // xlsx: schema-backed but not text-editable in the package pane
+    if (fmt === 'xlsx') return false
+    return true
+  }
+  const name = (m.name || m.path || '').toLowerCase()
+  if (name.endsWith('.xlsx')) return false
+  return PACKAGE_SUPPORTED_EXTS.some((e) => name.endsWith(e))
+}
+
+function isPackageSchemaMember(m) {
+  if (!m || m.kind !== 'text') return false
+  const fmt = (m.format || '').toLowerCase()
+  if (['xml', 'csv', 'txt', 'json', 'yaml', 'xlsx'].includes(fmt)) return true
   const name = (m.name || m.path || '').toLowerCase()
   return PACKAGE_SUPPORTED_EXTS.some((e) => name.endsWith(e))
+}
+
+function isPackageStructuralMember(m) {
+  return !!(m && m.kind === 'structural')
 }
 
 /** Build nested tree nodes from flat member paths (explorer). */
@@ -4101,6 +4131,9 @@ const packageExplorerRows = computed(() => {
   return rows
 })
 
+/** expand | opaque — nested archives inside package imports */
+const packageNestedArchiveMode = ref('expand')
+
 async function onPackageImport(ev) {
   const files = Array.from(ev.target.files || [])
   ev.target.value = ''
@@ -4108,19 +4141,24 @@ async function onPackageImport(ev) {
   packageWorking.value = true
   errorMsg.value = ''
   try {
-    const res = await api.importPackage(files)
+    const res = await api.importPackage(files, {
+      nestedArchiveMode: packageNestedArchiveMode.value || 'expand'
+    })
     activePackage.value = res
     packageFieldModes.value = {}
     packageTreeExpanded.value = {}
     packageMemberPath.value =
       res.members?.find((m) => m.kind === 'text' && isPackageSupportedMember(m))?.path ||
       res.members?.find((m) => m.kind === 'text')?.path ||
+      res.members?.find((m) => m.kind === 'structural')?.path ||
       null
     selectPackageMember(packageMemberPath.value)
     sidebar.value = 'packages'
     const multi = res.multifileSchemaId ? ' · Multifile preview schema saved' : ''
     const skipN = res.skipped?.length || 0
-    statusMsg.value = `Package “${res.name}” · ${res.members?.filter((x) => x.kind === 'text').length || 0} text · nested ${res.nestedArchives?.length || 0} · skipped ${skipN}${multi}`
+    const nText = res.members?.filter((x) => x.kind === 'text').length || 0
+    const nStruct = res.members?.filter((x) => x.kind === 'structural').length || 0
+    statusMsg.value = `Package “${res.name}” · ${nText} schema · ${nStruct} structural · nested ${res.nestedArchives?.length || 0} · warnings ${skipN}${multi}`
     await refreshLibraryLists()
     await refreshStatusOnly()
     await refreshPackageEstimate()
@@ -4245,13 +4283,38 @@ function selectPackageMember(path) {
     return
   }
   if (m.kind === 'nested_archive_folder') {
-    packagePreview.value = `// Nested archive folder → re-packs to ${m.nestedArchivePath}\n// format: ${m.nestedArchiveFormat}`
+    const nest = (activePackage.value?.nestedArchives || []).find(
+      (n) => n.folderPath === m.path
+    )
+    const packFmt = nest?.packFormat || nest?.format || m.nestedArchiveFormat || 'zip'
+    const enabled = nest?.packEnabled !== false
+    packagePreview.value =
+      `// Nested archive folder → re-packs to ${m.nestedArchivePath || nest?.originalArchivePath || '?'}\n` +
+      `// original: ${nest?.format || m.nestedArchiveFormat || '?'} · pack as: ${enabled ? packFmt : 'none (loose files)'}\n` +
+      `// Use Pack controls below to change tar / zip / tar.gz for ETL output.`
+    packageEditContent.value = ''
+    packageEditName.value = m.name || ''
+    return
+  }
+  if (isPackageStructuralMember(m)) {
+    const n = m.byteSize != null ? m.byteSize : '?'
+    packagePreview.value =
+      `// Structural placeholder · ${n} bytes · no original content\n` +
+      `// Path kept for ETL presence tests; generate emits scrambled bytes of this size.`
+    packageEditContent.value = ''
+    packageEditName.value = m.name || ''
+    return
+  }
+  if ((m.format || '').toLowerCase() === 'xlsx' || (m.name || '').toLowerCase().endsWith('.xlsx')) {
+    packagePreview.value =
+      `// XLSX schema member · not text-editable here\n` +
+      `// Generate produces a synthetic workbook from the inferred columns.`
     packageEditContent.value = ''
     packageEditName.value = m.name || ''
     return
   }
   if (!isPackageSupportedMember(m)) {
-    packagePreview.value = `// Unsupported for edit (${m.format || m.name}). Supported: xml, csv, txt.`
+    packagePreview.value = `// Not editable (${m.format || m.name}). Schema: xml, csv, txt, json, yaml; xlsx is generate-only.`
     packageEditContent.value = ''
     packageEditName.value = m.name || ''
     return
@@ -4260,6 +4323,71 @@ function selectPackageMember(path) {
   packageEditContent.value = m.content || ''
   packageEditName.value = m.name || ''
 }
+
+const selectedNestedPack = computed(() => {
+  const m = selectedPackageMember.value
+  if (!m || m.kind !== 'nested_archive_folder' || !activePackage.value) return null
+  const nest = (activePackage.value.nestedArchives || []).find((n) => n.folderPath === m.path)
+  if (!nest) {
+    return {
+      folderPath: m.path,
+      format: m.nestedArchiveFormat || 'zip',
+      packFormat: m.nestedArchiveFormat || 'zip',
+      packEnabled: true,
+      originalArchivePath: m.nestedArchivePath || ''
+    }
+  }
+  return {
+    folderPath: nest.folderPath,
+    format: nest.format || 'zip',
+    packFormat: nest.packFormat || nest.format || 'zip',
+    packEnabled: nest.packEnabled !== false,
+    originalArchivePath: nest.originalArchivePath || m.nestedArchivePath || ''
+  }
+})
+
+async function saveNestedPackSettings() {
+  const n = selectedNestedPack.value
+  if (!activePackage.value || !n?.folderPath) return
+  packageWorking.value = true
+  errorMsg.value = ''
+  try {
+    const res = await api.updatePackageNested(activePackage.value.id, {
+      folderPath: n.folderPath,
+      packFormat: nestedPackFormatDraft.value || n.packFormat || 'original',
+      packEnabled: nestedPackEnabledDraft.value,
+      originalArchivePath: nestedPackPathDraft.value || undefined
+    })
+    activePackage.value = res
+    statusMsg.value = `Nested pack updated · ${n.folderPath}`
+    await refreshPackageEstimate()
+    selectPackageMember(packageMemberPath.value)
+  } catch (e) {
+    errorMsg.value = e.message
+  } finally {
+    packageWorking.value = false
+  }
+}
+
+const nestedPackFormatDraft = ref('original')
+const nestedPackEnabledDraft = ref(true)
+const nestedPackPathDraft = ref('')
+
+watch(
+  selectedNestedPack,
+  (n) => {
+    if (!n) {
+      nestedPackFormatDraft.value = 'original'
+      nestedPackEnabledDraft.value = true
+      nestedPackPathDraft.value = ''
+      return
+    }
+    nestedPackFormatDraft.value = n.packFormat || n.format || 'original'
+    nestedPackEnabledDraft.value = n.packEnabled !== false
+    nestedPackPathDraft.value = n.originalArchivePath || ''
+  },
+  { immediate: true }
+)
 
 const selectedPackageMember = computed(() => {
   if (!activePackage.value || !packageMemberPath.value) return null
@@ -5188,17 +5316,34 @@ function tip(msg) {
             <div class="side-section-label import-pkg-label">
               {{ packageWorking ? 'Import package · Working…' : 'Import package' }}
             </div>
+            <label
+              class="muted tiny"
+              style="display: block; margin: 0 0 0.35rem"
+              :title="tip('Expand nested zip/tar so inner schema files are inferred; Opaque keeps the archive as a scrambled structural file')"
+            >
+              Nested archives
+              <select
+                v-model="packageNestedArchiveMode"
+                class="input"
+                style="display: block; width: 100%; margin-top: 0.15rem"
+                :disabled="packageWorking"
+                aria-label="Nested archive import mode"
+              >
+                <option value="expand">Expand (infer inner files)</option>
+                <option value="opaque">Keep as files (scrambled)</option>
+              </select>
+            </label>
             <div class="import-pkg-row">
               <label
                 class="drop drop-split"
-                :title="tip('Import a package from .tar / .tar.gz / .zip or multi-select XML, CSV, TXT files')"
+                :title="tip('Import .tar / .tar.gz / .zip or multi-select schema files (xml,csv,txt,json,yaml,xlsx). Other files kept as structural.')"
                 :class="{ disabled: packageWorking }"
               >
                 Archive or files
                 <input
                   type="file"
                   multiple
-                  accept=".zip,.tar,.tgz,.gz,.xml,.csv,.txt"
+                  accept=".zip,.tar,.tgz,.gz,.xml,.csv,.txt,.json,.yaml,.yml,.xlsx"
                   hidden
                   :disabled="packageWorking"
                   @change="onPackageImport"
@@ -5206,7 +5351,7 @@ function tip(msg) {
               </label>
               <label
                 class="drop drop-split"
-                :title="tip('Import a whole folder as a package; nested paths are kept')"
+                :title="tip('Import a whole folder as a package; nested paths kept 1:1; non-schema files become structural placeholders')"
                 :class="{ disabled: packageWorking }"
               >
                 Folder
@@ -6791,20 +6936,21 @@ function tip(msg) {
         <div v-if="!activePackage" class="empty-workspace empty-cta-panel">
           <p><strong>No package selected</strong></p>
           <p class="muted tiny">
-            Import an archive, files, or folder. Nested paths show in the explorer. Editable
-            members: XML, CSV, TXT. Variants download only — not stored in SQLite.
+            Import an archive, files, or folder for a 1:1 tree. Schema: XML, CSV, TXT, JSON, YAML,
+            XLSX. Other files stay as structural (scrambled on generate). Nested archives re-pack as
+            original tar/zip/tar.gz by default.
           </p>
           <div class="empty-cta-row">
             <label
               class="btn btn-primary pack-cta"
               :class="{ disabled: packageWorking }"
-              :title="tip('Import a package from .tar / .tar.gz / .zip or multi-select XML, CSV, TXT files')"
+              :title="tip('Import .tar / .tar.gz / .zip or multi-select schema + companion files')"
             >
               Import package
               <input
                 type="file"
                 multiple
-                accept=".zip,.tar,.tgz,.gz,.xml,.csv,.txt"
+                accept=".zip,.tar,.tgz,.gz,.xml,.csv,.txt,.json,.yaml,.yml,.xlsx"
                 hidden
                 :disabled="packageWorking"
                 @change="onPackageImport"
@@ -6845,14 +6991,22 @@ function tip(msg) {
                   class="pkg-tree-row file"
                   :class="{
                     active: packageMemberPath === row.path,
-                    unsupported: row.member && !isPackageSupportedMember(row.member)
+                    unsupported:
+                      row.member &&
+                      !isPackageSupportedMember(row.member) &&
+                      !isPackageSchemaMember(row.member),
+                    structural: row.member && isPackageStructuralMember(row.member)
                   }"
                   :style="{ paddingLeft: 0.35 + row.depth * 0.85 + 'rem' }"
                   :title="tip(row.path)"
                   @click="selectPackageMember(row.path)"
                 >
                   <span class="pkg-icon" aria-hidden="true">{{
-                    isPackageSupportedMember(row.member) ? '📄' : '📎'
+                    isPackageStructuralMember(row.member)
+                      ? '📎'
+                      : isPackageSchemaMember(row.member)
+                        ? '📄'
+                        : '📎'
                   }}</span>
                   <span class="pkg-name">{{ row.name }}</span>
                 </button>
@@ -6862,7 +7016,7 @@ function tip(msg) {
               v-if="(activePackage.skipped || []).length"
               class="muted tiny pkg-skipped"
             >
-              Skipped ({{ activePackage.skipped.length }}):
+              Warnings ({{ activePackage.skipped.length }}):
               {{ activePackage.skipped.slice(0, 6).join(', ')
               }}{{ activePackage.skipped.length > 6 ? '…' : '' }}
             </div>
@@ -6917,7 +7071,7 @@ function tip(msg) {
                 </button>
               </div>
               <label class="muted tiny" style="display: block; margin: 0 0.5rem">
-                Content (design sample — xml / csv / txt)
+                Content (design sample — xml / csv / txt / json / yaml)
                 <textarea
                   v-model="packageEditContent"
                   class="input pkg-content-editor mono"
@@ -6950,12 +7104,60 @@ function tip(msg) {
                 </div>
               </div>
             </template>
+            <template v-else-if="selectedNestedPack">
+              <pre class="code-mini" style="margin: 0.5rem 0.75rem">{{
+                packagePreview || '// nested pack'
+              }}</pre>
+              <div class="pkg-nested-pack" style="padding: 0.5rem 0.75rem">
+                <div class="muted tiny" style="margin-bottom: 0.35rem">
+                  <strong>Pack as</strong> (generate re-archives this directory for ETL)
+                </div>
+                <label class="chk" style="display: block; margin-bottom: 0.35rem">
+                  <input v-model="nestedPackEnabledDraft" type="checkbox" />
+                  Re-pack as archive on generate
+                </label>
+                <label class="muted tiny" style="display: block; margin-bottom: 0.35rem">
+                  Format
+                  <select
+                    v-model="nestedPackFormatDraft"
+                    class="input"
+                    style="display: block; width: 100%; max-width: 16rem"
+                    :disabled="!nestedPackEnabledDraft"
+                    aria-label="Nested pack format"
+                  >
+                    <option value="original">Original (from import)</option>
+                    <option value="tar">tar</option>
+                    <option value="zip">zip</option>
+                    <option value="tar.gz">tar.gz</option>
+                  </select>
+                </label>
+                <label class="muted tiny" style="display: block; margin-bottom: 0.35rem">
+                  Archive path
+                  <input
+                    v-model="nestedPackPathDraft"
+                    class="input mono"
+                    style="display: block; width: 100%"
+                    :disabled="!nestedPackEnabledDraft"
+                    aria-label="Nested archive emit path"
+                  />
+                </label>
+                <button
+                  type="button"
+                  class="btn btn-ghost"
+                  :disabled="packageWorking"
+                  @click="saveNestedPackSettings"
+                >
+                  Save pack settings
+                </button>
+              </div>
+            </template>
             <template v-else-if="selectedPackageMember">
               <pre class="code-mini" style="margin: 0.5rem 0.75rem">{{
                 packagePreview || '// not editable'
               }}</pre>
               <p class="muted tiny" style="margin: 0.5rem 0.75rem">
-                Only XML, CSV, and TXT members open in the editor.
+                Editable design samples: XML, CSV, TXT, JSON, YAML. XLSX is generate-only.
+                Structural files keep path/name only (scrambled on generate).
               </p>
             </template>
             <template v-else>
@@ -7104,226 +7306,44 @@ function tip(msg) {
             </div>
           </template>
           <template v-else-if="workspaceMode === 'datapacks'">
-            <div class="empty-workspace theme-pack-workspace" style="padding: 1rem; max-width: 640px">
+            <div
+              class="empty-workspace theme-pack-workspace"
+              :class="{ 'theme-pack-editor': !!themeEditor }"
+              :style="themeEditor ? undefined : { padding: '1rem', maxWidth: '640px' }"
+            >
               <template v-if="themeEditor">
-                <h3 style="margin-top: 0">
-                  {{ themeEditor.theme?.name }}
-                  <span class="muted tiny">· theme values</span>
-                </h3>
-                <p class="muted tiny">
-                  Categories are your buckets (names, ships, lightsabers…) and are saved as soon as
-                  you add them. Map a schema field’s <strong>Theme pack</strong> +
-                  <strong>Category</strong> to pull random values from this pool. Cap:
-                  <strong>{{ THEME_CAT_LIMIT }}</strong> values per category.
-                </p>
-
-                <div class="theme-cat-bar">
-                  <div class="theme-cat-chips">
-                    <div
-                      v-for="s in themeEditorCategoryChips"
-                      :key="'chip-' + s.category"
-                      class="theme-cat-chip-wrap"
-                    >
-                      <button
-                        type="button"
-                        class="btn btn-ghost tiny-btn"
-                        :class="{
-                          on:
-                            String(themeEditor.category || '').toLowerCase() ===
-                            String(s.category).toLowerCase(),
-                          warn: s.nearLimit,
-                          full: s.full
-                        }"
-                        :title="tip('Select category “' + s.category + '”')"
-                        @click="selectThemeCategory(s.category)"
-                      >
-                        {{ s.category }}
-                        <span class="muted">{{ s.count }}/{{ s.limit ?? THEME_CAT_LIMIT }}</span>
-                      </button>
-                      <button
-                        type="button"
-                        class="btn btn-outline-danger pack-action-sm theme-cat-del"
-                        :title="tip('Delete category “' + s.category + '” and all its values')"
-                        @click.stop="deleteThemeCategory(s.category)"
-                      >
-                        ×
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                <div class="theme-cat-create">
-                  <label class="muted tiny gen-field" style="flex: 1; min-width: 0">
-                    <span class="gen-field-label">Active category</span>
-                    <input
-                      v-model="themeEditor.category"
-                      class="input mono"
-                      list="theme-cat-list"
-                      placeholder="names, ships, lightsabers…"
-                      @change="onThemeEditorCategoryChange"
-                      @keydown.enter.prevent="onThemeEditorCategoryChange"
-                    />
-                    <datalist id="theme-cat-list">
-                      <option v-for="c in COMMON_THEME_CATS" :key="c" :value="c" />
-                      <option v-for="c in themeCategories" :key="'t-' + c" :value="c" />
-                      <option
-                        v-for="s in themeEditorCategoryChips"
-                        :key="'chip-dl-' + s.category"
-                        :value="s.category"
-                      />
-                    </datalist>
-                  </label>
-                  <button
-                    type="button"
-                    class="btn btn-primary"
-                    style="align-self: flex-end"
-                    :title="tip('Create a new value category under this theme (names, ships, …)')"
-                    @click="addThemeCategory"
-                  >
-                    + Add category
-                  </button>
-                  <button
-                    type="button"
-                    class="btn btn-outline-danger"
-                    style="align-self: flex-end"
-                    :disabled="!themeEditor.category"
-                    :title="
-                      tip(
-                        'Delete the active category and all of its values from this theme pack'
-                      )
-                    "
-                    @click="deleteThemeCategory(themeEditor.category)"
-                  >
-                    Delete category
-                  </button>
-                </div>
-
-                <p
-                  v-if="themeEditorCatStat.nearLimit || themeEditorCatStat.full"
-                  class="banner err"
-                  style="margin: 0.5rem 0"
-                  role="status"
-                >
-                  <template v-if="themeEditorCatStat.full">
-                    Category “{{ themeEditor.category }}” is full
-                    ({{ themeEditorCatStat.count }}/{{ THEME_CAT_LIMIT }}). Remove values before
-                    adding more.
-                  </template>
-                  <template v-else>
-                    Category “{{ themeEditor.category }}” is nearly full
-                    ({{ themeEditorCatStat.count }}/{{ THEME_CAT_LIMIT }} — warn at
-                    {{ THEME_CAT_WARN_AT }}+).
-                  </template>
-                </p>
-                <p v-else class="muted tiny">
-                  Pool size:
-                  <strong
-                    >{{ themeEditorCatStat.count }}/{{ THEME_CAT_LIMIT }}</strong
-                  >
-                  in “{{ themeEditor.category || '…' }}”
-                </p>
-
-                <ValueUploadPanel
-                  mode="theme"
+                <ThemeValuesCenter
                   :theme-name="themeEditor.theme?.name || ''"
                   :category="themeEditor.category || ''"
-                  :disabled="themeEditorCatStat.full"
-                  @parsed="onThemeValuesUpload"
-                  @error="flashError"
+                  :categories="themeEditorCategoryChips"
+                  :values="themeEditor.values || []"
+                  :bulk="themeEditor.bulk || ''"
+                  :loading="!!themeEditor.loading"
+                  :cat-count="themeEditorCatStat.count || 0"
+                  :cat-limit="themeEditorCatStat.limit || THEME_CAT_LIMIT"
+                  :cat-warn-at="themeEditorCatStat.warnAt || THEME_CAT_WARN_AT"
+                  :cat-full="!!themeEditorCatStat.full"
+                  :cat-near-limit="!!themeEditorCatStat.nearLimit"
+                  :inline-edit="inlineValueEdit"
+                  :common-cats="COMMON_THEME_CATS"
+                  @update:category="themeEditor = { ...themeEditor, category: $event }"
+                  @update:bulk="themeEditor = { ...themeEditor, bulk: $event }"
+                  @update:inline-draft="
+                    inlineValueEdit && (inlineValueEdit = { ...inlineValueEdit, draft: $event })
+                  "
+                  @select-category="selectThemeCategory"
+                  @add-category="addThemeCategory"
+                  @delete-category="deleteThemeCategory"
+                  @category-commit="onThemeEditorCategoryChange"
+                  @add-values="submitThemeValuesEditor"
+                  @edit-value="editThemeValueRow"
+                  @commit-value="commitThemeValueEdit"
+                  @cancel-edit="cancelInlineValueEdit"
+                  @remove-value="deleteThemeValueRow"
+                  @upload-values="onThemeValuesUpload"
+                  @upload-error="flashError"
+                  @close="themeEditor = null"
                 />
-
-                <div class="theme-value-list">
-                  <div class="label muted tiny">
-                    Values
-                    <span v-if="themeEditor.loading">· loading…</span>
-                  </div>
-                  <ul
-                    v-if="themeEditor.values?.length"
-                    class="pack-value-list theme-values-ul"
-                    aria-label="Theme category values"
-                  >
-                    <li v-for="row in themeEditor.values" :key="row.id" class="pack-value-row">
-                      <template v-if="isInlineEditing('theme', row.id)">
-                        <div class="inline-edit-row">
-                          <label class="visually-hidden" :for="'theme-edit-' + row.id"
-                            >Edit theme value</label
-                          >
-                          <input
-                            :id="'theme-edit-' + row.id"
-                            class="input mono is-editing"
-                            type="text"
-                            :data-inline-edit="'theme:' + row.id"
-                            :value="inlineValueEdit.draft"
-                            aria-label="Editing theme value"
-                            @input="inlineValueEdit.draft = $event.target.value"
-                            @keydown="onInlineEditKeydown($event, commitThemeValueEdit)"
-                          />
-                          <button
-                            type="button"
-                            class="btn btn-primary pack-action-sm"
-                            @click="commitThemeValueEdit"
-                          >
-                            Save
-                          </button>
-                          <button
-                            type="button"
-                            class="btn btn-ghost pack-action-sm"
-                            @click="cancelInlineValueEdit"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      </template>
-                      <template v-else>
-                        <span class="v mono">{{ row.value }}</span>
-                        <div class="pack-value-actions">
-                          <button
-                            type="button"
-                            class="btn btn-outline pack-action-sm"
-                            :aria-label="`Edit theme value ${row.value}`"
-                            @click="editThemeValueRow(row)"
-                          >
-                            Edit
-                          </button>
-                          <button
-                            type="button"
-                            class="btn btn-outline-danger pack-action-sm"
-                            :aria-label="`Remove theme value ${row.value}`"
-                            @click="deleteThemeValueRow(row)"
-                          >
-                            Remove
-                          </button>
-                        </div>
-                      </template>
-                    </li>
-                  </ul>
-                  <p v-else-if="!themeEditor.loading" class="muted tiny">
-                    No values in this category yet — add some below.
-                  </p>
-                </div>
-
-                <label class="muted tiny">
-                  Add values (one per line or comma-separated)
-                  <textarea
-                    v-model="themeEditor.bulk"
-                    class="input mono"
-                    rows="5"
-                    placeholder="Luke Skywalker&#10;Leia Organa&#10;Han Solo"
-                  />
-                </label>
-                <div class="pack-editor-actions">
-                  <button
-                    type="button"
-                    class="btn btn-primary pack-cta"
-                    :disabled="themeEditorCatStat.full"
-                    @click="submitThemeValuesEditor"
-                  >
-                    Add to pool
-                  </button>
-                  <button type="button" class="btn btn-outline pack-action" @click="themeEditor = null">
-                    Done
-                  </button>
-                </div>
               </template>
               <template v-else-if="dataPackSubTab === 'custom'">
                 <FieldValuesCenter
@@ -8625,6 +8645,13 @@ body.dragging-schema-float * {
 }
 .empty-workspace p {
   margin: 0 0 0.5rem;
+}
+/* Theme values editor needs full center width for master-detail */
+.theme-pack-workspace.theme-pack-editor {
+  max-width: none;
+  width: 100%;
+  padding: 0.75rem 1rem 1.25rem;
+  box-sizing: border-box;
 }
 .empty-cta-panel {
   display: flex;
