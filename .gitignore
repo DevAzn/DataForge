@@ -8,9 +8,11 @@ __pycache__/
 *.egg-info/
 .eggs/
 # Only app build outputs — never strip package trees under node_modules
-# Desktop zips ship via GitHub Releases (not git history). Optional notes stay trackable.
+# Ship onedir under dist/DataForge (exe + _internal + data). Versioned zips stay local / Releases.
 /dist/*
 !/dist/release-notes*.md
+!/dist/DataForge/
+!/dist/DataForge/**
 /build/
 frontend/dist/
 .pytest_cache/
@@ -28,11 +30,17 @@ npm-debug.log*
 yarn-error.log*
 .pnpm-store/
 
-# ── Runtime data (local only) ───────────────────────────────────────
+# ── Runtime data (local only; desktop onedir data/ is tracked) ──────
+/data/
 data/
+!/dist/DataForge/data/
+!/dist/DataForge/data/**
 *.sqlite
 *.sqlite3
 *.db
+!/dist/DataForge/data/**/*.sqlite
+!/dist/DataForge/data/**/*.sqlite3
+!/dist/DataForge/data/**/*.db
 
 # ── Secrets & env ───────────────────────────────────────────────────
 .env
@@ -55,8 +63,6 @@ tmp/
 temp/
 *.tmp
 
-# ── Nested / accidental clones ──────────────────────────────────────
-/DataForge/
 
 # ── Docs: README + agent/Duo instruction files that must ship to GitLab ─
 *.md

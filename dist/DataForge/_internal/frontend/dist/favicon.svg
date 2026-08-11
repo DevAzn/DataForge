@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="DataForge">
+  <defs>
+    <linearGradient id="digiFire" x1="40" y1="52" x2="28" y2="10" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#1d4ed8"/>
+      <stop offset="40%" stop-color="#3b82f6"/>
+      <stop offset="72%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#fef9c3"/>
+    </linearGradient>
+    <linearGradient id="digiCore" x1="34" y1="46" x2="30" y2="18" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#60a5fa"/>
+      <stop offset="100%" stop-color="#fff7ed"/>
+    </linearGradient>
+    <linearGradient id="ioGlow" x1="8" y1="40" x2="56" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0.9"/>
+      <stop offset="50%" stop-color="#a78bfa" stop-opacity="0.5"/>
+      <stop offset="100%" stop-color="#fbbf24" stop-opacity="0.9"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Digital fire (pixelated / faceted flame behind the work) -->
+  <g fill="url(#digiFire)">
+    <path d="M30 12 L34 20 L40 18 L38 28 L46 32 L40 38 L44 46 L34 44 L32 54 L28 44 L18 46 L22 38 L16 32 L24 28 L22 18 L28 20 Z"/>
+  </g>
+  <path fill="url(#digiCore)" opacity="0.9" d="M30 22 L33 28 L36 27 L35 34 L40 37 L36 41 L38 46 L33 45 L32 51 L29 45 L24 46 L26 41 L22 37 L27 34 L26 27 L29 28 Z"/>
+  <!-- Pixel fire sparks -->
+  <g fill="#fde68a">
+    <rect x="20" y="16" width="2" height="2"/>
+    <rect x="42" y="20" width="2" height="2"/>
+    <rect x="44" y="34" width="1.6" height="1.6"/>
+    <rect x="18" y="30" width="1.6" height="1.6"/>
+  </g>
+  <g fill="#93c5fd">
+    <rect x="24" y="12" width="1.5" height="1.5"/>
+    <rect x="38" y="14" width="1.5" height="1.5"/>
+  </g>
+
+  <!-- Anvil silhouette -->
+  <path fill="#0b1220" d="
+    M18 50 H42
+    L40 54 H20 Z
+    M22 48 H38 L36 50 H24 Z
+    M26 54 H34 V58 H26 Z
+  "/>
+
+  <!-- Forger silhouette (hammer raised over anvil / fire) -->
+  <g fill="#0b1220">
+    <!-- head -->
+    <circle cx="22" cy="28" r="3.2"/>
+    <!-- torso lean into swing -->
+    <path d="M20 31.5
+      C18 36 17 42 18 48
+      L24 48
+      C24 42 25 36 26 32
+      Z"/>
+    <!-- legs -->
+    <path d="M18 48 L16 58 H20 L22 50 L24 58 H28 L26 48 Z"/>
+    <!-- arm + hammer -->
+    <path d="M24 34
+      L34 24
+      L36 26
+      L28 36
+      Z"/>
+    <!-- hammer head -->
+    <rect x="32" y="18" width="10" height="6" rx="0.8" transform="rotate(-38 37 21)"/>
+    <!-- hammer handle -->
+    <rect x="28.5" y="24" width="2.2" height="12" rx="0.5" transform="rotate(-38 29.6 30)"/>
+  </g>
+
+  <!-- I/O rails & ports (data characteristics) -->
+  <g stroke="url(#ioGlow)" stroke-width="1.4" fill="none" stroke-linecap="square">
+    <!-- input rail left -->
+    <path d="M4 36 H12"/>
+    <path d="M4 40 H12"/>
+    <path d="M4 44 H10"/>
+    <!-- output rail right -->
+    <path d="M52 36 H60"/>
+    <path d="M52 40 H60"/>
+    <path d="M54 44 H60"/>
+  </g>
+  <!-- I/O port blocks -->
+  <g fill="#0b1220">
+    <rect x="10" y="34.5" width="5" height="11" rx="1"/>
+    <rect x="49" y="34.5" width="5" height="11" rx="1"/>
+  </g>
+  <g fill="#22d3ee">
+    <rect x="11.2" y="36.2" width="2.6" height="1.8" rx="0.3"/>
+    <rect x="11.2" y="39.1" width="2.6" height="1.8" rx="0.3"/>
+    <rect x="11.2" y="42" width="2.6" height="1.8" rx="0.3"/>
+  </g>
+  <g fill="#fbbf24">
+    <rect x="50.2" y="36.2" width="2.6" height="1.8" rx="0.3"/>
+    <rect x="50.2" y="39.1" width="2.6" height="1.8" rx="0.3"/>
+    <rect x="50.2" y="42" width="2.6" height="1.8" rx="0.3"/>
+  </g>
+  <!-- I / O labels -->
+  <g font-family="ui-monospace, Consolas, monospace" font-size="6.5" font-weight="700" fill="#e2e8f0">
+    <text x="4" y="33">I</text>
+    <text x="57" y="33">O</text>
+  </g>
+  <!-- bit stream ticks into the forge -->
+  <g fill="#22d3ee" opacity="0.85">
+    <rect x="15.5" y="37" width="2" height="1.2"/>
+    <rect x="18" y="41" width="2" height="1.2"/>
+  </g>
+  <g fill="#fbbf24" opacity="0.85">
+    <rect x="46.5" y="37" width="2" height="1.2"/>
+    <rect x="44" y="41" width="2" height="1.2"/>
+  </g>
+</svg>
