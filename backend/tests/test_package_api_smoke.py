@@ -65,8 +65,13 @@ def test_import_tar_gz_estimate_generate():
     text = [m for m in pkg["members"] if m["kind"] == "text"]
     assert len(text) >= 3
     assert any("a.xml" in m["path"] for m in text)
-    skipped = pkg.get("skipped") or []
-    assert any("x.bin" in s for s in skipped)
+    # Non-schema files are structural (scrambled on generate), not dropped to skipped.
+    structural = [m for m in pkg["members"] if m["kind"] == "structural"]
+    assert any(m["path"].endswith("x.bin") for m in structural), structural
+    bin_m = next(m for m in structural if m["path"].endswith("x.bin"))
+    assert bin_m.get("content") in (None, "")
+    assert bin_m.get("scrambled") is True
+    assert int(bin_m.get("byteSize") or 0) == len(BIN)
 
     pid = pkg["id"]
     er = client.get(f"/api/packages/{pid}/estimate", params={"recordCount": 3})

@@ -45,9 +45,13 @@ describe('parseTxtValues', () => {
     assert.deepEqual(r.values, ['Alice', 'Bob', 'Carol'])
     assert.equal(r.format, 'txt')
   })
-  it('strips category prefix for flat values', () => {
-    const r = parseTxtValues('names: Luke\nships: X-Wing')
-    assert.deepEqual(r.values, ['Luke', 'X-Wing'])
+  it('builds byCategory from category: value lines', () => {
+    const r = parseTxtValues('names: Luke\nnames: Leia\nships: X-Wing')
+    assert.ok(r.byCategory)
+    assert.deepEqual(r.byCategory.names, ['Luke', 'Leia'])
+    assert.deepEqual(r.byCategory.ships, ['X-Wing'])
+    // Flat list still available for single-list consumers
+    assert.ok(r.values.includes('Luke') && r.values.includes('X-Wing'))
   })
 })
 

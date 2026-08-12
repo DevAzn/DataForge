@@ -564,11 +564,21 @@ def save_schema(doc: dict[str, Any]) -> dict[str, Any]:
                 return doc.get(key)
             return prev_meta.get(key)
 
+        # Preserve tied paths when client omits the key (partial save / member edit).
+        # Explicit null or [] clears; missing key keeps previous.
+        if "csvTiedFieldPaths" in doc:
+            tied_paths = doc.get("csvTiedFieldPaths")
+        else:
+            tied_paths = prev_meta.get("csvTiedFieldPaths")
         tree = {
             "root": doc.get("root") or [],
-            "csvTiedFieldPaths": doc.get("csvTiedFieldPaths"),
-            "sourceFileName": doc.get("sourceFileName"),
-            "sourceFormat": doc.get("sourceFormat"),
+            "csvTiedFieldPaths": tied_paths,
+            "sourceFileName": doc.get("sourceFileName")
+            if doc.get("sourceFileName") is not None
+            else prev_meta.get("sourceFileName"),
+            "sourceFormat": doc.get("sourceFormat")
+            if doc.get("sourceFormat") is not None
+            else prev_meta.get("sourceFormat"),
             "isMultifile": _flag("isMultifile"),
             "packageId": _flag("packageId"),
             "isPackageMember": _flag("isPackageMember"),

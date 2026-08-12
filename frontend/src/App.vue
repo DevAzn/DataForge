@@ -149,7 +149,7 @@ const selected = computed(() => {
 const tiedPaths = computed(() => active.value?.csvTiedFieldPaths || [])
 
 function findRow(rows, id) {
-  for (const r of rows) {
+  for (const r of rows || []) {
     if (r.id === id) return r
     const c = findRow(r.children || [], id)
     if (c) return c
@@ -159,7 +159,7 @@ function findRow(rows, id) {
 
 function flatten(rows, depth = 0, path = []) {
   const out = []
-  for (const r of rows) {
+  for (const r of rows || []) {
     out.push({ row: r, depth, path })
     const seg = (r.key || 'field').trim() || 'field'
     out.push(...flatten(r.children || [], depth + 1, [...path, seg]))
@@ -167,7 +167,9 @@ function flatten(rows, depth = 0, path = []) {
   return out
 }
 
-const flatRows = computed(() => (active.value ? flatten(active.value.root) : []))
+const flatRows = computed(() =>
+  active.value ? flatten(active.value.root || []) : []
+)
 
 /** Tree display: nodes + synthetic non-draggable close tags */
 const displayRows = computed(() =>
@@ -931,9 +933,17 @@ async function refresh() {
     status.value = await api.status()
     settings.value = await api.getSettings()
   }
-  await loadHistory()
+  try {
+    await loadHistory()
+  } catch {
+    historyPage.value = { items: [], total: 0, offset: 0, limit: 40 }
+  }
   // Keep Field settings Category dropdown in sync with theme pools
-  await reloadFieldThemeCategories()
+  try {
+    await reloadFieldThemeCategories()
+  } catch {
+    /* optional on older backends / theme load races */
+  }
 }
 
 /** Schemas + packages + templates only (library mutations). */
@@ -1148,11 +1158,21 @@ function applyTheme(mode, colors) {
 }
 
 async function loadHistory() {
-  historyPage.value = await api.historyPage(
-    0,
-    historyPage.value.limit || 40,
-    historySearch.value
-  )
+  try {
+    historyPage.value = await api.historyPage(
+      0,
+      historyPage.value.limit || 40,
+      historySearch.value
+    )
+  } catch (e) {
+    historyPage.value = {
+      items: [],
+      total: 0,
+      offset: 0,
+      limit: historyPage.value.limit || 40
+    }
+    throw e
+  }
 }
 
 /** A4: debounced Fill values search (≥250ms) against history page API. */
@@ -1179,7 +1199,14 @@ function flashStatus(msg) {
 }
 
 function flashError(msg) {
-  errorMsg.value = msg
+  const text =
+    msg == null || msg === ''
+      ? 'Request failed'
+      : typeof msg === 'string'
+        ? msg
+        : msg?.message || String(msg) || 'Request failed'
+  errorMsg.value = text
+  statusMsg.value = ''
 }
 
 watch(statusMsg, (v) => {
@@ -1714,29 +1741,33 @@ async function downloadDesignOutput() {
     flashError('Open a schema first')
     return
   }
-  const fmt = format.value || 'xml'
-  const built = await buildDesignExport(fmt)
-  if (!built.text && !built.contentBase64) {
-    flashError('Nothing to download for this design sample')
-    return
-  }
-  const archFmt = selectedArchiveFormat()
-  const dirName = resolveArchiveDirName()
-  if (archFmt) {
-    const packed = await downloadAsArchive({
-      text: built.text,
-      contentBase64: built.contentBase64,
-      fmt,
-      archFmt,
-      dirName
-    })
-    flashStatus(`Downloaded design sample as ${packed.fileName}`)
-  } else if (built.contentBase64) {
-    downloadBase64(built.contentBase64, designExportFileName(fmt), built.mediaType)
-    flashStatus(`Downloaded design sample (${fmt.toUpperCase()})`)
-  } else {
-    downloadText(built.text, designExportFileName(fmt))
-    flashStatus(`Downloaded design sample (${fmt.toUpperCase()})`)
+  try {
+    const fmt = format.value || 'xml'
+    const built = await buildDesignExport(fmt)
+    if (!built.text && !built.contentBase64) {
+      flashError('Nothing to download for this design sample')
+      return
+    }
+    const archFmt = selectedArchiveFormat()
+    const dirName = resolveArchiveDirName()
+    if (archFmt) {
+      const packed = await downloadAsArchive({
+        text: built.text,
+        contentBase64: built.contentBase64,
+        fmt,
+        archFmt,
+        dirName
+      })
+      flashStatus(`Downloaded design sample as ${packed.fileName}`)
+    } else if (built.contentBase64) {
+      downloadBase64(built.contentBase64, designExportFileName(fmt), built.mediaType)
+      flashStatus(`Downloaded design sample (${fmt.toUpperCase()})`)
+    } else {
+      downloadText(built.text, designExportFileName(fmt))
+      flashStatus(`Downloaded design sample (${fmt.toUpperCase()})`)
+    }
+  } catch (e) {
+    flashError(e?.message || 'Design download failed')
   }
 }
 
@@ -2312,63 +2343,79 @@ async function generatePerFile() {
 }
 
 async function refreshPreview() {
-  const gen = lastGenerated.value
-  const doc = gen?.document
-  const data = gen?.records
-  const fmtNow = (format.value || 'xml').toLowerCase()
-  // XLSX is binary — show a short note instead of dumping base64 into the preview pane
-  if (fmtNow === 'xlsx') {
-    if (gen?.contentBase64 && (gen.format || fmtNow) === fmtNow) {
-      previewText.value =
-        '// XLSX binary ready · use Generate / download to open in Excel'
+  try {
+    const gen = lastGenerated.value
+    const doc = gen?.document
+    const data = gen?.records
+    const fmtNow = (format.value || 'xml').toLowerCase()
+    // XLSX is binary — show a short note instead of dumping base64 into the preview pane
+    if (fmtNow === 'xlsx') {
+      if (gen?.contentBase64 && (gen.format || fmtNow) === fmtNow) {
+        previewText.value =
+          '// XLSX binary ready · use Generate / download to open in Excel'
+        return
+      }
+      if (!data?.length && active.value) {
+        previewText.value =
+          '// XLSX design sample · Generate or Download design to get a .xlsx file'
+        return
+      }
+    }
+    if (
+      fmtNow === 'xml' &&
+      doc &&
+      typeof doc === 'object' &&
+      !Array.isArray(doc)
+    ) {
+      // Prefer cached generate payload so re-export doesn't thrash after download
+      if (gen?.outputText && (gen.format || format.value) === format.value) {
+        previewText.value = gen.outputText
+        return
+      }
+      const exp = await api.exportData({
+        data: doc,
+        format: format.value,
+        multiRow: csvMultiRow.value,
+        layoutMode: csvLayoutMode.value,
+        delim: csvDelim.value,
+        nestedAsJson: csvNestedAsJson.value,
+        documentShaped: true,
+        singleObject: true,
+        ...xmlExportOpts()
+      })
+      previewText.value = exp.content
+      if (lastGenerated.value) {
+        lastGenerated.value = { ...lastGenerated.value, outputText: exp.content }
+      }
       return
     }
-    if (!data?.length && active.value) {
+    if (!data?.length) {
+      if (!active.value) return
+      // Design sample — client live preview already matches tree; keep API path for CSV/TXT
+      if (fmtNow === 'xml') {
+        previewText.value = liveSchemaPreview.value
+        return
+      }
+      const sample = buildSample(active.value.root || [])
+      const exp = await api.exportData({
+        data: sample,
+        format: format.value,
+        multiRow: false,
+        layoutMode: csvLayoutMode.value,
+        delim: csvDelim.value,
+        nestedAsJson: csvNestedAsJson.value,
+        ...xmlExportOpts()
+      })
       previewText.value =
-        '// XLSX design sample · Generate or Download design to get a .xlsx file'
-      return
-    }
-  }
-  if (
-    fmtNow === 'xml' &&
-    doc &&
-    typeof doc === 'object' &&
-    !Array.isArray(doc)
-  ) {
-    // Prefer cached generate payload so re-export doesn't thrash after download
-    if (gen?.outputText && (gen.format || format.value) === format.value) {
-      previewText.value = gen.outputText
+        exp.binary || exp.contentBase64
+          ? `// ${fmtNow.toUpperCase()} binary · download to open`
+          : exp.content
       return
     }
     const exp = await api.exportData({
-      data: doc,
+      data,
       format: format.value,
       multiRow: csvMultiRow.value,
-      layoutMode: csvLayoutMode.value,
-      delim: csvDelim.value,
-      nestedAsJson: csvNestedAsJson.value,
-      documentShaped: true,
-      singleObject: true,
-      ...xmlExportOpts()
-    })
-    previewText.value = exp.content
-    if (lastGenerated.value) {
-      lastGenerated.value = { ...lastGenerated.value, outputText: exp.content }
-    }
-    return
-  }
-  if (!data?.length) {
-    if (!active.value) return
-    // Design sample — client live preview already matches tree; keep API path for CSV/TXT
-    if (fmtNow === 'xml') {
-      previewText.value = liveSchemaPreview.value
-      return
-    }
-    const sample = buildSample(active.value.root)
-    const exp = await api.exportData({
-      data: sample,
-      format: format.value,
-      multiRow: false,
       layoutMode: csvLayoutMode.value,
       delim: csvDelim.value,
       nestedAsJson: csvNestedAsJson.value,
@@ -2378,21 +2425,9 @@ async function refreshPreview() {
       exp.binary || exp.contentBase64
         ? `// ${fmtNow.toUpperCase()} binary · download to open`
         : exp.content
-    return
+  } catch (e) {
+    previewText.value = `// Preview unavailable: ${e?.message || 'export failed'}`
   }
-  const exp = await api.exportData({
-    data,
-    format: format.value,
-    multiRow: csvMultiRow.value,
-    layoutMode: csvLayoutMode.value,
-    delim: csvDelim.value,
-    nestedAsJson: csvNestedAsJson.value,
-    ...xmlExportOpts()
-  })
-  previewText.value =
-    exp.binary || exp.contentBase64
-      ? `// ${fmtNow.toUpperCase()} binary · download to open`
-      : exp.content
 }
 
 function buildSample(rows) {
@@ -3179,9 +3214,13 @@ async function removeTemplate(id) {
 }
 
 async function saveSettingsPatch(patch) {
-  settings.value = await api.setSettings(patch)
-  applySettingsLocal(settings.value)
-  statusMsg.value = 'Settings saved'
+  try {
+    settings.value = await api.setSettings(patch)
+    applySettingsLocal(settings.value)
+    flashStatus('Settings saved')
+  } catch (e) {
+    flashError(e?.message || 'Could not save settings')
+  }
 }
 
 async function openSettings() {
@@ -3202,19 +3241,27 @@ async function openSettings() {
 }
 
 async function exportBackup() {
-  const blob = await api.backupExport()
-  downloadBlob(blob, `DataForge-backup.json`)
-  statusMsg.value = 'Backup downloaded'
+  try {
+    const blob = await api.backupExport()
+    downloadBlob(blob, `DataForge-backup.json`)
+    flashStatus('Backup downloaded')
+  } catch (e) {
+    flashError(e?.message || 'Backup export failed')
+  }
 }
 
 async function importBackup(ev) {
   const file = ev.target.files?.[0]
   ev.target.value = ''
   if (!file) return
-  const res = await api.backupImport(file)
-  statusMsg.value = `Imported backup (${res.imported} items)`
-  await refresh()
-  applySettingsLocal(settings.value)
+  try {
+    const res = await api.backupImport(file)
+    flashStatus(`Imported backup (${res.imported} items)`)
+    await refresh()
+    applySettingsLocal(settings.value)
+  } catch (e) {
+    flashError(e?.message || 'Backup import failed')
+  }
 }
 
 async function onArchiveOpen(ev) {
@@ -3236,25 +3283,33 @@ async function readArchiveEntry(path) {
 }
 
 async function clearHistoryAll() {
-  const c = await api.historyClearCount({ mode: 'all', confirmAll: true })
-  if (
-    !(await askConfirm(`Delete all ${c.count} history rows?`, {
-      title: 'Clear fill values',
-      danger: true,
-      confirmLabel: 'Clear all'
-    }))
-  )
-    return
-  const r = await api.historyClear({ mode: 'all', confirmAll: true })
-  statusMsg.value = `Cleared ${r.deleted} history rows`
-  await loadHistory()
-  await refreshStatusOnly()
+  try {
+    const c = await api.historyClearCount({ mode: 'all', confirmAll: true })
+    if (
+      !(await askConfirm(`Delete all ${c.count} history rows?`, {
+        title: 'Clear fill values',
+        danger: true,
+        confirmLabel: 'Clear all'
+      }))
+    )
+      return
+    const r = await api.historyClear({ mode: 'all', confirmAll: true })
+    flashStatus(`Cleared ${r.deleted} history rows`)
+    await loadHistory()
+    await refreshStatusOnly()
+  } catch (e) {
+    flashError(e?.message || 'Could not clear history')
+  }
 }
 
 async function openCustomList(id) {
-  activeCustomList.value = await api.getCustomList(id)
-  customListName.value = activeCustomList.value.name
-  customListKeys.value = (activeCustomList.value.keys || []).join(', ')
+  try {
+    activeCustomList.value = await api.getCustomList(id)
+    customListName.value = activeCustomList.value.name
+    customListKeys.value = (activeCustomList.value.keys || []).join(', ')
+  } catch (e) {
+    flashError(e?.message || 'Could not open field values list')
+  }
 }
 
 function createCustomList() {
@@ -3268,33 +3323,41 @@ async function commitCreateCustomList() {
     flashError('Enter a list name')
     return
   }
-  nameCreate.value = null
-  const saved = await api.saveCustomList({ name: name.trim(), keys: [] })
-  await refreshDataPackLists()
-  await openCustomList(saved.id)
-  statusMsg.value = `Custom list “${saved.name}” created`
-  sidebar.value = 'datapacks'
-  dataPackSubTab.value = 'custom'
+  try {
+    const saved = await api.saveCustomList({ name: name.trim(), keys: [] })
+    nameCreate.value = null
+    await refreshDataPackLists()
+    await openCustomList(saved.id)
+    flashStatus(`Custom list “${saved.name}” created`)
+    sidebar.value = 'datapacks'
+    dataPackSubTab.value = 'custom'
+  } catch (e) {
+    flashError(e?.message || 'Could not create field values list')
+  }
 }
 
 async function saveActiveCustomList() {
   if (!activeCustomList.value) return
-  const keys = customListKeys.value
-    .split(/[,;\n]/)
-    .map((s) => s.trim())
-    .filter(Boolean)
-  const saved = await api.saveCustomList({
-    id: activeCustomList.value.id,
-    name: customListName.value.trim() || activeCustomList.value.name,
-    description: activeCustomList.value.description,
-    keys
-  })
-  activeCustomList.value = saved
-  customLists.value = upsertById(customLists.value, {
-    ...saved,
-    valueCount: saved.values?.length ?? saved.valueCount
-  })
-  statusMsg.value = 'Custom list saved'
+  try {
+    const keys = customListKeys.value
+      .split(/[,;\n]/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+    const saved = await api.saveCustomList({
+      id: activeCustomList.value.id,
+      name: customListName.value.trim() || activeCustomList.value.name,
+      description: activeCustomList.value.description,
+      keys
+    })
+    activeCustomList.value = saved
+    customLists.value = upsertById(customLists.value, {
+      ...saved,
+      valueCount: saved.values?.length ?? saved.valueCount
+    })
+    flashStatus('Custom list saved')
+  } catch (e) {
+    flashError(e?.message || 'Could not save field values list')
+  }
 }
 
 async function addBulkCustomValues() {
@@ -3304,15 +3367,20 @@ async function addBulkCustomValues() {
     .map((s) => s.trim())
     .filter(Boolean)
   if (!values.length) return
-  const res = await api.addCustomValues(activeCustomList.value.id, values)
-  customBulkValues.value = ''
-  await openCustomList(activeCustomList.value.id)
-  await refreshDataPackLists()
-  await refreshStatusOnly()
-  const msg = `Added ${res.inserted} value(s)` +
-    (res.total != null && res.limit != null ? ` (${res.total}/${res.limit})` : '')
-  flashStatus(msg)
-  if (res.warning) flashError(res.warning)
+  try {
+    const res = await api.addCustomValues(activeCustomList.value.id, values)
+    customBulkValues.value = ''
+    await openCustomList(activeCustomList.value.id)
+    await refreshDataPackLists()
+    await refreshStatusOnly()
+    const msg =
+      `Added ${res.inserted} value(s)` +
+      (res.total != null && res.limit != null ? ` (${res.total}/${res.limit})` : '')
+    flashStatus(msg)
+    if (res.warning) flashError(res.warning)
+  } catch (e) {
+    flashError(e?.message || 'Could not add values')
+  }
 }
 
 /**
@@ -4324,6 +4392,18 @@ function selectPackageMember(path) {
   packageEditName.value = m.name || ''
 }
 
+// Must be declared before selectedNestedPack (immediate watch evaluates it during setup).
+const selectedPackageMember = computed(() => {
+  if (!activePackage.value || !packageMemberPath.value) return null
+  return (
+    activePackage.value.members?.find((x) => x.path === packageMemberPath.value) || null
+  )
+})
+
+const packageMemberEditable = computed(() =>
+  isPackageSupportedMember(selectedPackageMember.value)
+)
+
 const selectedNestedPack = computed(() => {
   const m = selectedPackageMember.value
   if (!m || m.kind !== 'nested_archive_folder' || !activePackage.value) return null
@@ -4389,25 +4469,23 @@ watch(
   { immediate: true }
 )
 
-const selectedPackageMember = computed(() => {
-  if (!activePackage.value || !packageMemberPath.value) return null
-  return (
-    activePackage.value.members?.find((x) => x.path === packageMemberPath.value) || null
-  )
-})
-
-const packageMemberEditable = computed(() =>
-  isPackageSupportedMember(selectedPackageMember.value)
-)
-
 async function verifyPackageMember(verified) {
   if (!activePackage.value || !packageMemberPath.value) return
-  await api.verifyPackageMember(
-    activePackage.value.id,
-    packageMemberPath.value,
-    verified
-  )
-  activePackage.value = await api.getPackage(activePackage.value.id)
+  try {
+    await api.verifyPackageMember(
+      activePackage.value.id,
+      packageMemberPath.value,
+      verified
+    )
+    activePackage.value = await api.getPackage(activePackage.value.id)
+  } catch (e) {
+    flashError(e?.message || 'Could not update member verification')
+    try {
+      activePackage.value = await api.getPackage(activePackage.value.id)
+    } catch {
+      /* keep prior state */
+    }
+  }
 }
 
 async function savePackageMemberContent() {
@@ -4678,7 +4756,7 @@ async function commitNameCreate() {
 
 const kindOptions = computed(() => {
   const f = (active.value?.sourceFormat || format.value || 'xml').toLowerCase()
-  if (f === 'csv' || f === 'txt') return [{ v: 'value', l: 'Value' }]
+  if (f === 'csv' || f === 'txt' || f === 'xlsx') return [{ v: 'value', l: 'Value' }]
   if (f === 'xml')
     return [
       { v: 'value', l: 'Value / element' },
@@ -4691,10 +4769,10 @@ const kindOptions = computed(() => {
   ]
 })
 
-/** Kind is only meaningful for hierarchical XML (CSV/TXT are always value columns). */
+/** Kind is only meaningful for hierarchical XML (CSV/TXT/XLSX are value columns). */
 const showFieldKind = computed(() => {
   const f = (active.value?.sourceFormat || format.value || 'xml').toLowerCase()
-  return f === 'xml' || (f !== 'csv' && f !== 'txt')
+  return f === 'xml' || (f !== 'csv' && f !== 'txt' && f !== 'xlsx')
 })
 
 const selectedFieldPath = computed(() => {

@@ -917,7 +917,7 @@ def generate_package_variants(
     record_count: int = 10,
     seed: int | None = None,
     ci_mode: bool = False,
-    record_history: bool = True,
+    record_history: bool = False,
     default_field_mode: str = "random",
     field_modes: dict[str, dict[str, str]] | None = None,
     history_lookup=None,
@@ -933,6 +933,15 @@ def generate_package_variants(
     or a single bare file when N=1 and output is itself on a single-member package.
     Does not store generated content in SQLite.
     """
+    from app.services.generator import (
+        Generator,
+        apply_tied,
+        assemble_schema_document,
+        build_tied_template,
+        merge_missing_tied,
+        normalize_tied_paths,
+    )
+
     hydrated = db.get_package_hydrated(package_id)
     if not hydrated:
         raise ValueError("Package not found")
@@ -971,6 +980,10 @@ def generate_package_variants(
             continue
         modes = field_modes.get(m["path"]) or {}
         adjusted, tied = _apply_field_modes(schema, modes, default_mode)
+        root = adjusted.get("root") or []
+        # Absolute UI paths (catalog.book.author) → record-relative after isRecordTag unwrap
+        tied = normalize_tied_paths(root, tied)
+        adjusted = {**adjusted, "csvTiedFieldPaths": tied if tied else None}
         prepared.append(
             {
                 "member": m,
@@ -985,18 +998,10 @@ def generate_package_variants(
     # Generate all variants into memory as named files
     variant_files: list[tuple[str, bytes]] = []
     seed_used = seed if seed is not None else 0
-    theme_hits_total = 0
 
     # Shared unique sets across variants via one generator context per member
     contexts = []
     for p in prepared:
-        from app.services.generator import (
-            Generator,
-            build_tied_template,
-            merge_missing_tied,
-            apply_tied,
-        )
-
         root = p["schema"].get("root") or []
         gen = Generator(
             root,
@@ -1021,19 +1026,32 @@ def generate_package_variants(
                 if i == 0:
                     merge_missing_tied(ctx["template"], rec, ctx["tied"])
                 apply_tied(ctx["template"], rec, ctx["tied"])
+            schema = ctx["schema"]
+            xml_root = (
+                schema.get("xmlRootTag")
+                or settings.get("xmlRootTag")
+                or "root"
+            )
+            xml_rec = (
+                schema.get("xmlRecordTag")
+                or settings.get("xmlRecordTag")
+                or "record"
+            )
+            # Match one-file / per-file generate: schema tree shape for isRecordTag
+            doc = assemble_schema_document(schema, [rec], xml_root_tag=xml_root)
             content = export_fmt.serialize(
-                rec,
+                doc if isinstance(doc, dict) else rec,
                 ctx["format"],
                 multi_row=False,
                 layout_mode=settings.get("csvLayoutMode") or "single-header",
                 delim=settings.get("csvFlattenDelimiter") or ".",
                 nested_as_json=bool(settings.get("csvNestedAsJson")),
-                xml_root_tag=settings.get("xmlRootTag") or "root",
-                xml_record_tag=settings.get("xmlRecordTag") or "record",
+                document_shaped=isinstance(doc, dict),
+                xml_root_tag=xml_root,
+                xml_record_tag=xml_rec,
                 xml_self_closing=settings.get("xmlSelfClosing", True) is not False,
             )
             file_entries.append((ctx["member"]["path"], content))
-            theme_hits_total += ctx["gen"].stats.get("themeHits", 0)
 
         # Structural companions: same size, no original content
         for sm in structural_members:
@@ -1055,6 +1073,10 @@ def generate_package_variants(
             index=i + 1,
         )
         variant_files.append((vname, vbytes))
+
+    # Final cumulative stats once per member (not per-variant re-sum)
+    theme_hits_total = sum(int(ctx["gen"].stats.get("themeHits", 0) or 0) for ctx in contexts)
+
     if record_history and not ci_mode and contexts:
         for ctx in contexts:
             buf = ctx["gen"].history_buffer

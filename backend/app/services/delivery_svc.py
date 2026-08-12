@@ -9,12 +9,26 @@ from __future__ import annotations
 import json
 import random
 import re
+import threading
 import uuid
 from pathlib import Path
 from typing import Any
 
 from app import database as db
 from app.services import package_svc
+
+# Per-job lock for run_next_chunk (local single-process delivery — no Redis).
+_chunk_locks_guard = threading.Lock()
+_chunk_locks: dict[str, threading.Lock] = {}
+
+
+def _job_chunk_lock(job_id: str) -> threading.Lock:
+    with _chunk_locks_guard:
+        lock = _chunk_locks.get(job_id)
+        if lock is None:
+            lock = threading.Lock()
+            _chunk_locks[job_id] = lock
+        return lock
 
 
 def _can_guarantee_min_and_max(target: int, chunk_min: int, chunk_max: int) -> bool:
@@ -256,6 +270,25 @@ def create_job(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def run_next_chunk(
+    job_id: str,
+    *,
+    history_lookup=None,
+    custom_lookup=None,
+    theme_lookup=None,
+    theme_prefer: bool = True,
+) -> dict[str, Any]:
+    # Single-process lock: concurrent run-chunk must not double-claim the same plan index.
+    with _job_chunk_lock(job_id):
+        return _run_next_chunk_unlocked(
+            job_id,
+            history_lookup=history_lookup,
+            custom_lookup=custom_lookup,
+            theme_lookup=theme_lookup,
+            theme_prefer=theme_prefer,
+        )
+
+
+def _run_next_chunk_unlocked(
     job_id: str,
     *,
     history_lookup=None,

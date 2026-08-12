@@ -235,20 +235,32 @@ export function parseCsvRows(text) {
  */
 export function parseTxtValues(text) {
   const warnings = []
-  const values = uniqueValues(
-    String(text || '')
-      .replace(/^\uFEFF/, '')
-      .split(/\r?\n/)
-      .map((line) => {
-        // Allow "category: value" lines — value after first colon when both sides non-empty
-        const m = line.match(/^([^:#\n]+)\s*[:|]\s*(.+)$/)
-        if (m && m[1].trim() && m[2].trim() && !m[1].includes(',')) {
-          return m[2]
-        }
-        return line
-      })
-  )
-  return { values: capList(values, warnings), format: 'txt', warnings }
+  const byCategory = {}
+  const flat = []
+  const lines = String(text || '')
+    .replace(/^\uFEFF/, '')
+    .split(/\r?\n/)
+  for (const line of lines) {
+    const raw = String(line || '').trim()
+    if (!raw || raw.startsWith('#')) continue
+    // "category: value" / "category | value" — multi-category theme packs
+    const m = raw.match(/^([^:#\n]+)\s*[:|]\s*(.+)$/)
+    if (m && m[1].trim() && m[2].trim() && !m[1].includes(',')) {
+      const cat = m[1].trim()
+      const val = m[2].trim()
+      if (!byCategory[cat]) byCategory[cat] = []
+      byCategory[cat].push(val)
+      flat.push(val)
+      continue
+    }
+    flat.push(raw)
+  }
+  const cats = Object.keys(byCategory)
+  if (cats.length) {
+    // Prefer structured categories when any "cat: val" lines were present
+    return finalizeCategories(byCategory, warnings, 'txt')
+  }
+  return { values: capList(uniqueValues(flat), warnings), format: 'txt', warnings }
 }
 
 /**

@@ -823,13 +823,17 @@ def generate_stream(body: StreamBody):
                     buf = result.pop("historyBuffer", [])
                     if buf:
                         db.record_values(buf, mode="use")
+                # Prefer schema-tree document (isRecordTag) — same shape as /api/generate
+                doc = result.get("document")
+                use_doc = isinstance(doc, dict)
                 text = export_fmt.serialize(
-                    result["records"],
+                    doc if use_doc else result["records"],
                     fmt,
                     multi_row=multi,
                     layout_mode=layout,
                     delim=delim,
                     nested_as_json=bool(nested),
+                    document_shaped=use_doc,
                     **xml_opts,
                 )
                 step = 64 * 1024
@@ -1097,18 +1101,25 @@ def export_archive(body: ArchiveBuildBody):
     if body.generate and body.formats:
         gen = _run_generate(body.generate)
         settings = db.get_settings()
+        doc = gen.get("document")
+        use_doc = isinstance(doc, dict)
+        gen_body = body.generate
+        schema = getattr(gen_body, "schema_", None) if gen_body is not None else None
+        if not isinstance(schema, dict):
+            schema = {}
         for fmt in body.formats:
             files.append(
                 {
                     "fileName": f"data.{export_fmt.extension_for_format(fmt)}",
                     "format": fmt,
-                    "data": gen["records"],
+                    "data": doc if use_doc else gen["records"],
+                    "documentShaped": use_doc,
                     "multiRow": settings.get("csvMultiRow", True),
                     "layoutMode": settings.get("csvLayoutMode"),
                     "delim": settings.get("csvFlattenDelimiter"),
                     "nestedAsJson": settings.get("csvNestedAsJson"),
-                    "xmlRootTag": settings.get("xmlRootTag"),
-                    "xmlRecordTag": settings.get("xmlRecordTag"),
+                    "xmlRootTag": schema.get("xmlRootTag") or settings.get("xmlRootTag"),
+                    "xmlRecordTag": schema.get("xmlRecordTag") or settings.get("xmlRecordTag"),
                     "xmlSelfClosing": settings.get("xmlSelfClosing"),
                 }
             )

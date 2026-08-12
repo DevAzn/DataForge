@@ -147,7 +147,20 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     })
-    if (!res.ok) throw new Error(await res.text())
+    if (!res.ok) {
+      let msg = res.statusText || 'Archive export failed'
+      try {
+        const j = await res.json()
+        msg = formatApiError(j.detail !== undefined ? j.detail : j, msg)
+      } catch {
+        try {
+          msg = (await res.text()) || msg
+        } catch {
+          /* ignore */
+        }
+      }
+      throw new Error(typeof msg === 'string' ? msg : formatApiError(msg))
+    }
     return res.blob()
   },
   history: (limit = 80) => req(`/api/history?limit=${limit}`),
@@ -328,7 +341,20 @@ export const api = {
   deleteTemplate: (id) => req(`/api/templates/${id}`, { method: 'DELETE' }),
   backupExport: async () => {
     const res = await fetch('/api/backup/export')
-    if (!res.ok) throw new Error(await res.text())
+    if (!res.ok) {
+      let msg = res.statusText || 'Backup export failed'
+      try {
+        const j = await res.json()
+        msg = formatApiError(j.detail !== undefined ? j.detail : j, msg)
+      } catch {
+        try {
+          msg = (await res.text()) || msg
+        } catch {
+          /* ignore */
+        }
+      }
+      throw new Error(typeof msg === 'string' ? msg : formatApiError(msg))
+    }
     return res.blob()
   },
   backupImport: async (file) => {
