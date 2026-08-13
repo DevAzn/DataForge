@@ -122,6 +122,62 @@ def test_generate_directory_n1_is_one_to_one():
     _assert_one_to_one_tree(trees[0])
 
 
+def test_generate_directory_output_itself_tar_and_tar_gz():
+    """N=1 directory replica downloads as itself, a .tar, or a .tar.gz — all 1:1."""
+    pkg = package_svc.import_uploaded_files(list(NESTED))
+    expected = {
+        "itself": ("tar.gz", ".tar.gz"),
+        "tar": ("tar", ".tar"),
+        "tar.gz": ("tar.gz", ".tar.gz"),
+    }
+    for output_format, (arch_fmt, ext) in expected.items():
+        result = package_svc.generate_package_variants(
+            pkg["id"],
+            record_count=1,
+            seed=17,
+            ci_mode=True,
+            record_history=False,
+            output_format=output_format,
+        )
+        assert result["written"] == 1, output_format
+        assert result["archiveFormat"] == arch_fmt, (output_format, result["archiveFormat"])
+        assert (result.get("fileName") or "").endswith(ext), result.get("fileName")
+        raw = base64.b64decode(result["archiveBase64"] or result["zipBase64"])
+        trees = _trees_from_download(raw)
+        assert len(trees) == 1, output_format
+        _assert_one_to_one_tree(trees[0])
+
+
+def test_api_directory_generate_tar_and_tar_gz():
+    client = TestClient(app)
+    files = [
+        ("files", (path, data, "application/octet-stream")) for path, data in NESTED
+    ]
+    imported = client.post("/api/packages/import", files=files)
+    assert imported.status_code == 200, imported.text
+    pid = imported.json()["id"]
+    for output_format, ext in (("tar", ".tar"), ("tar.gz", ".tar.gz")):
+        gen = client.post(
+            f"/api/packages/{pid}/generate",
+            json={
+                "recordCount": 1,
+                "seed": 21,
+                "ciMode": True,
+                "recordHistory": False,
+                "outputFormat": output_format,
+            },
+        )
+        assert gen.status_code == 200, gen.text
+        body = gen.json()
+        assert body["written"] == 1
+        assert body["archiveFormat"] == output_format, body
+        assert (body.get("fileName") or "").endswith(ext), body.get("fileName")
+        raw = base64.b64decode(body["archiveBase64"] or body["zipBase64"])
+        trees = _trees_from_download(raw)
+        assert len(trees) == 1
+        _assert_one_to_one_tree(trees[0])
+
+
 def test_generate_directory_n2_variant_root_only():
     pkg = package_svc.import_uploaded_files(list(NESTED))
     result = package_svc.generate_package_variants(
@@ -198,5 +254,8 @@ def test_ui_empty_create_has_folder_import_and_directory_generate():
     assert "webkitdirectory" in lib
     assert "Entire uploaded directory" in text
     assert "runPackageGenerate" in text
+    assert 'value="itself"' in text
+    assert 'value="tar"' in text
+    assert 'value="tar.gz"' in text
     assert 'value="one-file"' in text
     assert 'value="per-file"' in text

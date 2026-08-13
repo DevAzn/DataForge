@@ -428,9 +428,8 @@ def test_nested_pack_format_override():
     )
     variants = _decode_bundle(result)
     assert variants
-    _, vbytes = variants[0]
-    with tarfile.open(fileobj=io.BytesIO(vbytes), mode="r:gz") as tar:
-        names = [m.name for m in tar.getmembers() if m.isfile()]
+    # N=1 tar.gz is the variant itself; nested folder re-packs to .tar
+    names = [n.replace("\\", "/") for n, _ in variants]
     assert any(n.endswith(".tar") for n in names), names
 
 

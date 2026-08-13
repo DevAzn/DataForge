@@ -8199,8 +8199,9 @@ function tip(msg) {
                 {{ packageWorking ? 'Working…' : 'Generate' }}
               </button>
               <p class="muted tiny">
-                N=1 keeps uploaded relative paths. N&gt;1 adds one variant-root folder so replicas
-                do not collide. Multi-file trees download as <strong>tar.gz</strong>. Field mode
+                N=1 keeps uploaded relative paths. Itself is a 1:1 tree (multi-file → tar.gz).
+                .tar / .tar.gz download as that archive with the same paths. N&gt;1 adds one
+                variant-root folder so replicas do not collide. Field mode
                 <strong>same</strong> keeps values immutable across records.
               </p>
             </template>

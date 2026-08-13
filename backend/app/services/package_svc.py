@@ -1168,8 +1168,8 @@ def generate_package_variants(
             "outputFormat": output_format or "itself",
         }
 
-    # Single bare file: return as-is (no wrapper archive)
-    if len(variant_files) == 1 and v_outer == "file":
+    # Single replica as itself/file/tar/tar.gz: return that archive (no zip wrap)
+    if len(variant_files) == 1 and v_outer in ("file", "tar", "tar.gz"):
         vname, vbytes = variant_files[0]
         b64 = base64.b64encode(vbytes).decode("ascii")
         return {
@@ -1179,7 +1179,7 @@ def generate_package_variants(
             "sampleNames": [vname],
             "zipBase64": b64,
             "archiveBase64": b64,
-            "archiveFormat": "file",
+            "archiveFormat": "file" if v_outer == "file" else v_outer,
             "fileName": vname,
             "themeHits": theme_hits_total,
             "variantFormat": v_outer,
