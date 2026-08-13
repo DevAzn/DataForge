@@ -1617,14 +1617,11 @@ async def packages_import(
             raise HTTPException(400, "Upload too large")
         loaded.append((f.filename or "upload.bin", raw))
     try:
-        if len(loaded) == 1:
-            result = package_svc.import_uploaded_archive(
-                loaded[0][0], loaded[0][1], nested_archive_mode=mode
-            )
-        else:
-            result = package_svc.import_uploaded_files(
-                loaded, nested_archive_mode=mode
-            )
+        # Single nested file from a folder picker must keep its relative path;
+        # import_uploaded_files still routes a lone archive to archive import.
+        result = package_svc.import_uploaded_files(
+            loaded, nested_archive_mode=mode
+        )
     except Exception as e:
         raise HTTPException(400, f"Package import failed: {e}") from e
     return result

@@ -26,11 +26,14 @@ import {
 } from './schemaTree.js'
 import { askConfirm } from './dialogController.js'
 import {
+  CHROME_ACTION_GROUPS,
   TEAM_EXPORT_FORMATS,
+  chromeButtonClass,
   createDebounced,
   mergeBootstrapPayload,
   normalizeExportFormat,
   removeById,
+  requireControlName,
   sampleTableFromPreview,
   shouldShowHeaderGenerate,
   sideNavDensityFromWidth,
@@ -4860,6 +4863,12 @@ function tip(msg) {
           class="layout-btn"
           :class="{ on: !layout.sideCollapsed }"
           :aria-pressed="!layout.sideCollapsed"
+          :aria-label="
+            requireControlName({
+              visibleText: 'List',
+              ariaLabel: layout.sideCollapsed ? 'Show list panel' : 'Hide list panel'
+            })
+          "
           :title="
             tip(
               layout.sideCollapsed
@@ -4880,6 +4889,12 @@ function tip(msg) {
           :class="{ on: showRightPanel }"
           :disabled="!workspaceSupportsPreview"
           :aria-pressed="showRightPanel"
+          :aria-label="
+            requireControlName({
+              visibleText: 'Tools',
+              ariaLabel: showRightPanel ? 'Hide tools panel' : 'Show tools panel'
+            })
+          "
           :title="
             tip(
               !workspaceSupportsPreview
@@ -4899,6 +4914,9 @@ function tip(msg) {
         <button
           type="button"
           class="layout-btn layout-btn-reset"
+          :aria-label="
+            requireControlName({ visibleText: 'Reset', ariaLabel: 'Reset panel sizes' })
+          "
           :title="tip('Reset list/tools panel sizes to defaults for this workspace')"
           @click="resetLayoutToWorkspace"
         >
@@ -4916,12 +4934,18 @@ function tip(msg) {
         <button
           v-if="workspaceMode === 'schema'"
           type="button"
-          class="btn btn-ghost"
-          :class="{ on: schemaPreviewOpen }"
+          :class="[chromeButtonClass('ghost'), { on: schemaPreviewOpen }]"
           :aria-pressed="schemaPreviewOpen"
+          :aria-label="
+            requireControlName({
+              visibleText: 'Preview',
+              ariaLabel: 'Schema preview window'
+            })
+          "
           :title="tip('Open live schema preview in a separate window (can drag outside this browser window)')"
           @click="toggleSchemaPreview"
         >
+          <span class="btn-ico" aria-hidden="true">⧉</span>
           {{
             schemaPreviewOpen
               ? schemaPreviewDocked
@@ -4931,28 +4955,32 @@ function tip(msg) {
           }}
         </button>
         <button
-          class="btn btn-ghost"
+          :class="chromeButtonClass('ghost')"
+          :aria-label="requireControlName({ visibleText: 'Settings', ariaLabel: 'Settings' })"
           :title="tip('App preferences: theme, defaults, file naming, and UI help tips')"
           @click="openSettings"
         >
+          <span class="btn-ico" aria-hidden="true">⚙</span>
           Settings
         </button>
         <button
           v-if="showHeaderGenerate && workspaceMode === 'schema'"
-          class="btn btn-primary"
+          :class="chromeButtonClass('generate')"
           :disabled="generating || !active"
           :title="tip('Generate test records from the current schema and download/export')"
           @click="generate"
         >
+          <span class="btn-ico" aria-hidden="true">▶</span>
           {{ generateButtonLabel }}
         </button>
         <button
           v-else-if="showHeaderPackageGenerate"
-          class="btn btn-primary"
+          :class="chromeButtonClass('generate')"
           :disabled="packageWorking || !activePackage"
           :title="tip('Generate package variants from the selected package layout')"
           @click="runPackageGenerate"
         >
+          <span class="btn-ico" aria-hidden="true">▶</span>
           {{ packageWorking ? 'Working…' : 'Generate' }}
         </button>
       </div>
@@ -5371,12 +5399,13 @@ function tip(msg) {
 
         <div v-if="sidebar === 'schemas' || sidebar === 'packages'" class="side-body">
           <button
-            class="btn btn-primary full"
+            :class="chromeButtonClass('create', 'full')"
             type="button"
             :title="tip('Create a blank schema in the Library')"
             @click="newSchema"
           >
-            + New schema
+            <span class="btn-ico" aria-hidden="true">+</span>
+            New schema
           </button>
           <label
             class="drop"
@@ -5429,10 +5458,10 @@ function tip(msg) {
               </label>
               <label
                 class="drop drop-split"
-                :title="tip('Import a whole folder as a package; nested paths kept 1:1; non-schema files become structural placeholders')"
+                :title="tip('Import a whole folder as a 1:1 directory schema; nested paths kept; non-schema files become structural placeholders')"
                 :class="{ disabled: packageWorking }"
               >
-                Folder
+                Folder → directory
                 <input
                   type="file"
                   multiple
@@ -5440,6 +5469,7 @@ function tip(msg) {
                   directory
                   hidden
                   :disabled="packageWorking"
+                  aria-label="Import folder as directory schema"
                   @change="onPackageImport"
                 />
               </label>
@@ -5898,23 +5928,43 @@ function tip(msg) {
         >
           <p><strong>No schema open</strong></p>
           <p class="muted tiny">
-            Create a blank schema or import a sample file to start editing fields and Generate.
+            Create a blank schema, import a sample file, or import a folder as a 1:1 directory
+            schema and Generate the whole tree.
           </p>
           <div class="empty-cta-row">
             <button
               type="button"
-              class="btn btn-primary pack-cta"
+              :class="chromeButtonClass('create', 'pack-cta')"
               :title="tip('Create a blank schema in the Library')"
               @click="newSchema"
             >
-              + New schema
+              <span class="btn-ico" aria-hidden="true">+</span>
+              New schema
             </button>
             <label
-              class="btn btn-ghost pack-cta"
+              :class="chromeButtonClass('ghost', 'pack-cta')"
               :title="tip('Import one XML, CSV, or TXT sample file and infer a field schema')"
             >
+              <span class="btn-ico" aria-hidden="true">⬇</span>
               Import sample file → schema
               <input type="file" accept=".csv,.xml,.txt" hidden @change="onImport" />
+            </label>
+            <label
+              :class="[chromeButtonClass('ghost', 'pack-cta'), { disabled: packageWorking }]"
+              :title="tip('Import a whole folder as a 1:1 directory schema. Generate then produces one replica of that tree per record.')"
+            >
+              <span class="btn-ico" aria-hidden="true">▣</span>
+              Import folder → directory schema
+              <input
+                type="file"
+                multiple
+                webkitdirectory
+                directory
+                hidden
+                :disabled="packageWorking"
+                aria-label="Import folder as directory schema"
+                @change="onPackageImport"
+              />
             </label>
           </div>
         </div>
@@ -5934,18 +5984,36 @@ function tip(msg) {
           <div class="empty-cta-row">
             <button
               type="button"
-              class="btn btn-primary pack-cta"
+              :class="chromeButtonClass('create', 'pack-cta')"
               :title="tip('Save this draft schema to the local library')"
               @click="saveSchema"
             >
               Save schema
             </button>
             <label
-              class="btn btn-ghost pack-cta"
+              :class="chromeButtonClass('ghost', 'pack-cta')"
               :title="tip('Import one XML, CSV, or TXT sample file and infer a field schema')"
             >
+              <span class="btn-ico" aria-hidden="true">⬇</span>
               Import sample file → schema
               <input type="file" accept=".csv,.xml,.txt" hidden @change="onImport" />
+            </label>
+            <label
+              :class="[chromeButtonClass('ghost', 'pack-cta'), { disabled: packageWorking }]"
+              :title="tip('Import a whole folder as a 1:1 directory schema')"
+            >
+              <span class="btn-ico" aria-hidden="true">▣</span>
+              Import folder → directory schema
+              <input
+                type="file"
+                multiple
+                webkitdirectory
+                directory
+                hidden
+                :disabled="packageWorking"
+                aria-label="Import folder as directory schema"
+                @change="onPackageImport"
+              />
             </label>
           </div>
         </div>
@@ -5980,33 +6048,49 @@ function tip(msg) {
               />
             </label>
             <div class="schema-head-grow" />
-            <button
+            <div
               v-if="active?.id && schemas.some((s) => s.id === active.id)"
-              type="button"
-              class="btn btn-ghost"
-              :title="tip('Create a library copy of this schema design with a new id')"
-              @click="cloneSchema"
+              class="schema-btn-group"
+              role="group"
+              :aria-label="CHROME_ACTION_GROUPS.identity"
             >
-              Duplicate
-            </button>
-            <button
+              <span class="schema-group-label muted tiny">{{ CHROME_ACTION_GROUPS.identity }}</span>
+              <button
+                type="button"
+                :class="chromeButtonClass('ghost')"
+                :title="tip('Create a library copy of this schema design with a new id')"
+                @click="cloneSchema"
+              >
+                <span class="btn-ico" aria-hidden="true">⧉</span>
+                Duplicate
+              </button>
+            </div>
+            <div
               v-if="active?.id && schemas.some((s) => s.id === active.id)"
-              type="button"
-              class="btn btn-ghost danger schema-delete-btn"
-              :title="tip('Remove this schema from the library (not package members)')"
-              @click="deleteSchema"
+              class="schema-btn-group action-group-danger"
+              role="group"
+              :aria-label="CHROME_ACTION_GROUPS.danger"
             >
-              Delete schema
-            </button>
+              <span class="schema-group-label muted tiny">{{ CHROME_ACTION_GROUPS.danger }}</span>
+              <button
+                type="button"
+                :class="chromeButtonClass('danger', 'schema-delete-btn')"
+                :title="tip('Remove this schema from the library (not package members)')"
+                @click="deleteSchema"
+              >
+                <span class="btn-ico" aria-hidden="true">✕</span>
+                Delete schema
+              </button>
+            </div>
           </div>
 
           <!-- Row 2: grouped actions -->
           <div v-if="active" class="schema-head-row schema-head-tools">
-            <div class="schema-btn-group" role="group" aria-label="File">
-              <span class="schema-group-label muted tiny">File</span>
+            <div class="schema-btn-group" role="group" :aria-label="CHROME_ACTION_GROUPS.file">
+              <span class="schema-group-label muted tiny">{{ CHROME_ACTION_GROUPS.file }}</span>
               <button
                 type="button"
-                class="btn btn-ghost"
+                :class="chromeButtonClass('ghost')"
                 :title="tip('Save this schema design to the local SQLite library')"
                 @click="saveSchema"
               >
@@ -6014,7 +6098,7 @@ function tip(msg) {
               </button>
               <button
                 type="button"
-                class="btn btn-primary schema-map-btn"
+                :class="chromeButtonClass('map', 'schema-map-btn')"
                 :title="
                   tip(
                     'Save design and map all non-theme sample values into Field values pools by tag/column (max 1000 per tag). Use Field settings for per-field control on Save.'
@@ -6026,8 +6110,8 @@ function tip(msg) {
               </button>
             </div>
 
-            <div class="schema-btn-group" role="group" aria-label="Structure">
-              <span class="schema-group-label muted tiny">Structure</span>
+            <div class="schema-btn-group" role="group" :aria-label="CHROME_ACTION_GROUPS.structure">
+              <span class="schema-group-label muted tiny">{{ CHROME_ACTION_GROUPS.structure }}</span>
               <button
                 type="button"
                 class="btn btn-ghost"
@@ -6064,8 +6148,8 @@ function tip(msg) {
               </button>
             </div>
 
-            <div class="schema-btn-group" role="group" aria-label="Edit">
-              <span class="schema-group-label muted tiny">Edit</span>
+            <div class="schema-btn-group" role="group" :aria-label="CHROME_ACTION_GROUPS.edit">
+              <span class="schema-group-label muted tiny">{{ CHROME_ACTION_GROUPS.edit }}</span>
               <button
                 type="button"
                 class="btn btn-ghost"
@@ -6996,20 +7080,35 @@ function tip(msg) {
 
       <!-- Package workspace (dynamic): explorer + center editor -->
       <section v-else-if="workspaceMode === 'package'" class="center panel workspace-panel">
-        <div class="center-head">
-          <strong v-if="activePackage">{{ activePackage.name }}</strong>
-          <span v-else class="muted">Select a package</span>
-          <span v-if="activePackage" class="muted tiny">
-            {{ activePackage.outerFormat }} · nested
-            {{ (activePackage.nestedArchives || []).length }}
-          </span>
-          <button
-            v-if="activePackage"
-            class="btn btn-ghost danger"
-            @click="removePackage(activePackage.id)"
-          >
-            Delete package
-          </button>
+        <div class="center-head schema-head pkg-center-head">
+          <div class="schema-head-row schema-head-identity">
+            <div class="schema-title-block">
+              <span class="schema-head-kicker muted tiny">{{ CHROME_ACTION_GROUPS.identity }}</span>
+              <strong v-if="activePackage">{{ activePackage.name }}</strong>
+              <span v-else class="muted schema-title-placeholder">Select a package</span>
+            </div>
+            <span v-if="activePackage" class="muted tiny">
+              {{ activePackage.outerFormat }} · nested
+              {{ (activePackage.nestedArchives || []).length }}
+            </span>
+            <div class="schema-head-grow" />
+            <div
+              v-if="activePackage"
+              class="schema-btn-group action-group-danger"
+              role="group"
+              :aria-label="CHROME_ACTION_GROUPS.danger"
+            >
+              <span class="schema-group-label muted tiny">{{ CHROME_ACTION_GROUPS.danger }}</span>
+              <button
+                type="button"
+                :class="chromeButtonClass('danger')"
+                @click="removePackage(activePackage.id)"
+              >
+                <span class="btn-ico" aria-hidden="true">✕</span>
+                Delete package
+              </button>
+            </div>
+          </div>
         </div>
         <div v-if="!activePackage" class="empty-workspace empty-cta-panel">
           <p><strong>No package selected</strong></p>
@@ -7020,10 +7119,10 @@ function tip(msg) {
           </p>
           <div class="empty-cta-row">
             <label
-              class="btn btn-primary pack-cta"
-              :class="{ disabled: packageWorking }"
+              :class="[chromeButtonClass('create', 'pack-cta'), { disabled: packageWorking }]"
               :title="tip('Import .tar / .tar.gz / .zip or multi-select schema + companion files')"
             >
+              <span class="btn-ico" aria-hidden="true">⬇</span>
               Import package
               <input
                 type="file"
@@ -7031,6 +7130,23 @@ function tip(msg) {
                 accept=".zip,.tar,.tgz,.gz,.xml,.csv,.txt,.json,.yaml,.yml,.xlsx"
                 hidden
                 :disabled="packageWorking"
+                @change="onPackageImport"
+              />
+            </label>
+            <label
+              :class="[chromeButtonClass('ghost', 'pack-cta'), { disabled: packageWorking }]"
+              :title="tip('Import a whole folder as a 1:1 directory schema. Generate produces one replica of that tree per record.')"
+            >
+              <span class="btn-ico" aria-hidden="true">▣</span>
+              Import folder → directory schema
+              <input
+                type="file"
+                multiple
+                webkitdirectory
+                directory
+                hidden
+                :disabled="packageWorking"
+                aria-label="Import folder as directory schema"
                 @change="onPackageImport"
               />
             </label>
@@ -7120,33 +7236,47 @@ function tip(msg) {
                   />
                   Verified
                 </label>
-                <button
-                  class="btn btn-ghost"
-                  type="button"
-                  :disabled="packageWorking"
-                  @click="savePackageMemberContent"
+                <div
+                  class="schema-btn-group"
+                  role="group"
+                  :aria-label="CHROME_ACTION_GROUPS.file"
                 >
-                  Save (content → schema)
-                </button>
-                <button
-                  class="btn btn-ghost"
-                  type="button"
-                  :disabled="packageWorking"
-                  @click="savePackageMemberSchemaInPlace"
+                  <span class="schema-group-label muted tiny">{{ CHROME_ACTION_GROUPS.file }}</span>
+                  <button
+                    :class="chromeButtonClass('ghost')"
+                    type="button"
+                    :disabled="packageWorking"
+                    @click="savePackageMemberContent"
+                  >
+                    Save (content → schema)
+                  </button>
+                  <button
+                    :class="chromeButtonClass('ghost')"
+                    type="button"
+                    :disabled="packageWorking"
+                    @click="savePackageMemberSchemaInPlace"
+                  >
+                    Save schema
+                  </button>
+                </div>
+                <div
+                  class="schema-btn-group"
+                  role="group"
+                  :aria-label="CHROME_ACTION_GROUPS.structure"
                 >
-                  Save schema
-                </button>
-                <button class="btn btn-ghost" type="button" @click="editPackageMemberSchema">
-                  Edit schema tags
-                </button>
-                <button
-                  class="btn btn-ghost"
-                  type="button"
-                  :disabled="packageWorking"
-                  @click="savePackageMemberSchemaAs"
-                >
-                  Save schema as…
-                </button>
+                  <span class="schema-group-label muted tiny">{{ CHROME_ACTION_GROUPS.structure }}</span>
+                  <button :class="chromeButtonClass('ghost')" type="button" @click="editPackageMemberSchema">
+                    Edit schema tags
+                  </button>
+                  <button
+                    :class="chromeButtonClass('ghost')"
+                    type="button"
+                    :disabled="packageWorking"
+                    @click="savePackageMemberSchemaAs"
+                  >
+                    Save schema as…
+                  </button>
+                </div>
               </div>
               <label class="muted tiny" style="display: block; margin: 0 0.5rem">
                 Content (design sample — xml / csv / txt / json / yaml)
@@ -7565,7 +7695,8 @@ function tip(msg) {
           <span class="muted tiny">Generate</span>
           <button
             type="button"
-            class="btn btn-ghost tiny-btn"
+            :class="chromeButtonClass('ghost', 'tiny-btn')"
+            :aria-label="requireControlName({ visibleText: 'Hide', ariaLabel: 'Hide Generate panel' })"
             :title="tip('Hide the Generate panel')"
             @click="togglePreviewPanel"
           >
@@ -7659,34 +7790,42 @@ function tip(msg) {
           <section class="gen-section gen-section-actions">
             <div class="gen-section-body gen-actions">
               <button
-                class="btn btn-primary full"
+                :class="chromeButtonClass('generate', 'full')"
                 :disabled="generating || previewing || !active"
                 :title="tip('Generate from seed and download immediately')"
                 @click="generate"
               >
+                <span class="btn-ico" aria-hidden="true">▶</span>
                 {{ generateButtonLabel }}
               </button>
-              <button
-                type="button"
-                class="btn btn-ghost full"
-                :disabled="generating || previewing || !active"
-                :title="
-                  tip(
-                    'Generate a small sample (max 20) for the table and source mix — no download, no history harvest'
-                  )
-                "
-                @click="previewSamples"
+              <div
+                class="schema-btn-group gen-actions-secondary"
+                role="group"
+                :aria-label="CHROME_ACTION_GROUPS.generate"
               >
-                {{ previewing ? 'Working…' : 'Preview samples' }}
-              </button>
-              <button
-                v-if="active"
-                class="btn btn-ghost full"
-                :title="tip('Download the schema design you are editing (sample values only — not a seed Generate)')"
-                @click="downloadDesignOutput"
-              >
-                Download design sample
-              </button>
+                <span class="schema-group-label muted tiny">{{ CHROME_ACTION_GROUPS.generate }}</span>
+                <button
+                  type="button"
+                  :class="chromeButtonClass('ghost')"
+                  :disabled="generating || previewing || !active"
+                  :title="
+                    tip(
+                      'Generate a small sample (max 20) for the table and source mix — no download, no history harvest'
+                    )
+                  "
+                  @click="previewSamples"
+                >
+                  {{ previewing ? 'Working…' : 'Preview samples' }}
+                </button>
+                <button
+                  v-if="active"
+                  :class="chromeButtonClass('ghost')"
+                  :title="tip('Download the schema design you are editing (sample values only — not a seed Generate)')"
+                  @click="downloadDesignOutput"
+                >
+                  Download design sample
+                </button>
+              </div>
             </div>
             <div
               v-if="fillSourceMeters.length"
@@ -7931,7 +8070,7 @@ function tip(msg) {
             <button
               type="button"
               class="on"
-              :title="tip('Generate package variants from the open package')"
+              :title="tip('Generate the entire uploaded directory tree (one replica per record)')"
             >
               Generate
             </button>
@@ -7939,10 +8078,15 @@ function tip(msg) {
           <div class="gen">
             <div v-if="!activePackage" class="muted tiny">Select a package first.</div>
             <template v-else>
+              <p class="muted tiny gen-hint">
+                <strong>Entire uploaded directory</strong> — one 1:1 replica of the imported
+                folder tree per record. Schema files are newly generated; other files stay as
+                placeholders at the same relative paths.
+              </p>
               <label
-                :title="tip('How many package variants to generate (each variant is one “record”)')"
+                :title="tip('How many full directory replicas to generate (each record is one tree)')"
               >
-                Records (= package variants)
+                Records (= directory replicas)
                 <input
                   v-model.number="packageCount"
                   type="number"
@@ -8035,27 +8179,28 @@ function tip(msg) {
               </label>
               <label
                 class="muted tiny"
-                :title="tip('How each package variant is packaged: bare files, tar, or tar.gz')"
+                :title="tip('How each directory replica is packaged: 1:1 tree, tar, or tar.gz')"
               >
-                Output format (each package variant)
+                Output format (each directory replica)
                 <select v-model="packageOutputFormat" class="input" aria-label="Package output format">
-                  <option value="itself">Itself (original / bare file)</option>
+                  <option value="itself">1:1 directory tree (same relative paths)</option>
                   <option value="tar">.tar</option>
                   <option value="tar.gz">.tar.gz</option>
                 </select>
               </label>
               <button
-                class="btn btn-primary full"
+                :class="chromeButtonClass('generate', 'full')"
                 :disabled="packageWorking"
                 :aria-busy="packageWorking"
-                :title="tip('Generate package variants and download the bundle')"
+                :title="tip('Generate the entire uploaded directory tree and download it')"
                 @click="runPackageGenerate"
               >
+                <span class="btn-ico" aria-hidden="true">▶</span>
                 {{ packageWorking ? 'Working…' : 'Generate' }}
               </button>
               <p class="muted tiny">
-                Multi-variant download bundle defaults to <strong>tar.gz</strong> (single → ZIP or bare
-                file). Use Output format for each variant’s form. Field mode
+                N=1 keeps uploaded relative paths. N&gt;1 adds one variant-root folder so replicas
+                do not collide. Multi-file trees download as <strong>tar.gz</strong>. Field mode
                 <strong>same</strong> keeps values immutable across records.
               </p>
             </template>
@@ -8391,6 +8536,28 @@ body.dragging-schema-float * {
   text-transform: uppercase;
   padding: 0 0.25rem;
   opacity: 0.85;
+}
+.btn-ico {
+  display: inline-block;
+  font-size: 0.85em;
+  line-height: 1;
+  opacity: 0.92;
+  font-weight: 700;
+}
+.action-group-danger {
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+  background: color-mix(in srgb, var(--danger) 7%, var(--surface-2, transparent));
+}
+.gen-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+.gen-actions-secondary {
+  width: 100%;
+}
+.pkg-center-head {
+  border-bottom: 1px solid var(--border);
 }
 .schema-map-btn {
   font-weight: 600;
@@ -9161,6 +9328,9 @@ body.resizing-cols * {
 }
 .danger {
   color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 50%, var(--border));
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  font-weight: 650;
 }
 .rows {
   flex: 1;

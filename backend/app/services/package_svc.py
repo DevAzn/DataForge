@@ -731,6 +731,19 @@ def estimate_output(package: dict[str, Any], record_count: int) -> dict[str, Any
         ),
     }
 
+def relative_upload_path(name: str) -> str:
+    """Keep folder-picker relative path (webkitdirectory); never drop parent dirs."""
+    return normalize_path(name) or basename(name)
+
+
+def directory_layout_member_paths(members: list[dict[str, Any]]) -> bool:
+    """True when generate must emit a 1:1 tree (nested path or more than one leaf)."""
+    leaves = [m for m in members if m.get("kind") in ("text", "structural")]
+    if len(leaves) != 1:
+        return len(leaves) > 1
+    return "/" in (leaves[0].get("path") or "")
+
+
 def import_uploaded_files(
     files: list[tuple[str, bytes]],
     *,
@@ -738,7 +751,7 @@ def import_uploaded_files(
 ) -> dict[str, Any]:
     """
     Multi-file upload (flat names or relative paths from folder picker)
-    or single archive.
+    or single archive. One nested file from a folder picker stays a directory layout.
     """
     if len(files) == 1:
         name, raw = files[0]
@@ -747,15 +760,14 @@ def import_uploaded_files(
             return import_uploaded_archive(
                 name, raw, nested_archive_mode=nested_archive_mode
             )
-    # Preserve nested relative paths (webkitdirectory / multi-select with paths).
-    entries = [(normalize_path(n) or basename(n), b) for n, b in files]
-    # Common root folder name when all paths share a top segment
-    tops = {(normalize_path(n) or "").split("/")[0] for n, _ in files if normalize_path(n)}
-    pkg_name = (
-        strip_archive_extensions(files[0][0])
-        if len(files) == 1
-        else (next(iter(tops)) if len(tops) == 1 else f"package-{now_iso()[:10]}")
-    )
+    entries = [(relative_upload_path(n), b) for n, b in files]
+    tops = {e.split("/")[0] for e, _ in entries if e}
+    if len(files) == 1 and "/" not in entries[0][0]:
+        pkg_name = strip_archive_extensions(files[0][0])
+    elif len(tops) == 1:
+        pkg_name = next(iter(tops))
+    else:
+        pkg_name = f"package-{now_iso()[:10]}"
     return import_package_from_bytes(
         package_name=pkg_name,
         file_entries=entries,
@@ -833,26 +845,19 @@ def resolve_variant_format(
     return outer, package_ext
 
 
-def emit_variant_bytes(
-    *,
-    outer_format: str,
-    outer_extension: str | None,
+def repack_nested_archives(
     text_entries: list[tuple[str, str | bytes]],
     nested: list[dict[str, Any]],
-    package_name: str,
-    index: int,
-) -> tuple[str, bytes]:
-    """Return (file_name, archive_or_file_bytes). Preserves nested pack formats."""
+) -> list[tuple[str, bytes | str]]:
+    """Re-pack expanded nested archive folders; leave other paths 1:1."""
     files: dict[str, bytes | str] = {p: c for p, c in text_entries}
     nested_sorted = sorted(
         nested, key=lambda n: -len((n.get("folderPath") or "").split("/"))
     )
-
     for nest in nested_sorted:
         folder = nest.get("folderPath") or ""
         pack_enabled = nest.get("packEnabled", True) is not False
         if not pack_enabled:
-            # Leave children as loose paths under the folder (no archive file).
             continue
         children: list[tuple[str, bytes | str]] = []
         for p, content in list(files.items()):
@@ -862,7 +867,6 @@ def emit_variant_bytes(
             if _is_under(p, folder) and p != folder:
                 del files[p]
         files.pop(folder, None)
-        # packFormat overrides original format; default = original archive type
         nest_fmt = (
             nest.get("packFormat") or nest.get("format") or "zip"
         ).lower().strip()
@@ -872,11 +876,44 @@ def emit_variant_bytes(
             nest_fmt = "zip"
         nested_bytes = _write_archive_bytes(nest_fmt, children)
         orig = nest.get("originalArchivePath") or f"{folder}{archive_ext_for_format(nest_fmt)}"
-        # Keep emit path extension aligned with pack format
         orig = with_archive_extension(orig, nest_fmt)
         files[orig] = nested_bytes
+    return list(files.items())
 
-    flat = list(files.items())
+
+def pack_directory_tree(
+    entries: list[tuple[str, bytes | str]],
+    *,
+    package_name: str,
+    index: int,
+    variant_root: str | None = None,
+) -> tuple[str, bytes]:
+    """
+    Pack one directory replica for download at 1:1 relative paths.
+    variant_root is a single prefix used only when N>1 variants would collide.
+    Multi-file trees use tar.gz; a single file uses zip.
+    """
+    named: list[tuple[str, bytes | str]] = []
+    for path, content in entries:
+        named.append((f"{variant_root}/{path}" if variant_root else path, content))
+    pack_fmt = "tar.gz" if len(named) > 1 else "zip"
+    ext = ".tar.gz" if pack_fmt == "tar.gz" else ".zip"
+    safe = re.sub(r'[<>:"/\\|?*]', "_", package_name) or "package"
+    return f"{safe}_{index:04d}{ext}", _write_archive_bytes(pack_fmt, named)
+
+
+def emit_variant_bytes(
+    *,
+    outer_format: str,
+    outer_extension: str | None,
+    text_entries: list[tuple[str, str | bytes]],
+    nested: list[dict[str, Any]],
+    package_name: str,
+    index: int,
+    variant_root: str | None = None,
+) -> tuple[str, bytes]:
+    """Return (file_name, archive_or_file_bytes). Preserves nested pack formats."""
+    flat = repack_nested_archives(text_entries, nested)
     safe = re.sub(r'[<>:"/\\|?*]', "_", package_name) or "package"
     pad = f"{index:04d}"
 
@@ -895,8 +932,12 @@ def emit_variant_bytes(
         outer_format = "folder"
 
     if outer_format == "folder":
-        entries = [(f"{safe}_{pad}/{p}", c) for p, c in flat]
-        return f"{safe}_{pad}.zip", _write_archive_bytes("zip", entries)
+        return pack_directory_tree(
+            flat,
+            package_name=package_name,
+            index=index,
+            variant_root=variant_root,
+        )
 
     ext = outer_extension or (
         ".tar.gz" if outer_format == "tar.gz" else ".tar" if outer_format == "tar" else ".zip"
@@ -961,7 +1002,7 @@ def generate_package_variants(
     hist_lookup = history_lookup or (lambda _k: [])
     cust_lookup = custom_lookup or (lambda _k: [])
 
-    # Bare single-file only when exactly one schema member and no structural companions
+    # Bare single-file only for one flat loose file — nested folder paths stay a tree
     leaf_count = len(text_members) + len(structural_members)
     v_outer, v_ext = resolve_variant_format(
         hydrated.get("outerFormat") or "folder",
@@ -969,7 +1010,10 @@ def generate_package_variants(
         output_format,
         text_member_count=leaf_count,
     )
-    if v_outer == "file" and leaf_count != 1:
+    if v_outer == "file" and (
+        leaf_count != 1
+        or directory_layout_member_paths(text_members + structural_members)
+    ):
         v_outer, v_ext = "folder", None
 
     # Prepare schemas with modes
@@ -997,6 +1041,7 @@ def generate_package_variants(
 
     # Generate all variants into memory as named files
     variant_files: list[tuple[str, bytes]] = []
+    directory_trees: list[list[tuple[str, str | bytes]]] = []
     seed_used = seed if seed is not None else 0
 
     # Shared unique sets across variants via one generator context per member
@@ -1064,6 +1109,13 @@ def generate_package_variants(
                 )
             )
 
+        if v_outer == "folder":
+            directory_trees.append(
+                repack_nested_archives(
+                    file_entries, hydrated.get("nestedArchives") or []
+                )
+            )
+            continue
         vname, vbytes = emit_variant_bytes(
             outer_format=v_outer,
             outer_extension=v_ext,
@@ -1087,6 +1139,34 @@ def generate_package_variants(
     import base64
 
     safe = re.sub(r"[^a-zA-Z0-9._-]+", "_", hydrated.get("name") or "package")
+
+    if v_outer == "folder":
+        # One download archive of the uploaded tree. Prefix only when N>1.
+        pkg_label = hydrated.get("name") or "package"
+        root_safe = re.sub(r'[<>:"/\\|?*]', "_", pkg_label) or "package"
+        combined: list[tuple[str, bytes | str]] = []
+        for i, entries in enumerate(directory_trees):
+            prefix = f"{root_safe}_{i + 1:04d}" if count > 1 else None
+            for path, content in entries:
+                combined.append((f"{prefix}/{path}" if prefix else path, content))
+        pack_fmt = "tar.gz" if len(combined) > 1 else "zip"
+        raw = _write_archive_bytes(pack_fmt, combined)
+        ext = ".tar.gz" if pack_fmt == "tar.gz" else ".zip"
+        dl_name = f"{safe}{ext}" if count == 1 else f"{safe}-variants{ext}"
+        b64 = base64.b64encode(raw).decode("ascii")
+        return {
+            "ok": True,
+            "written": count,
+            "seed": seed_used,
+            "sampleNames": [p for p, _ in combined[:8]],
+            "zipBase64": b64,
+            "archiveBase64": b64,
+            "archiveFormat": pack_fmt,
+            "fileName": dl_name,
+            "themeHits": theme_hits_total,
+            "variantFormat": v_outer,
+            "outputFormat": output_format or "itself",
+        }
 
     # Single bare file: return as-is (no wrapper archive)
     if len(variant_files) == 1 and v_outer == "file":

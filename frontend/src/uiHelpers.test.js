@@ -5,11 +5,15 @@
 import { strict as assert } from 'node:assert'
 import { describe, it } from 'node:test'
 import {
+  CHROME_ACTION_GROUPS,
   TEAM_EXPORT_FORMATS,
+  chromeActionWeight,
+  chromeButtonClass,
   createDebounced,
   flattenSampleRecord,
   normalizeExportFormat,
   removeById,
+  requireControlName,
   sampleTableFromPreview,
   shouldShowHeaderGenerate,
   sideNavDensityFromWidth,
@@ -192,5 +196,30 @@ describe('shouldShowHeaderGenerate chrome', () => {
   it('schema tools open hides header Generate', () => {
     assert.equal(shouldShowHeaderGenerate('schema', true), false)
     assert.equal(shouldShowHeaderGenerate('schema', false), true)
+  })
+})
+
+describe('chromeActionWeight / chromeButtonClass (shipped)', () => {
+  it('Generate is the only generate primary; map is not primary', () => {
+    assert.equal(chromeActionWeight('generate'), 'primary')
+    assert.equal(chromeActionWeight('map'), 'secondary')
+    assert.equal(chromeActionWeight('danger'), 'danger')
+    assert.equal(chromeActionWeight('preview'), 'ghost')
+    assert.match(chromeButtonClass('generate'), /btn-primary/)
+    assert.equal(chromeButtonClass('map').includes('btn-primary'), false)
+    assert.match(chromeButtonClass('map'), /btn-outline/)
+    assert.match(chromeButtonClass('danger'), /danger/)
+    assert.equal(chromeButtonClass('generate', 'full'), 'btn btn-primary full')
+  })
+})
+
+describe('requireControlName (shipped)', () => {
+  it('prefers ariaLabel then visible text', () => {
+    assert.equal(
+      requireControlName({ visibleText: 'List', ariaLabel: 'Hide list panel' }),
+      'Hide list panel'
+    )
+    assert.equal(requireControlName({ visibleText: 'Save', ariaLabel: '' }), 'Save')
+    assert.equal(requireControlName({ visibleText: '', ariaLabel: '' }), '')
   })
 })

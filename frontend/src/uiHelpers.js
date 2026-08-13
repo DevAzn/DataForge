@@ -117,6 +117,65 @@ export function shouldShowHeaderGenerate(workspaceMode, toolsRailVisible) {
   return false
 }
 
+/** Labeled chrome groups — App.vue aria-labels must use these strings. */
+export const CHROME_ACTION_GROUPS = {
+  identity: 'Identity',
+  file: 'File',
+  structure: 'Structure',
+  edit: 'Edit',
+  generate: 'Generate',
+  danger: 'Danger'
+}
+
+/**
+ * Visual weight for a chrome action role.
+ * Generate is the only primary *generate* role; create may be primary on empty/Library.
+ * @param {string} role
+ * @returns {'primary'|'secondary'|'danger'|'ghost'}
+ */
+export function chromeActionWeight(role) {
+  switch (String(role || '').toLowerCase()) {
+    case 'generate':
+    case 'create':
+      return 'primary'
+    case 'danger':
+    case 'delete':
+      return 'danger'
+    case 'map':
+    case 'save':
+    case 'secondary':
+      return 'secondary'
+    default:
+      return 'ghost'
+  }
+}
+
+/**
+ * Shipped button class string for a chrome role (App.vue binds this).
+ * @param {string} role
+ * @param {string} [extra]
+ */
+export function chromeButtonClass(role, extra = '') {
+  const w = chromeActionWeight(role)
+  let cls = 'btn btn-ghost'
+  if (w === 'primary') cls = 'btn btn-primary'
+  else if (w === 'danger') cls = 'btn btn-ghost danger'
+  else if (w === 'secondary') cls = 'btn btn-outline'
+  const more = String(extra || '').trim()
+  return more ? `${cls} ${more}` : cls
+}
+
+/**
+ * Accessible name for compact / icon-leading chrome. Prefer explicit ariaLabel.
+ * Icon-only controls must pass ariaLabel or visibleText.
+ * @param {{ visibleText?: string, ariaLabel?: string }} [opts]
+ */
+export function requireControlName(opts = {}) {
+  const aria = String(opts.ariaLabel ?? '').trim()
+  if (aria) return aria
+  return String(opts.visibleText ?? '').trim()
+}
+
 /**
  * Merge /api/bootstrap JSON into a plain target bag of list/status refs-like fields.
  * Pure helper used by App.applyBootstrapPayload path (and tests).
