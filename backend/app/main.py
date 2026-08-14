@@ -31,7 +31,7 @@ from app.services import (
 )
 from app.services import file_naming
 
-APP_VERSION = "0.6.2"
+APP_VERSION = "0.6.3"
 APP_NAME = "DataForge"
 
 
